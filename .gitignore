@@ -1,0 +1,8 @@
+plans/
+docs/
+
+# Local phase output
+.phase0/
+data/
+generated/
+logs/
