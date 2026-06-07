@@ -57,12 +57,52 @@ func (a *App) GetSettings() (Settings, error) {
 	return a.store.GetSettings()
 }
 
+func (a *App) GetToolStatus() (ToolStatus, error) {
+	if err := a.ensureStore(); err != nil {
+		return ToolStatus{}, err
+	}
+
+	return a.store.ToolStatus(), nil
+}
+
 func (a *App) SaveSettings(input SaveSettingsInput) (Settings, error) {
 	if err := a.ensureStore(); err != nil {
 		return Settings{}, err
 	}
 
 	return a.store.SaveSettings(input)
+}
+
+func (a *App) SaveAPIKey(input SaveAPIKeyInput) (ToolStatus, error) {
+	if err := a.ensureStore(); err != nil {
+		return ToolStatus{}, err
+	}
+
+	return a.store.SaveAPIKey(input)
+}
+
+func (a *App) TestLLM() (LLMTestResult, error) {
+	if err := a.ensureStore(); err != nil {
+		return LLMTestResult{}, err
+	}
+
+	return a.store.TestLLM(a.ctx, nil)
+}
+
+func (a *App) InstallTectonic() (InstallTectonicResult, error) {
+	if err := a.ensureStore(); err != nil {
+		return InstallTectonicResult{}, err
+	}
+
+	return a.store.InstallTectonic(a.ctx)
+}
+
+func (a *App) RenderSamplePDF() (RenderPDFResult, error) {
+	if err := a.ensureStore(); err != nil {
+		return RenderPDFResult{}, err
+	}
+
+	return a.store.RenderSamplePDF(a.ctx)
 }
 
 func (a *App) GetRecentEvents() ([]AppEvent, error) {

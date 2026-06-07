@@ -16,6 +16,7 @@ import (
 
 const (
 	defaultProvider = "openai"
+	defaultModel    = "gpt-5-mini"
 	settingProvider = "llm_provider"
 	settingModel    = "llm_model"
 )
@@ -123,7 +124,7 @@ func (s *Store) Health(version string) Health {
 		DBPath:        s.dbPath,
 		LogPath:       s.logPath,
 		GeneratedPath: s.generatedPath,
-		PDFRenderer:   "not_configured",
+		PDFRenderer:   s.TectonicStatus().Status,
 	}
 }
 
@@ -141,7 +142,7 @@ func (s *Store) GetSettings() (Settings, error) {
 		settings.Provider = provider
 	}
 	settings.Model = strings.TrimSpace(values[settingModel])
-	settings.APIKeyConfigured = false
+	settings.APIKeyConfigured = s.APIKeyConfigured()
 	return settings, nil
 }
 
@@ -175,7 +176,7 @@ func (s *Store) SaveSettings(input SaveSettingsInput) (Settings, error) {
 	return Settings{
 		Provider:         provider,
 		Model:            model,
-		APIKeyConfigured: false,
+		APIKeyConfigured: s.APIKeyConfigured(),
 	}, nil
 }
 

@@ -14,6 +14,26 @@ export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
 
+export function GetToolStatus() {
+  return window['go']['main']['App']['GetToolStatus']();
+}
+
+export function InstallTectonic() {
+  return window['go']['main']['App']['InstallTectonic']();
+}
+
+export function RenderSamplePDF() {
+  return window['go']['main']['App']['RenderSamplePDF']();
+}
+
+export function SaveAPIKey(arg1) {
+  return window['go']['main']['App']['SaveAPIKey'](arg1);
+}
+
 export function SaveSettings(arg1) {
   return window['go']['main']['App']['SaveSettings'](arg1);
+}
+
+export function TestLLM() {
+  return window['go']['main']['App']['TestLLM']();
 }

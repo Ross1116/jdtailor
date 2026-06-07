@@ -8,4 +8,14 @@ export function GetRecentEvents():Promise<Array<main.AppEvent>>;
 
 export function GetSettings():Promise<main.Settings>;
 
+export function GetToolStatus():Promise<main.ToolStatus>;
+
+export function InstallTectonic():Promise<main.InstallTectonicResult>;
+
+export function RenderSamplePDF():Promise<main.RenderPDFResult>;
+
+export function SaveAPIKey(arg1:main.SaveAPIKeyInput):Promise<main.ToolStatus>;
+
 export function SaveSettings(arg1:main.SaveSettingsInput):Promise<main.Settings>;
+
+export function TestLLM():Promise<main.LLMTestResult>;

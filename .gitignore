@@ -2,9 +2,11 @@ plans/
 docs/
 
 # Local app data
+.env.local
 data/
 generated/
 logs/
+tools/
 
 # Frontend/build output
 frontend/node_modules/
