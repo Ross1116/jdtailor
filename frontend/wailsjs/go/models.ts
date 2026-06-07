@@ -60,6 +60,7 @@ export namespace main {
 	}
 	export class LLMTestResult {
 	    success: boolean;
+	    provider: string;
 	    model: string;
 	    text: string;
 	    latency_ms: number;
@@ -73,6 +74,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.success = source["success"];
+	        this.provider = source["provider"];
 	        this.model = source["model"];
 	        this.text = source["text"];
 	        this.latency_ms = source["latency_ms"];
@@ -100,6 +102,7 @@ export namespace main {
 	}
 	export class SaveAPIKeyInput {
 	    api_key: string;
+	    provider: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new SaveAPIKeyInput(source);
@@ -108,6 +111,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.api_key = source["api_key"];
+	        this.provider = source["provider"];
 	    }
 	}
 	export class SaveSettingsInput {
@@ -164,4 +168,3 @@ export namespace main {
 	}
 
 }
-

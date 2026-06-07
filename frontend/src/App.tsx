@@ -24,7 +24,7 @@ import {
   SaveAPIKey,
   SaveSettings,
   TestLLM,
-} from '../wailsjs/go/main/App';
+} from './backend';
 
 type Health = {
   version: string;
@@ -52,6 +52,7 @@ type ToolStatus = {
 
 type LLMTestResult = {
   success: boolean;
+  provider: string;
   model: string;
   text: string;
   latency_ms: number;
@@ -80,7 +81,7 @@ function App() {
   const [error, setError] = useState('');
   const [health, setHealth] = useState<Health | null>(null);
   const [settings, setSettings] = useState<Settings>({
-    provider: 'openai',
+    provider: 'openrouter',
     model: '',
     api_key_configured: false,
   });
@@ -142,7 +143,7 @@ function App() {
   async function saveAPIKey(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await runAction('save-key', async () => {
-      const nextStatus = await SaveAPIKey({api_key: apiKey});
+      const nextStatus = await SaveAPIKey({api_key: apiKey, provider: settings.provider});
       setToolStatus(nextStatus as ToolStatus);
       setSettings({...settings, api_key_configured: (nextStatus as ToolStatus).api_key_configured});
       setAPIKey('');
@@ -255,7 +256,7 @@ function App() {
         </div>
 
         <div className="space-y-4">
-          <Panel icon={<SettingsIcon size={18} />} title="LLM" subtitle="OpenAI smoke call using local key configuration.">
+          <Panel icon={<SettingsIcon size={18} />} title="LLM" subtitle="OpenRouter-first smoke call using local key configuration.">
             <div className="space-y-4">
               <form className="space-y-4" onSubmit={saveSettings}>
                 <label className="block">
@@ -265,7 +266,8 @@ function App() {
                     onChange={(event) => setSettings({...settings, provider: event.target.value})}
                     className="mt-1 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
                   >
-                    <option value="openai">OpenAI</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="openai">OpenAI direct</option>
                   </select>
                 </label>
 
@@ -274,7 +276,7 @@ function App() {
                   <input
                     value={settings.model}
                     onChange={(event) => setSettings({...settings, model: event.target.value})}
-                    placeholder="gpt-5-mini"
+                    placeholder={modelPlaceholder(settings.provider)}
                     className="mt-1 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
                   />
                 </label>
@@ -292,7 +294,7 @@ function App() {
                     value={apiKey}
                     onChange={(event) => setAPIKey(event.target.value)}
                     type="password"
-                    placeholder="OPENAI_API_KEY"
+                    placeholder={apiKeyPlaceholder(settings.provider)}
                     className="mt-1 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
                   />
                 </label>
@@ -307,7 +309,7 @@ function App() {
                 </IconButton>
                 <ResultBox
                   ok={llmResult?.success}
-                  title={llmResult ? `${llmResult.model} · ${llmResult.latency_ms}ms` : 'Last result'}
+                  title={llmResult ? `${llmResult.model} - ${llmResult.latency_ms}ms` : 'Last result'}
                   text={llmResult ? (llmResult.success ? llmResult.text : llmResult.error) : 'No test run yet.'}
                 />
               </div>
@@ -447,6 +449,14 @@ function ResultBox({ok, text, title}: {ok?: boolean; text: string; title: string
       <p className="mt-1 break-all text-sm text-slate-900">{text}</p>
     </div>
   );
+}
+
+function modelPlaceholder(provider: string) {
+  return provider === 'openai' ? 'gpt-5.4-mini' : 'deepseek/deepseek-v4-flash';
+}
+
+function apiKeyPlaceholder(provider: string) {
+  return provider === 'openai' ? 'OPENAI_API_KEY' : 'OPENROUTER_API_KEY';
 }
 
 function formatDate(value: string) {

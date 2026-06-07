@@ -72,22 +72,22 @@ func TestSettingsSaveLoad(t *testing.T) {
 	}
 
 	saved, err := store.SaveSettings(SaveSettingsInput{
-		Provider: "openai",
-		Model:    "gpt-test",
+		Provider: "openrouter",
+		Model:    "deepseek/test",
 	})
 	if err != nil {
 		t.Fatalf("SaveSettings() error = %v", err)
 	}
-	if saved.Model != "gpt-test" {
-		t.Fatalf("saved Model = %q, want gpt-test", saved.Model)
+	if saved.Model != "deepseek/test" {
+		t.Fatalf("saved Model = %q, want deepseek/test", saved.Model)
 	}
 
 	loaded, err := store.GetSettings()
 	if err != nil {
 		t.Fatalf("GetSettings() after save error = %v", err)
 	}
-	if loaded.Model != "gpt-test" {
-		t.Fatalf("loaded Model = %q, want gpt-test", loaded.Model)
+	if loaded.Model != "deepseek/test" {
+		t.Fatalf("loaded Model = %q, want deepseek/test", loaded.Model)
 	}
 }
 
@@ -113,35 +113,35 @@ func TestEnvLocalParseWriteWithoutExposingKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read .env.local: %v", err)
 	}
-	if string(content) != "OPENAI_API_KEY="+secret+"\n" {
+	if string(content) != "OPENROUTER_API_KEY="+secret+"\n" {
 		t.Fatalf(".env.local content = %q", string(content))
 	}
 }
 
-func TestOpenAIEnvVarPrecedence(t *testing.T) {
+func TestOpenRouterEnvVarPrecedence(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
 	defer store.Close()
-	if err := writeEnvLocal(store.envLocalPath(), "sk-from-file"); err != nil {
-		t.Fatalf("writeEnvLocal() error = %v", err)
+	if err := writeEnvLocalValue(store.envLocalPath(), "OPENROUTER_API_KEY", "sk-from-file"); err != nil {
+		t.Fatalf("writeEnvLocalValue() error = %v", err)
 	}
-	t.Setenv("OPENAI_API_KEY", "sk-from-env")
+	t.Setenv("OPENROUTER_API_KEY", "sk-from-env")
 
-	key, source := store.OpenAIAPIKey()
+	key, source := store.APIKeyForProvider("openrouter")
 	if key != "sk-from-env" {
 		t.Fatalf("key = %q, want env key", key)
 	}
-	if source != "environment" {
-		t.Fatalf("source = %q, want environment", source)
+	if source != "OPENROUTER_API_KEY environment" {
+		t.Fatalf("source = %q, want OPENROUTER_API_KEY environment", source)
 	}
 }
 
-func TestBuildResponsesRequestShape(t *testing.T) {
-	body, err := buildResponsesRequest("")
+func TestBuildChatCompletionRequestShape(t *testing.T) {
+	body, err := buildChatCompletionRequest("")
 	if err != nil {
-		t.Fatalf("buildResponsesRequest() error = %v", err)
+		t.Fatalf("buildChatCompletionRequest() error = %v", err)
 	}
 	var request map[string]any
 	if err := json.Unmarshal(body, &request); err != nil {
@@ -150,11 +150,11 @@ func TestBuildResponsesRequestShape(t *testing.T) {
 	if request["model"] != defaultModel {
 		t.Fatalf("model = %v, want %s", request["model"], defaultModel)
 	}
-	if request["input"] == "" {
-		t.Fatal("input is empty")
+	if _, ok := request["messages"].([]any); !ok {
+		t.Fatal("messages is missing")
 	}
-	if request["store"] != false {
-		t.Fatalf("store = %v, want false", request["store"])
+	if request["temperature"] != float64(0) {
+		t.Fatalf("temperature = %v, want 0", request["temperature"])
 	}
 }
 
@@ -164,7 +164,7 @@ func TestLLMMissingKeyFailsWithoutNetwork(t *testing.T) {
 		t.Fatalf("NewStore() error = %v", err)
 	}
 	defer store.Close()
-	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("OPENROUTER_API_KEY", "")
 	called := false
 	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		called = true
@@ -186,14 +186,14 @@ func TestLLMMissingKeyFailsWithoutNetwork(t *testing.T) {
 	}
 }
 
-func TestLLMUsesResponsesAPIShape(t *testing.T) {
+func TestLLMUsesOpenRouterChatCompletionsShape(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
 	}
 	defer store.Close()
-	t.Setenv("OPENAI_API_KEY", "sk-test")
-	if _, err := store.SaveSettings(SaveSettingsInput{Provider: "openai", Model: "gpt-test"}); err != nil {
+	t.Setenv("OPENROUTER_API_KEY", "sk-test")
+	if _, err := store.SaveSettings(SaveSettingsInput{Provider: "openrouter", Model: "deepseek/test"}); err != nil {
 		t.Fatalf("SaveSettings() error = %v", err)
 	}
 
@@ -204,18 +204,21 @@ func TestLLMUsesResponsesAPIShape(t *testing.T) {
 		if r.Header.Get("Authorization") != "Bearer sk-test" {
 			t.Fatalf("authorization header not set")
 		}
-		var request responsesRequest
+		if r.Header.Get("X-OpenRouter-Title") != "JD Tailor" {
+			t.Fatalf("OpenRouter title header not set")
+		}
+		var request chatCompletionRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if request.Model != "gpt-test" || request.Input == "" || request.Store {
+		if request.Model != "deepseek/test" || len(request.Messages) == 0 {
 			t.Fatalf("bad request: %+v", request)
 		}
-		_, _ = w.Write([]byte(`{"output_text":"JD Tailor LLM check"}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"JD Tailor LLM check"}}]}`))
 	}))
 	defer server.Close()
 
-	originalURL := openAIResponsesURLForTest(server.URL)
+	originalURL := openRouterChatCompletionsURLForTest(server.URL)
 	defer originalURL()
 	result, err := store.TestLLM(t.Context(), server.Client())
 	if err != nil {
@@ -367,5 +370,13 @@ func openAIResponsesURLForTest(url string) func() {
 	openAIResponsesURL = url
 	return func() {
 		openAIResponsesURL = previous
+	}
+}
+
+func openRouterChatCompletionsURLForTest(url string) func() {
+	previous := openRouterChatCompletionsURL
+	openRouterChatCompletionsURL = url
+	return func() {
+		openRouterChatCompletionsURL = previous
 	}
 }

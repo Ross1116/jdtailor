@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	defaultProvider = "openai"
-	defaultModel    = "gpt-5-mini"
+	defaultProvider = "openrouter"
+	defaultModel    = "deepseek/deepseek-v4-flash"
 	settingProvider = "llm_provider"
 	settingModel    = "llm_model"
 )
@@ -138,19 +138,16 @@ func (s *Store) GetSettings() (Settings, error) {
 		return Settings{}, err
 	}
 
-	if provider := strings.TrimSpace(values[settingProvider]); provider != "" {
+	if provider := configuredProvider(values[settingProvider]); provider != "" {
 		settings.Provider = provider
 	}
-	settings.Model = strings.TrimSpace(values[settingModel])
-	settings.APIKeyConfigured = s.APIKeyConfigured()
+	settings.Model = configuredModel(settings.Provider, values[settingModel])
+	settings.APIKeyConfigured = s.APIKeyConfigured(settings.Provider)
 	return settings, nil
 }
 
 func (s *Store) SaveSettings(input SaveSettingsInput) (Settings, error) {
-	provider := strings.TrimSpace(input.Provider)
-	if provider == "" {
-		provider = defaultProvider
-	}
+	provider := configuredProvider(input.Provider)
 	model := strings.TrimSpace(input.Model)
 
 	tx, err := s.db.BeginTx(context.Background(), nil)
@@ -175,8 +172,8 @@ func (s *Store) SaveSettings(input SaveSettingsInput) (Settings, error) {
 
 	return Settings{
 		Provider:         provider,
-		Model:            model,
-		APIKeyConfigured: s.APIKeyConfigured(),
+		Model:            configuredModel(provider, model),
+		APIKeyConfigured: s.APIKeyConfigured(provider),
 	}, nil
 }
 
@@ -289,6 +286,18 @@ func (s *Store) migrate(ctx context.Context) error {
 				);
 			`,
 		},
+		{
+			version: 2,
+			sql: `
+				UPDATE settings
+				SET value = 'openrouter', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+				WHERE key = 'llm_provider' AND value = 'openai';
+
+				UPDATE settings
+				SET value = '', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+				WHERE key = 'llm_model' AND value IN ('gpt-5-mini', 'gpt-5.4-mini');
+			`,
+		},
 	}
 
 	for _, migration := range migrations {
@@ -353,7 +362,7 @@ func (s *Store) ensureDefaultSettings(ctx context.Context) error {
 	}
 	defer tx.Rollback()
 
-	if err := upsertSettingTx(tx, settingProvider, defaultProvider); err != nil {
+	if err := ensureSettingTx(tx, settingProvider, defaultProvider); err != nil {
 		return err
 	}
 	if err := ensureSettingTx(tx, settingModel, ""); err != nil {
