@@ -2,18 +2,59 @@
 
 Local-first job application workflow tool.
 
-Phase 0 proves the manual workflow before app infrastructure exists. The goal is
-to run real job descriptions through the source -> claims -> fit -> resume loop
-and learn what the app must automate.
+## Phase 1 Bootstrap
 
-## Phase 0 Workflow Proof
+This slice provides the Wails shell, React/Vite/Tailwind console, Go backend
+health checks, repo-local SQLite storage, local logs, and an LLM settings stub.
+Real LLM calls and PDF rendering are deferred.
 
-Use the docs in `docs/phase-0/` to:
+## Requirements
 
-- map the current manual workflow
-- identify time waste and mistake points
-- record where AI helps
-- run 5-10 real job descriptions through the intended process
+- Go 1.24+
+- Node.js 20+
+- npm
+- Wails v2
 
-Phase 0 is done when the exact workflow is clear enough to build the local app
-foundation without guessing.
+Install Wails if needed:
+
+```powershell
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+```
+
+Verify toolchain:
+
+```powershell
+go version
+node --version
+npm --version
+wails doctor
+```
+
+If `wails` is not on `PATH`, run it from:
+
+```powershell
+$env:USERPROFILE\go\bin\wails.exe
+```
+
+## Run
+
+```powershell
+cd frontend
+npm install
+cd ..
+wails dev
+```
+
+## Test
+
+```powershell
+go test ./...
+cd frontend
+npm run build
+```
+
+Local runtime files are ignored by Git:
+
+- `data/app.db`
+- `logs/app.log`
+- `generated/`
