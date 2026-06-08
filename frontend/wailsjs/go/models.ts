@@ -18,6 +18,203 @@ export namespace main {
 	        this.created_at = source["created_at"];
 	    }
 	}
+	export class CandidateContact {
+	    full_name: string;
+	    email: string;
+	    phone: string;
+	    location: string;
+	    linkedin: string;
+	    github: string;
+	    portfolio: string;
+	    links: string[];
+	    verified: boolean;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CandidateContact(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.full_name = source["full_name"];
+	        this.email = source["email"];
+	        this.phone = source["phone"];
+	        this.location = source["location"];
+	        this.linkedin = source["linkedin"];
+	        this.github = source["github"];
+	        this.portfolio = source["portfolio"];
+	        this.links = source["links"];
+	        this.verified = source["verified"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
+	export class CandidateProfileRecord {
+	    id: number;
+	    record_type: string;
+	    label: string;
+	    organization: string;
+	    role: string;
+	    start_date: string;
+	    end_date: string;
+	    value: string;
+	    verified: boolean;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CandidateProfileRecord(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.record_type = source["record_type"];
+	        this.label = source["label"];
+	        this.organization = source["organization"];
+	        this.role = source["role"];
+	        this.start_date = source["start_date"];
+	        this.end_date = source["end_date"];
+	        this.value = source["value"];
+	        this.verified = source["verified"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
+	export class CandidateProfile {
+	    contact: CandidateContact;
+	    records: CandidateProfileRecord[];
+	
+	    static createFrom(source: any = {}) {
+	        return new CandidateProfile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.contact = this.convertValues(source["contact"], CandidateContact);
+	        this.records = this.convertValues(source["records"], CandidateProfileRecord);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class CandidateSource {
+	    id: number;
+	    source_type: string;
+	    title: string;
+	    raw_text: string;
+	    file_path: string;
+	    imported_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CandidateSource(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.source_type = source["source_type"];
+	        this.title = source["title"];
+	        this.raw_text = source["raw_text"];
+	        this.file_path = source["file_path"];
+	        this.imported_at = source["imported_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
+	export class CreateCandidateSourceInput {
+	    source_type: string;
+	    title: string;
+	    raw_text: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CreateCandidateSourceInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.source_type = source["source_type"];
+	        this.title = source["title"];
+	        this.raw_text = source["raw_text"];
+	    }
+	}
+	export class DeleteInput {
+	    id: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new DeleteInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	    }
+	}
+	export class EvidenceFact {
+	    id: number;
+	    source_id: number;
+	    section_id: number;
+	    fact_text: string;
+	    evidence_quote: string;
+	    technologies: string[];
+	    confidence: string;
+	    risk_flags: string[];
+	    status: string;
+	    auto_approved: boolean;
+	    review_note: string;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new EvidenceFact(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.source_id = source["source_id"];
+	        this.section_id = source["section_id"];
+	        this.fact_text = source["fact_text"];
+	        this.evidence_quote = source["evidence_quote"];
+	        this.technologies = source["technologies"];
+	        this.confidence = source["confidence"];
+	        this.risk_flags = source["risk_flags"];
+	        this.status = source["status"];
+	        this.auto_approved = source["auto_approved"];
+	        this.review_note = source["review_note"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
+	export class ExtractEvidenceFactsInput {
+	    source_id: number;
+	    section_id: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ExtractEvidenceFactsInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.source_id = source["source_id"];
+	        this.section_id = source["section_id"];
+	    }
+	}
 	export class Health {
 	    version: string;
 	    storage_status: string;
@@ -38,6 +235,22 @@ export namespace main {
 	        this.log_path = source["log_path"];
 	        this.generated_path = source["generated_path"];
 	        this.pdf_renderer = source["pdf_renderer"];
+	    }
+	}
+	export class ImportCandidateSourceFileInput {
+	    path: string;
+	    source_type: string;
+	    title: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ImportCandidateSourceFileInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.source_type = source["source_type"];
+	        this.title = source["title"];
 	    }
 	}
 	export class InstallTectonicResult {
@@ -144,6 +357,36 @@ export namespace main {
 	        this.api_key_configured = source["api_key_configured"];
 	    }
 	}
+	export class SourceSection {
+	    id: number;
+	    source_id: number;
+	    heading: string;
+	    section_type: string;
+	    content: string;
+	    sort_order: number;
+	    start_char: number;
+	    end_char: number;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SourceSection(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.source_id = source["source_id"];
+	        this.heading = source["heading"];
+	        this.section_type = source["section_type"];
+	        this.content = source["content"];
+	        this.sort_order = source["sort_order"];
+	        this.start_char = source["start_char"];
+	        this.end_char = source["end_char"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
 	export class ToolStatus {
 	    api_key_configured: boolean;
 	    api_key_source: string;
@@ -166,5 +409,50 @@ export namespace main {
 	        this.generated_path = source["generated_path"];
 	    }
 	}
+	export class UpdateEvidenceFactReviewInput {
+	    id: number;
+	    fact_text: string;
+	    evidence_quote: string;
+	    technologies: string[];
+	    confidence: string;
+	    risk_flags: string[];
+	    status: string;
+	    review_note: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateEvidenceFactReviewInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.fact_text = source["fact_text"];
+	        this.evidence_quote = source["evidence_quote"];
+	        this.technologies = source["technologies"];
+	        this.confidence = source["confidence"];
+	        this.risk_flags = source["risk_flags"];
+	        this.status = source["status"];
+	        this.review_note = source["review_note"];
+	    }
+	}
+	export class UpdateSourceSectionInput {
+	    id: number;
+	    heading: string;
+	    section_type: string;
+	    content: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateSourceSectionInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.heading = source["heading"];
+	        this.section_type = source["section_type"];
+	        this.content = source["content"];
+	    }
+	}
 
 }
+

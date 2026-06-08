@@ -113,6 +113,126 @@ func (a *App) GetRecentEvents() ([]AppEvent, error) {
 	return a.store.GetRecentEvents(20)
 }
 
+func (a *App) GetCandidateProfile() (CandidateProfile, error) {
+	if err := a.ensureStore(); err != nil {
+		return CandidateProfile{}, err
+	}
+
+	return a.store.GetCandidateProfile()
+}
+
+func (a *App) SaveCandidateProfile(input CandidateProfile) (CandidateProfile, error) {
+	if err := a.ensureStore(); err != nil {
+		return CandidateProfile{}, err
+	}
+
+	return a.store.SaveCandidateProfile(input)
+}
+
+func (a *App) DraftCandidateProfileFromSource(sourceID int64) (CandidateProfile, error) {
+	if err := a.ensureStore(); err != nil {
+		return CandidateProfile{}, err
+	}
+
+	return a.store.DraftCandidateProfileFromSource(sourceID)
+}
+
+func (a *App) ListCandidateSources() ([]CandidateSource, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+
+	return a.store.ListCandidateSources()
+}
+
+func (a *App) CreateCandidateSource(input CreateCandidateSourceInput) (CandidateSource, error) {
+	if err := a.ensureStore(); err != nil {
+		return CandidateSource{}, err
+	}
+
+	return a.store.CreateCandidateSource(input)
+}
+
+func (a *App) ImportCandidateSourceFile(input ImportCandidateSourceFileInput) (CandidateSource, error) {
+	if err := a.ensureStore(); err != nil {
+		return CandidateSource{}, err
+	}
+
+	return a.store.ImportCandidateSourceFile(input)
+}
+
+func (a *App) DeleteCandidateSource(input DeleteInput) error {
+	if err := a.ensureStore(); err != nil {
+		return err
+	}
+
+	return a.store.DeleteCandidateSource(input)
+}
+
+func (a *App) ListSourceSections(sourceID int64) ([]SourceSection, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+
+	return a.store.ListSourceSections(sourceID)
+}
+
+func (a *App) DetectSourceSections(sourceID int64) ([]SourceSection, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+
+	return a.store.DetectSourceSections(sourceID)
+}
+
+func (a *App) UpdateSourceSection(input UpdateSourceSectionInput) (SourceSection, error) {
+	if err := a.ensureStore(); err != nil {
+		return SourceSection{}, err
+	}
+
+	return a.store.UpdateSourceSection(input)
+}
+
+func (a *App) DeleteSourceSection(input DeleteInput) error {
+	if err := a.ensureStore(); err != nil {
+		return err
+	}
+
+	return a.store.DeleteSourceSection(input)
+}
+
+func (a *App) ExtractEvidenceFacts(input ExtractEvidenceFactsInput) ([]EvidenceFact, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+
+	return a.store.ExtractEvidenceFacts(a.ctx, input, nil)
+}
+
+func (a *App) ListEvidenceFacts(status string) ([]EvidenceFact, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+
+	return a.store.ListEvidenceFacts(status)
+}
+
+func (a *App) UpdateEvidenceFactReview(input UpdateEvidenceFactReviewInput) (EvidenceFact, error) {
+	if err := a.ensureStore(); err != nil {
+		return EvidenceFact{}, err
+	}
+
+	return a.store.UpdateEvidenceFactReview(input)
+}
+
+func (a *App) DeleteEvidenceFact(input DeleteInput) error {
+	if err := a.ensureStore(); err != nil {
+		return err
+	}
+
+	return a.store.DeleteEvidenceFact(input)
+}
+
 func (a *App) ensureStore() error {
 	if a.store != nil {
 		return nil

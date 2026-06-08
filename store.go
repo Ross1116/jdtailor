@@ -298,6 +298,86 @@ func (s *Store) migrate(ctx context.Context) error {
 				WHERE key = 'llm_model' AND value IN ('gpt-5-mini', 'gpt-5.4-mini');
 			`,
 		},
+		{
+			version: 3,
+			sql: `
+				CREATE TABLE IF NOT EXISTS candidate_profile (
+					id INTEGER PRIMARY KEY CHECK (id = 1),
+					full_name TEXT NOT NULL DEFAULT '',
+					email TEXT NOT NULL DEFAULT '',
+					phone TEXT NOT NULL DEFAULT '',
+					location TEXT NOT NULL DEFAULT '',
+					linkedin TEXT NOT NULL DEFAULT '',
+					github TEXT NOT NULL DEFAULT '',
+					portfolio TEXT NOT NULL DEFAULT '',
+					links_json TEXT NOT NULL DEFAULT '[]',
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS candidate_profile_records (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					record_type TEXT NOT NULL,
+					label TEXT NOT NULL DEFAULT '',
+					organization TEXT NOT NULL DEFAULT '',
+					role TEXT NOT NULL DEFAULT '',
+					start_date TEXT NOT NULL DEFAULT '',
+					end_date TEXT NOT NULL DEFAULT '',
+					value TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS candidate_sources (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					source_type TEXT NOT NULL,
+					title TEXT NOT NULL,
+					raw_text TEXT NOT NULL,
+					file_path TEXT NOT NULL DEFAULT '',
+					imported_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS source_sections (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					source_id INTEGER NOT NULL REFERENCES candidate_sources(id) ON DELETE CASCADE,
+					heading TEXT NOT NULL,
+					section_type TEXT NOT NULL,
+					content TEXT NOT NULL,
+					sort_order INTEGER NOT NULL,
+					start_char INTEGER NOT NULL DEFAULT 0,
+					end_char INTEGER NOT NULL DEFAULT 0,
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS evidence_facts (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					source_id INTEGER NOT NULL REFERENCES candidate_sources(id) ON DELETE CASCADE,
+					section_id INTEGER NOT NULL REFERENCES source_sections(id) ON DELETE CASCADE,
+					fact_text TEXT NOT NULL,
+					evidence_quote TEXT NOT NULL,
+					technologies_json TEXT NOT NULL DEFAULT '[]',
+					confidence TEXT NOT NULL,
+					risk_flags_json TEXT NOT NULL DEFAULT '[]',
+					status TEXT NOT NULL,
+					auto_approved INTEGER NOT NULL DEFAULT 0,
+					review_note TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				INSERT INTO candidate_profile (id, updated_at)
+				VALUES (1, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+				ON CONFLICT(id) DO NOTHING;
+			`,
+		},
+		{
+			version: 4,
+			sql: `
+				ALTER TABLE candidate_profile ADD COLUMN verified INTEGER NOT NULL DEFAULT 0;
+				ALTER TABLE candidate_profile_records ADD COLUMN verified INTEGER NOT NULL DEFAULT 0;
+			`,
+		},
 	}
 
 	for _, migration := range migrations {

@@ -175,6 +175,101 @@ func (s *Store) TestLLM(ctx context.Context, client *http.Client) (LLMTestResult
 	}
 }
 
+func (s *Store) GenerateLLMText(ctx context.Context, client *http.Client, system string, user string, maxTokens int) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	settings, err := s.GetSettings()
+	if err != nil {
+		return "", err
+	}
+	provider := configuredProvider(settings.Provider)
+	model := configuredModel(provider, settings.Model)
+	key, _ := s.APIKeyForProvider(provider)
+	if key == "" {
+		return "", errors.New(apiKeyEnvName(provider) + " is missing")
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 45 * time.Second}
+	}
+	if maxTokens <= 0 {
+		maxTokens = 1024
+	}
+	switch provider {
+	case "openai":
+		body, err := json.Marshal(openAIResponsesRequest{
+			Model:           model,
+			Input:           user,
+			Instructions:    system,
+			MaxOutputTokens: maxTokens,
+			Store:           false,
+		})
+		if err != nil {
+			return "", err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, openAIResponsesURL, bytes.NewReader(body))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		if err != nil {
+			return "", err
+		}
+		text, apiErr := parseResponsesText(responseBody)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if apiErr == "" {
+				apiErr = fmt.Sprintf("OpenAI returned HTTP %d", resp.StatusCode)
+			}
+			return "", errors.New(apiErr)
+		}
+		return text, nil
+	default:
+		body, err := json.Marshal(chatCompletionRequest{
+			Model: model,
+			Messages: []chatMessage{
+				{Role: "system", Content: system},
+				{Role: "user", Content: user},
+			},
+			MaxTokens:   maxTokens,
+			Temperature: 0,
+		})
+		if err != nil {
+			return "", err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, openRouterChatCompletionsURL, bytes.NewReader(body))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-OpenRouter-Title", "JD Tailor")
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+		if err != nil {
+			return "", err
+		}
+		text, apiErr := parseChatCompletionText(responseBody)
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if apiErr == "" {
+				apiErr = fmt.Sprintf("OpenRouter returned HTTP %d", resp.StatusCode)
+			}
+			return "", errors.New(apiErr)
+		}
+		return text, nil
+	}
+}
+
 func (s *Store) testOpenRouterChat(ctx context.Context, client *http.Client, key string, result LLMTestResult) (LLMTestResult, error) {
 	body, err := buildChatCompletionRequest(result.Model)
 	if err != nil {
