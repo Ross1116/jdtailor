@@ -256,6 +256,7 @@ Parse the pasted job description into resume-tailoring requirements.
 # Reject
 - LinkedIn/page chrome: logos, promoted text, profile match banners, Premium upsells, alumni/people panels, "helpful" prompts.
 - Company/about-us blurbs, generic mission statements, benefits, salary, location, contract duration, application instructions.
+- Recruiter/poster profile headlines, role title rows, company mission paragraphs, and employer product blurbs.
 - Role-title-only metadata such as "Software Engineer".
 - Generic soft skills unless concrete and evidence-backed: stakeholder management, mentoring, leadership, cross-functional delivery.
 
@@ -402,6 +403,7 @@ func (s *Store) GenerateTailoredBulletDrafts(ctx context.Context, jobID int64, c
 	matchJSON, _ := json.Marshal(matches)
 	promptFacts := selectFactsForMatches(matches, facts)
 	factJSON, _ := json.Marshal(promptFacts)
+	styleRules := s.promptRuleDigest("resume", "validation")
 	system := `You are JD Tailor's resume bullet drafter. Return strict JSON only.
 Write tailored bullet suggestions from provided evidence only; never invent source truth.`
 	user := fmt.Sprintf(`# Task
@@ -416,6 +418,8 @@ Generate saved resume bullet suggestions for this job from the matched evidence.
 - Combine compatible facts only when they share a believable project/context.
 - Prefer concrete artifacts, technologies, scale, users/teams, metrics, and outcomes.
 - Keep each bullet 22 to 34 words.
+- Write like a practical engineer, not a marketing page. Use plain language and avoid inflated resume cliches.
+- Do not use markdown, hashtags, rhetorical questions, generic setup phrases, or fake business impact.
 - Every fact includes extraction-time context plus section_heading and section_type. Treat context as the bullet origin.
 - Do not blend facts from different origins unless the draft remains truthful and natural.
 - Mention the origin in rationale so reviewers know where the bullet belongs.
@@ -432,6 +436,9 @@ Generate saved resume bullet suggestions for this job from the matched evidence.
 - Explain which requirement is targeted and why the facts support the wording.
 - Mention any missing JD detail that prevented stronger tailoring.
 
+# Human style rules
+%s
+
 <job company="%s" title="%s"/>
 <requirements_json>
 %s
@@ -441,7 +448,7 @@ Generate saved resume bullet suggestions for this job from the matched evidence.
 </matches_json>
 <candidate_facts_json>
 %s
-</candidate_facts_json>`, job.Company, job.Title, string(reqJSON), string(matchJSON), string(factJSON))
+</candidate_facts_json>`, firstNonEmpty(styleRules, "Use plain, specific, evidence-backed resume language."), job.Company, job.Title, string(reqJSON), string(matchJSON), string(factJSON))
 	text, err := s.GenerateLLMText(ctx, client, system, user, 1600)
 	if err != nil {
 		return nil, err
@@ -695,6 +702,7 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 		if err != nil {
 			return nil, err
 		}
+		draft.RiskFlags = normalizeStringList(append(draft.RiskFlags, styleRiskFlags(draft.DraftText)...))
 		riskJSON, err := encodeStringList(draft.RiskFlags)
 		if err != nil {
 			return nil, err
@@ -787,6 +795,41 @@ func bulletBudgetForSectionType(sectionType string) int {
 	}
 }
 
+func styleRiskFlags(text string) []string {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return nil
+	}
+	flags := []string{}
+	buzzwords := []string{
+		"leveraged", "spearheaded", "empowered", "utilized", "cutting-edge", "game-changer", "innovative", "seamless", "dynamic", "pivotal",
+		"deep dive", "in-depth", "unlock", "drive growth", "enhance efficiency", "business outcomes", "synergy", "transformative",
+	}
+	for _, word := range buzzwords {
+		if strings.Contains(lower, word) {
+			flags = append(flags, "style_buzzword")
+			break
+		}
+	}
+	if strings.Contains(lower, " as a result") || strings.Contains(lower, " in order to") || strings.Contains(lower, " it is important") {
+		flags = append(flags, "style_filler")
+	}
+	if strings.Contains(text, "*") || strings.Contains(text, "•") {
+		flags = append(flags, "style_formatting")
+	}
+	words := strings.Fields(text)
+	if len(words) > 34 {
+		flags = append(flags, "style_too_long")
+	}
+	if len(words) < 8 {
+		flags = append(flags, "style_too_thin")
+	}
+	if strings.HasPrefix(strings.TrimSpace(text), "-") {
+		flags = append(flags, "style_leading_dash")
+	}
+	return normalizeStringList(flags)
+}
+
 func parseJobMatches(text string) ([]parsedJobMatch, error) {
 	var parsed parsedJobMatchesResponse
 	if err := parseJSONObject(text, &parsed); err != nil {
@@ -850,19 +893,24 @@ func parseJSONObject(text string, target any) error {
 }
 
 func isIrrelevantJobRequirement(req parsedJobRequirement) bool {
+	requirementText := strings.TrimSpace(req.RequirementText)
+	sourceQuote := strings.TrimSpace(req.SourceQuote)
 	text := strings.ToLower(strings.Join([]string{
 		req.Category,
-		req.RequirementText,
-		req.SourceQuote,
+		requirementText,
+		sourceQuote,
 		strings.Join(req.Keywords, " "),
 	}, " "))
 	if text == "" {
 		return true
 	}
+	if isJobBoilerplateLine(requirementText) || isJobBoilerplateLine(sourceQuote) {
+		return true
+	}
 	irrelevantMarkers := []string{
 		"12-month", "12 month", "contract", "max term", "fixed term", "salary", "compensation", "benefit", "leave", "hybrid", "remote", "location", "office",
 		"how to apply", "application process", "submit your application", "recruit", "hiring", "interview", "equal opportunity", "diversity", "background check", "sponsorship",
-		"leading personal injury", "class actions law firm", "about us", "about the company", "company is", "we are a", "we're a", "our client",
+		"leading personal injury", "class actions law firm", "about us", "about the company", "company is", "we are a", "we're a", "our client", "we believe", "deserves to feel", "redefining", "platform provides", "dedicated team", "immediate care", "critical situations",
 		"logo", "linkedin", "promoted by", "responses managed", "profile matches", "is this information helpful", "personalized tips", "top applicant", "retry premium", "people you can reach out", "school alumni", "clicked apply",
 	}
 	for _, marker := range irrelevantMarkers {
@@ -870,10 +918,10 @@ func isIrrelevantJobRequirement(req parsedJobRequirement) bool {
 			return true
 		}
 	}
-	if isJobHeadingOrMetadata(req.RequirementText) || isJobHeadingOrMetadata(req.SourceQuote) {
+	if isJobHeadingOrMetadata(requirementText) || isJobHeadingOrMetadata(sourceQuote) {
 		return true
 	}
-	if !hasTailorableRequirementSignal(req.RequirementText, req.Keywords) {
+	if !hasStrictTailorableRequirementSignal(requirementText, req.Keywords) {
 		return true
 	}
 	if strings.EqualFold(req.Category, "domain") && !strings.Contains(text, "experience") && !strings.Contains(text, "knowledge") && !strings.Contains(text, "background") {
@@ -882,8 +930,69 @@ func isIrrelevantJobRequirement(req parsedJobRequirement) bool {
 	if strings.EqualFold(req.Category, "seniority") && !strings.Contains(text, "senior") && !strings.Contains(text, "lead") && !strings.Contains(text, "mentor") && !strings.Contains(text, "years") {
 		return true
 	}
-	if len(jobMatchTerms(req.RequirementText, req.Keywords)) == 0 {
+	if len(jobMatchTerms(requirementText, req.Keywords)) == 0 {
 		return true
+	}
+	return false
+}
+
+func hasStrictTailorableRequirementSignal(text string, keywords []string) bool {
+	if isJobBoilerplateLine(text) {
+		return false
+	}
+	lower := strings.ToLower(strings.Join(append([]string{text}, keywords...), " "))
+	for _, signal := range []string{
+		"experience", "hands-on", "strong", "deep", "knowledge", "understanding", "programming", "skills",
+		"design ", "design and", "build ", "build and", "develop", "deliver", "modernis", "test", "support ",
+		"architecture", "api", "apis", "data ingestion", "high-concurrency", "dashboard", "dashboards",
+		"workflow", "workflows", "rag", "retrieval", "chunking", "metadata filtering", "model context protocol", "evaluation framework",
+		"cloud", "serverless", "event-driven", "distributed", "scalable", "resilience", "observability", "security",
+		"networking", "identity", "database", "nosql", "data model", "data models", "schema",
+		"devsecops", "agile", "solid", "containers", "messaging", "queues", "topics", "stakeholder", "mentor",
+		"engineering practices", "technical excellence",
+	} {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	for _, tech := range []string{"fastapi", "postgresql", "react", "next.js", "typescript", "javascript", "python", "golang", "java", "spring", "mysql", "node.js", "node", "azure", "cosmos db", "aws", "gcp", "docker", "kubernetes", "terraform", "redis", "snowflake", "langgraph", "crewai", "mcp", "langsmith", "arize", "phoenix", "cursor", "claudecode", "copilot"} {
+		if strings.Contains(lower, tech) {
+			return true
+		}
+	}
+	return false
+}
+
+func isJobBoilerplateLine(line string) bool {
+	cleaned := strings.TrimSpace(line)
+	lower := strings.ToLower(cleaned)
+	if cleaned == "" {
+		return true
+	}
+	if strings.Count(cleaned, "|") >= 2 {
+		for _, marker := range []string{"acting cto", "vp of", "founder", "recruiter", "talent", "hiring", "ex-", " at "} {
+			if strings.Contains(lower, marker) {
+				return true
+			}
+		}
+	}
+	if looksLikeRoleTitle(cleaned) && !hasConcreteRequirementVerb(cleaned) && len(strings.Fields(cleaned)) <= 10 {
+		return true
+	}
+	for _, marker := range []string{"we believe", "our mission", "deserves to feel", "redefining", "platform provides", "dedicated team", "members receive", "immediate care", "critical situations"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasConcreteRequirementVerb(line string) bool {
+	lower := strings.ToLower(line)
+	for _, verb := range []string{"build ", "build and", "design ", "design and", "develop", "ship ", "implement", "maintain", "optimize", "architect", "own ", "write ", "review ", "triage ", "debug", "deploy"} {
+		if strings.Contains(lower, verb) || strings.HasPrefix(lower, strings.TrimSpace(verb)+" ") {
+			return true
+		}
 	}
 	return false
 }
@@ -897,7 +1006,7 @@ func fallbackJobRequirements(raw string) []parsedJobRequirement {
 		if len(line) < 12 {
 			continue
 		}
-		if isJobHeadingOrMetadata(line) || !hasTailorableRequirementSignal(line, nil) {
+		if isJobHeadingOrMetadata(line) || !hasStrictTailorableRequirementSignal(line, nil) {
 			continue
 		}
 		keywords := extractJobKeywords(line)

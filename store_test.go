@@ -1011,6 +1011,27 @@ func TestParseJobRequirementsFiltersBoilerplate(t *testing.T) {
 	}
 }
 
+func TestParseJobRequirementsFiltersProfileAndCompanyStory(t *testing.T) {
+	requirements, err := parseJobRequirements(`{"requirements":[
+		{"category":"responsibility","requirement_text":"Fullstack AI Software Engineer - (Agentic Systems, Fullstack Builder)","keywords":["Fullstack","AI","Software","Engineer"],"priority":"high","source_quote":"Fullstack AI Software Engineer - (Agentic Systems, Fullstack Builder)"},
+		{"category":"responsibility","requirement_text":"Acting CTO | VP of AI & Engineering at Sonder | Building AI-First Healthcare Platforms | ex-Rokt","keywords":["Acting","CTO","Engineering","Sonder"],"priority":"high","source_quote":"Acting CTO | VP of AI & Engineering at Sonder | Building AI-First Healthcare Platforms | ex-Rokt"},
+		{"category":"must_have","requirement_text":"At Sonder, we believe that every person deserves to feel safe, supported, and empowered to be at their best - wherever they are.","keywords":["Sonder","believe","supported"],"priority":"high","source_quote":"At Sonder, we believe that every person deserves to feel safe, supported, and empowered to be at their best - wherever they are."},
+		{"category":"responsibility","requirement_text":"API Architecture: Design robust back-end services (Python/Node.js) that support data ingestion and high-concurrency reporting","keywords":["API","Python","Node.js","data ingestion"],"priority":"high","source_quote":"API Architecture: Design robust back-end services (Python/Node.js) that support data ingestion and high-concurrency reporting."},
+		{"category":"responsibility","requirement_text":"RAG & Context Engineering: Build and optimize RAG pipelines, focusing on retrieval quality, chunking strategies, and metadata filtering","keywords":["RAG","retrieval","chunking","metadata filtering"],"priority":"medium","source_quote":"RAG & Context Engineering: Build and optimize RAG pipelines, focusing on retrieval quality, chunking strategies, and metadata filtering."}
+	]}`)
+	if err != nil {
+		t.Fatalf("parseJobRequirements() error = %v", err)
+	}
+	if len(requirements) != 2 {
+		t.Fatalf("requirements = %+v, want 2 concrete requirements", requirements)
+	}
+	for _, req := range requirements {
+		if strings.Contains(req.RequirementText, "Acting CTO") || strings.Contains(req.RequirementText, "we believe") || strings.Contains(req.RequirementText, "Fullstack AI Software Engineer") {
+			t.Fatalf("boilerplate survived: %+v", requirements)
+		}
+	}
+}
+
 func TestJobLLMWorkflowUsesAllFactStatusesAndDraftReview(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
@@ -1132,6 +1153,46 @@ func TestBulletDraftsRespectOriginBudgets(t *testing.T) {
 	}
 	if len(inserted) != 7 {
 		t.Fatalf("drafts len = %d, want 7: %+v", len(inserted), inserted)
+	}
+}
+
+func TestBulletDraftsAddHumanStyleRiskFlags(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Acme",
+		Title:   "Backend Engineer",
+		RawText: "Build APIs.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	requirements, err := store.replaceJobRequirements(job, []parsedJobRequirement{{
+		Category:        "responsibility",
+		RequirementText: "Build APIs.",
+		Keywords:        []string{"API"},
+		Priority:        "high",
+		SourceQuote:     "Build APIs.",
+	}})
+	if err != nil {
+		t.Fatalf("replaceJobRequirements() error = %v", err)
+	}
+	inserted, err := store.replaceBulletDrafts(job.ID, []parsedBulletDraft{{
+		RequirementID: requirements[0].ID,
+		FactIDs:       []int64{1},
+		DraftText:     "- Leveraged cutting-edge APIs to enhance efficiency and drive growth across business outcomes with seamless dynamic execution for stakeholder value.",
+	}}, requirements, []factPromptContext{{ID: 1, Status: "approved", SectionHeading: "Acme", SectionType: "experience"}})
+	if err != nil {
+		t.Fatalf("replaceBulletDrafts() error = %v", err)
+	}
+	flags := strings.Join(inserted[0].RiskFlags, " ")
+	for _, want := range []string{"style_buzzword", "style_leading_dash"} {
+		if !strings.Contains(flags, want) {
+			t.Fatalf("risk flags = %+v, missing %s", inserted[0].RiskFlags, want)
+		}
 	}
 }
 

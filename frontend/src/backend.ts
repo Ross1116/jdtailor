@@ -791,15 +791,16 @@ export async function GenerateTailoredBulletDrafts(jobID: number) {
   const drafts: TailoredBulletDraft[] = [...grouped.entries()].map(([requirementID, matches], index) => {
     const topMatches = matches.sort((a, b) => b.score - a.score).slice(0, 2);
     const risky = topMatches.flatMap((match) => match.fact_status === 'approved' ? match.risk_flags : [match.fact_status, ...match.risk_flags]);
+    const draftText = `${topMatches[0]?.fact_text ?? 'Tailored bullet needs evidence.'}`;
     return {
       id: Date.now() + index,
       job_id: jobID,
       requirement_id: requirementID,
       fact_ids: topMatches.map((match) => match.fact_id),
-      draft_text: `- ${topMatches[0]?.fact_text ?? 'Tailored bullet needs evidence.'}`,
+      draft_text: draftText,
       rationale: topMatches.map((match) => match.rationale).join('; '),
       status: 'needs_review',
-      risk_flags: [...new Set(risky)].filter(Boolean),
+      risk_flags: [...new Set([...risky, ...styleRiskFlags(draftText)])].filter(Boolean),
       created_at: timestamp,
       updated_at: timestamp,
     };
@@ -1653,8 +1654,9 @@ function isIrrelevantJobRequirementLine(line: string) {
     'logo', 'linkedin', 'promoted by', 'responses managed', 'profile matches', 'is this information helpful', 'personalized tips', 'top applicant', 'retry premium', 'people you can reach out', 'school alumni', 'clicked apply',
   ];
   if (markers.some((marker) => lower.includes(marker))) return true;
+  if (isJobBoilerplateLine(line)) return true;
   if (isJobHeadingOrMetadata(line)) return true;
-  if (!hasTailorableRequirementSignal(line)) return true;
+  if (!hasStrictTailorableRequirementSignal(line)) return true;
   if (looksLikeRoleTitle(line) && !lower.includes('develop') && !lower.includes('build') && !lower.includes('experience')) return true;
   return false;
 }
@@ -1675,6 +1677,61 @@ function hasTailorableRequirementSignal(line: string) {
     'devsecops', 'agile', 'solid', 'containers', 'messaging', 'queues', 'topics', 'stakeholder', 'mentor', 'engineering practices', 'technical excellence',
     'fastapi', 'postgresql', 'react', 'typescript', 'javascript', 'python', 'golang', 'java', 'spring', 'mysql', 'node.js', 'node', 'azure', 'cosmos db', 'aws', 'gcp', 'docker', 'kubernetes', 'terraform', 'redis',
   ].some((signal) => lower.includes(signal));
+}
+
+function hasStrictTailorableRequirementSignal(line: string) {
+  if (isJobBoilerplateLine(line)) return false;
+  const lower = line.toLowerCase();
+  return [
+    'experience', 'hands-on', 'strong', 'deep', 'knowledge', 'understanding', 'programming', 'skills',
+    'design ', 'design and', 'build ', 'build and', 'develop', 'deliver', 'modernis', 'test', 'support ',
+    'architecture', 'api', 'apis', 'data ingestion', 'high-concurrency', 'dashboard', 'dashboards',
+    'workflow', 'workflows', 'rag', 'retrieval', 'chunking', 'metadata filtering', 'model context protocol', 'evaluation framework',
+    'cloud', 'serverless', 'event-driven', 'distributed', 'scalable', 'resilience', 'observability', 'security',
+    'networking', 'identity', 'database', 'nosql', 'data model', 'data models', 'schema',
+    'fastapi', 'postgresql', 'react', 'next.js', 'typescript', 'javascript', 'python', 'golang', 'java', 'spring', 'mysql', 'node.js', 'node',
+    'azure', 'cosmos db', 'aws', 'gcp', 'docker', 'kubernetes', 'terraform', 'redis', 'snowflake', 'langgraph', 'crewai', 'mcp', 'langsmith', 'arize', 'phoenix', 'cursor', 'claudecode', 'copilot',
+  ].some((signal) => lower.includes(signal));
+}
+
+function styleRiskFlags(text: string) {
+  const lower = text.trim().toLowerCase();
+  const flags: string[] = [];
+  if (!lower) return flags;
+  if (['leveraged', 'spearheaded', 'empowered', 'utilized', 'cutting-edge', 'game-changer', 'innovative', 'seamless', 'dynamic', 'pivotal', 'deep dive', 'in-depth', 'unlock', 'drive growth', 'enhance efficiency', 'business outcomes', 'synergy', 'transformative'].some((word) => lower.includes(word))) {
+    flags.push('style_buzzword');
+  }
+  if (lower.includes(' as a result') || lower.includes(' in order to') || lower.includes(' it is important')) {
+    flags.push('style_filler');
+  }
+  if (text.includes('*') || text.includes('•')) {
+    flags.push('style_formatting');
+  }
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length > 34) flags.push('style_too_long');
+  if (words.length < 8) flags.push('style_too_thin');
+  if (text.trim().startsWith('-')) flags.push('style_leading_dash');
+  return [...new Set(flags)];
+}
+
+function isJobBoilerplateLine(line: string) {
+  const cleaned = line.trim();
+  const lower = cleaned.toLowerCase();
+  if (!cleaned) return true;
+  if ((cleaned.match(/\|/g) ?? []).length >= 2 && ['acting cto', 'vp of', 'founder', 'recruiter', 'talent', 'hiring', 'ex-', ' at '].some((marker) => lower.includes(marker))) {
+    return true;
+  }
+  if (looksLikeRoleTitle(cleaned) && !hasConcreteRequirementVerb(cleaned) && cleaned.split(/\s+/).length <= 10) {
+    return true;
+  }
+  return ['we believe', 'our mission', 'deserves to feel', 'redefining', 'platform provides', 'dedicated team', 'members receive', 'immediate care', 'critical situations']
+    .some((marker) => lower.includes(marker));
+}
+
+function hasConcreteRequirementVerb(line: string) {
+  const lower = line.toLowerCase();
+  return ['build ', 'build and', 'design ', 'design and', 'develop', 'ship ', 'implement', 'maintain', 'optimize', 'architect', 'own ', 'write ', 'review ', 'triage ', 'debug', 'deploy']
+    .some((verb) => lower.includes(verb) || lower.startsWith(`${verb.trim()} `));
 }
 
 function mockRequirementCategory(line: string) {
@@ -1703,7 +1760,9 @@ function defaultMockPromptRules(): PromptRule[] {
   return [
     ['truth.no_fabrication', 'validation', 'No fabrication', 'Use only sourced facts. Never invent tools, metrics, titles, leadership, production scope, cloud platforms, or business impact.'],
     ['jd.top_pain_points', 'jd_parse', 'Top pain points first', 'Prioritize the top 3 employer pain points over exhaustive requirement lists.'],
-    ['resume.human_style', 'resume', 'Human technical style', 'Write concise, specific engineering language. Avoid fake enthusiasm, generic praise, and AI-sounding filler.'],
+    ['resume.human_style', 'resume', 'Human technical style', 'Write plain, specific resume bullets that sound like a technical person wrote them. Use active voice, concrete artifacts, real tools, and varied sentence rhythm.'],
+    ['resume.banned_phrases', 'resume', 'Banned resume phrasing', 'Avoid inflated resume cliches: leveraged, spearheaded, empowered, utilized, cutting-edge, innovative, seamless, dynamic, pivotal, deep dive, in-depth, unlock, drive growth, enhance efficiency, and generic endings.'],
+    ['resume.plain_bullets', 'resume', 'Plain bullet shape', 'Keep bullets direct and factual. One bullet should express one main claim. Prefer short concrete wording over abstract phrasing.'],
     ['fit.blunt_reality', 'fit_analysis', 'Blunt fit analysis', 'Act like a brutally honest hiring fit analyzer. Output an evidence-backed percentage, strengths alignment, critical gaps, reality check, and a directive recommendation.'],
     ['fit.competitive_market', 'fit_analysis', 'Competitive market calibration', 'Assume competitive roles receive many qualified applicants. A partial transferable match is not enough for Apply unless several high-priority needs are directly supported by approved evidence.'],
   ].map(([ruleKey, category, title, content], index) => ({
