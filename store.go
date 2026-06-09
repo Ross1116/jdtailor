@@ -378,6 +378,57 @@ func (s *Store) migrate(ctx context.Context) error {
 				ALTER TABLE candidate_profile_records ADD COLUMN verified INTEGER NOT NULL DEFAULT 0;
 			`,
 		},
+		{
+			version: 5,
+			sql: `
+				CREATE TABLE IF NOT EXISTS job_descriptions (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					company TEXT NOT NULL DEFAULT '',
+					title TEXT NOT NULL,
+					url TEXT NOT NULL DEFAULT '',
+					raw_text TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS job_requirements (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					job_id INTEGER NOT NULL REFERENCES job_descriptions(id) ON DELETE CASCADE,
+					category TEXT NOT NULL,
+					requirement_text TEXT NOT NULL,
+					keywords_json TEXT NOT NULL DEFAULT '[]',
+					priority TEXT NOT NULL,
+					source_quote TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS job_fact_matches (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					job_id INTEGER NOT NULL REFERENCES job_descriptions(id) ON DELETE CASCADE,
+					requirement_id INTEGER NOT NULL REFERENCES job_requirements(id) ON DELETE CASCADE,
+					fact_id INTEGER NOT NULL REFERENCES evidence_facts(id) ON DELETE CASCADE,
+					score REAL NOT NULL DEFAULT 0,
+					rationale TEXT NOT NULL DEFAULT '',
+					coverage_status TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS tailored_bullet_drafts (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					job_id INTEGER NOT NULL REFERENCES job_descriptions(id) ON DELETE CASCADE,
+					requirement_id INTEGER NOT NULL REFERENCES job_requirements(id) ON DELETE CASCADE,
+					fact_ids_json TEXT NOT NULL DEFAULT '[]',
+					draft_text TEXT NOT NULL,
+					rationale TEXT NOT NULL DEFAULT '',
+					status TEXT NOT NULL,
+					risk_flags_json TEXT NOT NULL DEFAULT '[]',
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+			`,
+		},
 	}
 
 	for _, migration := range migrations {

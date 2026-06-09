@@ -2,7 +2,9 @@ import {FormEvent, useEffect, useMemo, useState} from 'react';
 import {
   Activity,
   AlertCircle,
+  BriefcaseBusiness,
   CheckCircle2,
+  Clipboard,
   Cpu,
   Database,
   FileText,
@@ -24,31 +26,47 @@ import {
   CandidateProfile,
   CandidateProfileRecord,
   CandidateSource,
+  BuildJobMatchMap,
   CreateCandidateSource,
+  CreateJobDescription,
   DeleteCandidateSource,
   DeleteEvidenceFact,
+  DeleteJobDescription,
   DeleteSourceSection,
+  DeleteTailoredBulletDraft,
   DetectSourceSections,
   DraftCandidateProfileFromSource,
   EvidenceFact,
   ExtractEvidenceFacts,
+  GenerateTailoredBulletDrafts,
   GetCandidateProfile,
   GetHealth,
   GetRecentEvents,
   GetSettings,
   GetToolStatus,
+  JobDescription,
+  JobFactMatch,
+  JobRequirement,
   ListCandidateSources,
   ListEvidenceFacts,
+  ListJobDescriptions,
+  ListJobFactMatches,
+  ListJobRequirements,
   ListSourceSections,
+  ListTailoredBulletDrafts,
   RenderSamplePDF,
   SaveAPIKey,
   SaveCandidateProfile,
   SaveSettings,
   SourceSection,
+  TailoredBulletDraft,
   TestLLM,
   UpdateEvidenceFactReview,
+  UpdateJobDescription,
   UpdateSourceSection,
+  UpdateTailoredBulletDraft,
   InstallTectonic,
+  ParseJobDescription,
 } from './backend';
 
 type Health = {
@@ -100,7 +118,7 @@ type AppEvent = {
 };
 
 type LoadState = 'loading' | 'ready' | 'error';
-type Tab = 'profile' | 'sources' | 'sections' | 'facts' | 'settings';
+type Tab = 'sources' | 'jobs' | 'profile' | 'sections' | 'facts' | 'settings';
 
 const emptyProfile: CandidateProfile = {
   contact: {
@@ -134,11 +152,22 @@ function App() {
   const [sources, setSources] = useState<CandidateSource[]>([]);
   const [sections, setSections] = useState<SourceSection[]>([]);
   const [facts, setFacts] = useState<EvidenceFact[]>([]);
+  const [jobs, setJobs] = useState<JobDescription[]>([]);
+  const [jobRequirements, setJobRequirements] = useState<JobRequirement[]>([]);
+  const [jobMatches, setJobMatches] = useState<JobFactMatch[]>([]);
+  const [bulletDrafts, setBulletDrafts] = useState<TailoredBulletDraft[]>([]);
   const [selectedSourceID, setSelectedSourceID] = useState<number>(0);
   const [selectedSectionID, setSelectedSectionID] = useState<number>(0);
+  const [selectedJobID, setSelectedJobID] = useState<number>(0);
   const [sourceDraft, setSourceDraft] = useState({
     source_type: 'current_resume',
     title: '',
+    raw_text: '',
+  });
+  const [jobDraft, setJobDraft] = useState({
+    company: '',
+    title: '',
+    url: '',
     raw_text: '',
   });
   const [apiKey, setAPIKey] = useState('');
@@ -148,6 +177,7 @@ function App() {
 
   const selectedSource = sources.find((source) => source.id === selectedSourceID);
   const selectedSection = sections.find((section) => section.id === selectedSectionID);
+  const selectedJob = jobs.find((job) => job.id === selectedJobID);
   const queuedFacts = facts.filter((fact) => fact.status === 'needs_review');
   const apiConfigured = toolStatus?.api_key_configured ?? settings.api_key_configured;
   const tectonicStatus = toolStatus?.tectonic_status ?? health?.pdf_renderer ?? 'checking';
@@ -175,6 +205,7 @@ function App() {
         nextSources,
         nextSections,
         nextFacts,
+        nextJobs,
       ] = await Promise.all([
         GetHealth(),
         GetSettings(),
@@ -184,6 +215,7 @@ function App() {
         ListCandidateSources(),
         ListSourceSections(0),
         ListEvidenceFacts('all'),
+        ListJobDescriptions(),
       ]);
       setHealth(nextHealth as Health);
       setSettings(nextSettings as Settings);
@@ -192,10 +224,16 @@ function App() {
       setProfile(normalizeProfile(nextProfile as CandidateProfile));
       setSources((nextSources ?? []) as CandidateSource[]);
       setSections((nextSections ?? []) as SourceSection[]);
-      setFacts((nextFacts ?? []) as EvidenceFact[]);
+      setFacts(normalizeFacts(nextFacts as EvidenceFact[] | null | undefined));
+      setJobs((nextJobs ?? []) as JobDescription[]);
       const firstSource = (nextSources as CandidateSource[] | undefined)?.[0];
       if (!selectedSourceID && firstSource) {
         setSelectedSourceID(firstSource.id);
+      }
+      const firstJob = (nextJobs as JobDescription[] | undefined)?.[0];
+      if (!selectedJobID && firstJob) {
+        setSelectedJobID(firstJob.id);
+        await refreshJobContext(firstJob.id);
       }
       setLoadState('ready');
     } catch (err) {
@@ -210,15 +248,34 @@ function App() {
   }
 
   async function refreshWorkflow() {
-    const [nextSources, nextSections, nextFacts] = await Promise.all([
+    const [nextSources, nextSections, nextFacts, nextJobs] = await Promise.all([
       ListCandidateSources(),
       ListSourceSections(0),
       ListEvidenceFacts('all'),
+      ListJobDescriptions(),
     ]);
     setSources((nextSources ?? []) as CandidateSource[]);
     setSections((nextSections ?? []) as SourceSection[]);
-    setFacts((nextFacts ?? []) as EvidenceFact[]);
+    setFacts(normalizeFacts(nextFacts as EvidenceFact[] | null | undefined));
+    setJobs((nextJobs ?? []) as JobDescription[]);
     await refreshEvents();
+  }
+
+  async function refreshJobContext(jobID = selectedJobID) {
+    if (!jobID) {
+      setJobRequirements([]);
+      setJobMatches([]);
+      setBulletDrafts([]);
+      return;
+    }
+    const [requirements, matches, drafts] = await Promise.all([
+      ListJobRequirements(jobID),
+      ListJobFactMatches(jobID),
+      ListTailoredBulletDrafts(jobID),
+    ]);
+    setJobRequirements(normalizeRequirements(requirements as JobRequirement[] | null | undefined));
+    setJobMatches(normalizeMatches(matches as JobFactMatch[] | null | undefined));
+    setBulletDrafts(normalizeDrafts(drafts as TailoredBulletDraft[] | null | undefined));
   }
 
   async function runAction(name: string, action: () => Promise<void>) {
@@ -281,7 +338,7 @@ function App() {
         linkedin: draft.contact.linkedin || current.contact.linkedin,
         github: draft.contact.github || current.contact.github,
         portfolio: draft.contact.portfolio || current.contact.portfolio,
-        links: draft.contact.links.length ? draft.contact.links : current.contact.links,
+          links: draft.contact.links.length ? draft.contact.links : current.contact.links,
         verified: false,
       },
       records: mergeDraftRecords(current.records, draft.records),
@@ -383,7 +440,7 @@ function App() {
         section_id: selectedSection.id,
       });
       const nextFacts = (await ListEvidenceFacts('all')) as EvidenceFact[];
-      setFacts(nextFacts);
+      setFacts(normalizeFacts(nextFacts));
       await refreshEvents();
       setActiveTab('facts');
     });
@@ -401,7 +458,7 @@ function App() {
         status,
         review_note: fact.review_note,
       })) as EvidenceFact;
-      setFacts((previous) => previous.map((item) => item.id === saved.id ? saved : item));
+      setFacts((previous) => normalizeFacts(previous.map((item) => item.id === saved.id ? saved : item)));
       await refreshEvents();
     });
   }
@@ -410,7 +467,109 @@ function App() {
     await runAction(`delete-fact-${factID}`, async () => {
       await DeleteEvidenceFact({id: factID});
       const nextFacts = (await ListEvidenceFacts('all')) as EvidenceFact[];
-      setFacts(nextFacts);
+      setFacts(normalizeFacts(nextFacts));
+      await refreshEvents();
+    });
+  }
+
+  async function saveJob(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await runAction('save-job', async () => {
+      const saved = selectedJobID
+        ? (await UpdateJobDescription({id: selectedJobID, ...jobDraft})) as JobDescription
+        : (await CreateJobDescription(jobDraft)) as JobDescription;
+      setSelectedJobID(saved.id);
+      setJobDraft({
+        company: saved.company,
+        title: saved.title,
+        url: saved.url,
+        raw_text: saved.raw_text,
+      });
+      const nextJobs = (await ListJobDescriptions()) as JobDescription[];
+      setJobs(nextJobs);
+      await refreshJobContext(saved.id);
+      await refreshEvents();
+    });
+  }
+
+  async function selectJob(job: JobDescription) {
+    setSelectedJobID(job.id);
+    setJobDraft({
+      company: job.company,
+      title: job.title,
+      url: job.url,
+      raw_text: job.raw_text,
+    });
+    await refreshJobContext(job.id);
+  }
+
+  async function newJob() {
+    setSelectedJobID(0);
+    setJobDraft({company: '', title: '', url: '', raw_text: ''});
+    setJobRequirements([]);
+    setJobMatches([]);
+    setBulletDrafts([]);
+  }
+
+  async function deleteJob(jobID: number) {
+    await runAction(`delete-job-${jobID}`, async () => {
+      await DeleteJobDescription({id: jobID});
+      if (selectedJobID === jobID) {
+        await newJob();
+      }
+      const nextJobs = (await ListJobDescriptions()) as JobDescription[];
+      setJobs(nextJobs);
+      await refreshEvents();
+    });
+  }
+
+  async function parseJob() {
+    if (!selectedJobID) return;
+    await runAction('parse-job', async () => {
+      const requirements = (await ParseJobDescription(selectedJobID)) as JobRequirement[];
+      setJobRequirements(normalizeRequirements(requirements));
+      setJobMatches([]);
+      setBulletDrafts([]);
+      await refreshEvents();
+    });
+  }
+
+  async function buildMatchMap() {
+    if (!selectedJobID) return;
+    await runAction('build-match-map', async () => {
+      const matches = (await BuildJobMatchMap(selectedJobID)) as JobFactMatch[];
+      setJobMatches(normalizeMatches(matches));
+      await refreshEvents();
+    });
+  }
+
+  async function generateBulletDrafts() {
+    if (!selectedJobID) return;
+    await runAction('generate-bullets', async () => {
+      const drafts = (await GenerateTailoredBulletDrafts(selectedJobID)) as TailoredBulletDraft[];
+      setBulletDrafts(normalizeDrafts(drafts));
+      await refreshEvents();
+    });
+  }
+
+  async function updateBulletDraft(draft: TailoredBulletDraft, status = draft.status) {
+    await runAction(`update-draft-${draft.id}`, async () => {
+      const saved = (await UpdateTailoredBulletDraft({
+        id: draft.id,
+        draft_text: draft.draft_text,
+        rationale: draft.rationale,
+        status,
+        risk_flags: draft.risk_flags,
+      })) as TailoredBulletDraft;
+      setBulletDrafts((previous) => normalizeDrafts(previous.map((item) => item.id === saved.id ? saved : item)));
+      await refreshEvents();
+    });
+  }
+
+  async function deleteBulletDraft(draftID: number) {
+    await runAction(`delete-draft-${draftID}`, async () => {
+      await DeleteTailoredBulletDraft({id: draftID});
+      setBulletDrafts((previous) => previous.filter((draft) => draft.id !== draftID));
       await refreshEvents();
     });
   }
@@ -489,6 +648,7 @@ function App() {
       <section className="border-b border-slate-200 bg-white">
         <nav className="mx-auto flex max-w-7xl gap-2 overflow-x-auto px-5 py-3">
           <TabButton active={activeTab === 'sources'} label="Sources" icon={<Upload size={16} />} onClick={() => setActiveTab('sources')} />
+          <TabButton active={activeTab === 'jobs'} label="Jobs" icon={<BriefcaseBusiness size={16} />} onClick={() => setActiveTab('jobs')} />
           <TabButton active={activeTab === 'profile'} label="Profile" icon={<UserRound size={16} />} onClick={() => setActiveTab('profile')} />
           <TabButton active={activeTab === 'sections'} label="Sections" icon={<Layers3 size={16} />} onClick={() => setActiveTab('sections')} />
           <TabButton active={activeTab === 'facts'} label={`Fact Review${queuedFacts.length ? ` ${queuedFacts.length}` : ''}`} icon={<ListChecks size={16} />} onClick={() => setActiveTab('facts')} />
@@ -533,6 +693,31 @@ function App() {
           />
         )}
 
+        {activeTab === 'jobs' && (
+          <JobsView
+            busyAction={busyAction}
+            draft={jobDraft}
+            facts={facts}
+            jobs={jobs}
+            matches={jobMatches}
+            onBuildMatchMap={buildMatchMap}
+            onChangeDraft={(draft) => setBulletDrafts((previous) => normalizeDrafts(previous.map((item) => item.id === draft.id ? draft : item)))}
+            onDeleteDraft={deleteBulletDraft}
+            onDeleteJob={deleteJob}
+            onDraftChange={setJobDraft}
+            onGenerateDrafts={generateBulletDrafts}
+            onNewJob={newJob}
+            onParseJob={parseJob}
+            onSaveDraft={(draft) => updateBulletDraft(draft)}
+            onSaveJob={saveJob}
+            onSelectJob={selectJob}
+            onSetDraftStatus={updateBulletDraft}
+            requirements={jobRequirements}
+            selectedJobID={selectedJobID}
+            tailoredDrafts={bulletDrafts}
+          />
+        )}
+
         {activeTab === 'sections' && (
           <SectionsView
             busyAction={busyAction}
@@ -555,7 +740,7 @@ function App() {
           <FactsView
             busyAction={busyAction}
             facts={facts}
-            onChange={(fact) => setFacts((previous) => previous.map((item) => item.id === fact.id ? fact : item))}
+            onChange={(fact) => setFacts((previous) => normalizeFacts(previous.map((item) => item.id === fact.id ? fact : item)))}
             onDelete={deleteFact}
             onReview={reviewFact}
           />
@@ -772,6 +957,194 @@ function SourcesView({
   );
 }
 
+function JobsView({
+  busyAction,
+  draft,
+  facts,
+  jobs,
+  matches,
+  onBuildMatchMap,
+  onChangeDraft,
+  onDeleteDraft,
+  onDeleteJob,
+  onDraftChange,
+  onGenerateDrafts,
+  onNewJob,
+  onParseJob,
+  onSaveDraft,
+  onSaveJob,
+  onSelectJob,
+  onSetDraftStatus,
+  requirements,
+  selectedJobID,
+  tailoredDrafts,
+}: {
+  busyAction: string;
+  draft: {company: string; title: string; url: string; raw_text: string};
+  facts: EvidenceFact[];
+  jobs: JobDescription[];
+  matches: JobFactMatch[];
+  onBuildMatchMap: () => void;
+  onChangeDraft: (draft: TailoredBulletDraft) => void;
+  onDeleteDraft: (id: number) => void;
+  onDeleteJob: (id: number) => void;
+  onDraftChange: (draft: {company: string; title: string; url: string; raw_text: string}) => void;
+  onGenerateDrafts: () => void;
+  onNewJob: () => void;
+  onParseJob: () => void;
+  onSaveDraft: (draft: TailoredBulletDraft) => void;
+  onSaveJob: (event: FormEvent<HTMLFormElement>) => void;
+  onSelectJob: (job: JobDescription) => void;
+  onSetDraftStatus: (draft: TailoredBulletDraft, status: string) => void;
+  requirements: JobRequirement[];
+  selectedJobID: number;
+  tailoredDrafts: TailoredBulletDraft[];
+}) {
+  const matchesByRequirement = new Map<number, JobFactMatch[]>();
+  matches.forEach((match) => {
+    matchesByRequirement.set(match.requirement_id, [...(matchesByRequirement.get(match.requirement_id) ?? []), match]);
+  });
+  const requirementLabel = (id: number) => requirements.find((req) => req.id === id)?.requirement_text ?? `Requirement ${id}`;
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[340px_1fr]">
+      <Panel icon={<BriefcaseBusiness size={18} />} title="Job descriptions" subtitle="Paste JD text and keep one match map per application.">
+        <div className="space-y-4">
+          <SecondaryButton label="New job" onClick={onNewJob} />
+          <div className="space-y-2">
+            {jobs.length === 0 ? (
+              <EmptyState text="No jobs saved yet." />
+            ) : (
+              jobs.map((job) => (
+                <div
+                  key={job.id}
+                  className={`flex items-start gap-2 rounded-md border p-3 text-sm ${job.id === selectedJobID ? 'border-sky-300 bg-sky-50' : 'border-slate-200 bg-slate-50'}`}
+                >
+                  <button type="button" onClick={() => onSelectJob(job)} className="min-w-0 flex-1 text-left">
+                    <span className="font-semibold text-slate-950">{job.title}</span>
+                    <span className="mt-1 block text-slate-600">{job.company || 'Company not set'}</span>
+                    <span className="mt-2 line-clamp-3 block text-slate-500">{job.raw_text}</span>
+                  </button>
+                  <IconOnlyButton label="Delete job" onClick={() => onDeleteJob(job.id)}>
+                    <Trash2 size={16} />
+                  </IconOnlyButton>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </Panel>
+
+      <div className="space-y-4">
+        <Panel icon={<FileText size={18} />} title="JD intake" subtitle="Paste the job description and parse it into requirements.">
+          <form className="space-y-4" onSubmit={onSaveJob}>
+            <div className="grid gap-3 md:grid-cols-3">
+              <TextInput label="Company" value={draft.company} onChange={(value) => onDraftChange({...draft, company: value})} />
+              <TextInput label="Title" value={draft.title} onChange={(value) => onDraftChange({...draft, title: value})} />
+              <TextInput label="URL" value={draft.url} onChange={(value) => onDraftChange({...draft, url: value})} />
+            </div>
+            <TextArea label="Raw JD text" rows={10} value={draft.raw_text} onChange={(value) => onDraftChange({...draft, raw_text: value})} />
+            <div className="grid gap-3 md:grid-cols-4">
+              <IconButton label={selectedJobID ? 'Update JD' : 'Save JD'} submit disabled={busyAction === 'save-job' || draft.raw_text.trim() === ''}>
+                <Save size={16} />
+              </IconButton>
+              <IconButton label="Parse JD" onClick={onParseJob} disabled={!selectedJobID || busyAction === 'parse-job'}>
+                <Sparkles size={16} />
+              </IconButton>
+              <IconButton label="Build matches" onClick={onBuildMatchMap} disabled={!selectedJobID || requirements.length === 0 || facts.length === 0 || busyAction === 'build-match-map'}>
+                <ListChecks size={16} />
+              </IconButton>
+              <IconButton label="Draft bullets" onClick={onGenerateDrafts} disabled={!selectedJobID || matches.length === 0 || busyAction === 'generate-bullets'}>
+                <Sparkles size={16} />
+              </IconButton>
+            </div>
+          </form>
+        </Panel>
+
+        <Panel icon={<ListChecks size={18} />} title="Requirements and matches" subtitle="All fact statuses are shown so risky evidence stays visible.">
+          <div className="space-y-3">
+            {requirements.length === 0 ? (
+              <EmptyState text="Parse a saved JD to create requirements." />
+            ) : (
+              requirements.map((requirement) => (
+                <div key={requirement.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <StatusBadge text={requirement.priority} />
+                    <StatusBadge text={requirement.category} />
+                    {asStringArray(requirement.keywords).map((keyword) => <StatusBadge key={keyword} text={keyword} />)}
+                  </div>
+                  <p className="text-sm font-semibold text-slate-950">{requirement.requirement_text}</p>
+                  <p className="mt-1 text-sm text-slate-600">{requirement.source_quote}</p>
+                  <div className="mt-3 space-y-2">
+                    {(matchesByRequirement.get(requirement.id) ?? []).length === 0 ? (
+                      <p className="text-sm text-slate-500">No matches yet.</p>
+                    ) : (
+                      (matchesByRequirement.get(requirement.id) ?? []).map((match) => (
+                        <div key={match.id} className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="mb-2 flex flex-wrap items-center gap-2">
+                            <StatusBadge text={match.coverage_status} />
+                            <StatusBadge text={`${Math.round(match.score * 100)}%`} />
+                            <StatusBadge text={match.fact_status} />
+                            {asStringArray(match.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
+                          </div>
+                          <p className="text-sm text-slate-900">{match.fact_text}</p>
+                          <p className="mt-1 text-xs text-slate-500">{match.rationale}</p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </Panel>
+
+        <Panel icon={<Sparkles size={18} />} title="Saved bullet drafts" subtitle="Suggestions only; they do not overwrite source truth.">
+          <div className="space-y-3">
+            {tailoredDrafts.length === 0 ? (
+              <EmptyState text="Generate drafts after building a match map." />
+            ) : (
+              tailoredDrafts.map((item) => (
+                <div key={item.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
+                    <StatusBadge text={item.status} />
+                    <StatusBadge text={requirementLabel(item.requirement_id)} />
+                    {asStringArray(item.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
+                  </div>
+                  <TextArea
+                    label="Draft bullet"
+                    rows={3}
+                    value={item.draft_text}
+                    onChange={(value) => onChangeDraft({...item, draft_text: value})}
+                  />
+                  <div className="mt-3 grid gap-3 md:grid-cols-[1fr_220px]">
+                    <TextInput label="Rationale" value={item.rationale} onChange={(value) => onChangeDraft({...item, rationale: value})} />
+                    <TextInput label="Risk flags" value={item.risk_flags.join(', ')} onChange={(value) => onChangeDraft({...item, risk_flags: splitList(value)})} />
+                  </div>
+                  <div className="mt-3 grid gap-3 md:grid-cols-5">
+                    <IconButton label="Save" onClick={() => onSaveDraft(item)} disabled={busyAction === `update-draft-${item.id}`}>
+                      <Save size={16} />
+                    </IconButton>
+                    <SecondaryButton label="Accept" onClick={() => onSetDraftStatus(item, 'accepted')} />
+                    <SecondaryButton label="Needs review" onClick={() => onSetDraftStatus(item, 'needs_review')} />
+                    <DangerButton label="Reject" onClick={() => onSetDraftStatus(item, 'rejected')} />
+                    <IconButton label="Copy" onClick={() => navigator.clipboard?.writeText(item.draft_text)} disabled={false}>
+                      <Clipboard size={16} />
+                    </IconButton>
+                  </div>
+                  <div className="mt-3">
+                    <DangerButton label="Delete draft" onClick={() => onDeleteDraft(item.id)} />
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </Panel>
+      </div>
+    </div>
+  );
+}
+
 function SectionsView({
   busyAction,
   onDetect,
@@ -894,7 +1267,7 @@ function FactsView({
   onReview: (fact: EvidenceFact, status: string) => void;
 }) {
   return (
-    <Panel icon={<ListChecks size={18} />} title="Fact review queue" subtitle="Only risky or uncertain facts need attention.">
+    <Panel icon={<ListChecks size={18} />} title="Fact review queue" subtitle="Approve the compact atoms; keep the quote as source evidence. Notes are optional.">
       <div className="space-y-4">
         {facts.length === 0 ? (
           <EmptyState text="No evidence facts extracted yet." />
@@ -906,18 +1279,18 @@ function FactsView({
                   <StatusBadge text={fact.status} />
                   <StatusBadge text={fact.confidence} />
                   {fact.auto_approved && <StatusBadge text="auto approved" />}
-                  {fact.risk_flags.map((flag) => <StatusBadge key={flag} text={flag} />)}
+                  {asStringArray(fact.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
                 </div>
                 <IconOnlyButton label="Delete fact" onClick={() => onDelete(fact.id)}>
                   <Trash2 size={16} />
                 </IconOnlyButton>
               </div>
               <div className="grid gap-3 lg:grid-cols-2">
-                <TextArea label="Fact" rows={5} value={fact.fact_text} onChange={(value) => onChange({...fact, fact_text: value})} />
+                <TextArea label="Evidence atoms" rows={5} value={fact.fact_text} onChange={(value) => onChange({...fact, fact_text: value})} />
                 <TextArea label="Evidence quote" rows={5} value={fact.evidence_quote} onChange={(value) => onChange({...fact, evidence_quote: value})} />
               </div>
               <div className="mt-3 grid gap-3 md:grid-cols-3">
-                <TextInput label="Technologies" value={fact.technologies.join(', ')} onChange={(value) => onChange({...fact, technologies: splitList(value)})} />
+                <TextInput label="Technologies" value={asStringArray(fact.technologies).join(', ')} onChange={(value) => onChange({...fact, technologies: splitList(value)})} />
                 <SelectInput
                   label="Confidence"
                   value={fact.confidence}
@@ -928,7 +1301,7 @@ function FactsView({
                     ['low', 'Low'],
                   ]}
                 />
-                <TextInput label="Review note" value={fact.review_note} onChange={(value) => onChange({...fact, review_note: value})} />
+                <TextInput label="Review note (optional)" placeholder="Why changed/rejected, or leave blank." value={fact.review_note} onChange={(value) => onChange({...fact, review_note: value})} />
               </div>
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <IconButton label="Approve" onClick={() => onReview(fact, 'approved')} disabled={busyAction === `review-fact-${fact.id}`}>
@@ -1412,9 +1785,18 @@ function StatusBadge({text}: {text: string}) {
 }
 
 function normalizeProfile(value: CandidateProfile): CandidateProfile {
+  const contact = {...emptyProfile.contact, ...(value?.contact ?? {})};
   return {
-    contact: {...emptyProfile.contact, ...(value?.contact ?? {})},
-    records: value?.records ?? [],
+    contact: {
+      ...contact,
+      links: asStringArray(contact.links),
+      verified: Boolean(contact.verified),
+    },
+    records: asArray(value?.records).map((record) => ({
+      ...newRecord(record.record_type || 'project'),
+      ...record,
+      verified: Boolean(record.verified),
+    })),
   };
 }
 
@@ -1435,9 +1817,11 @@ function newRecord(recordType: string): CandidateProfileRecord {
 }
 
 function mergeDraftRecords(current: CandidateProfileRecord[], draft: CandidateProfileRecord[]) {
-  const seen = new Set(current.map((record) => `${record.record_type}|${record.organization}|${record.role}|${record.start_date}|${record.end_date}|${record.value}`.toLowerCase()));
-  const next = [...current];
-  for (const record of draft) {
+  const currentRecords = asArray(current);
+  const draftRecords = asArray(draft);
+  const seen = new Set(currentRecords.map((record) => `${record.record_type}|${record.organization}|${record.role}|${record.start_date}|${record.end_date}|${record.value}`.toLowerCase()));
+  const next = [...currentRecords];
+  for (const record of draftRecords) {
     const key = `${record.record_type}|${record.organization}|${record.role}|${record.start_date}|${record.end_date}|${record.value}`.toLowerCase();
     if (!seen.has(key)) {
       next.push({...record, verified: false});
@@ -1445,6 +1829,44 @@ function mergeDraftRecords(current: CandidateProfileRecord[], draft: CandidatePr
     }
   }
   return next;
+}
+
+function normalizeFacts(value?: EvidenceFact[] | null) {
+  return asArray(value).map((fact) => ({
+    ...fact,
+    technologies: asStringArray(fact.technologies),
+    risk_flags: asStringArray(fact.risk_flags),
+  }));
+}
+
+function normalizeRequirements(value?: JobRequirement[] | null) {
+  return asArray(value).map((requirement) => ({
+    ...requirement,
+    keywords: asStringArray(requirement.keywords),
+  }));
+}
+
+function normalizeMatches(value?: JobFactMatch[] | null) {
+  return asArray(value).map((match) => ({
+    ...match,
+    risk_flags: asStringArray(match.risk_flags),
+  }));
+}
+
+function normalizeDrafts(value?: TailoredBulletDraft[] | null) {
+  return asArray(value).map((draft) => ({
+    ...draft,
+    fact_ids: asArray(draft.fact_ids),
+    risk_flags: asStringArray(draft.risk_flags),
+  }));
+}
+
+function asArray<T>(value?: T[] | null): T[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function asStringArray(value?: string[] | null): string[] {
+  return Array.isArray(value) ? value : [];
 }
 
 function splitList(value: string) {

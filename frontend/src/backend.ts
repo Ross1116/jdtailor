@@ -1,11 +1,16 @@
 import {
+  BuildJobMatchMap as WailsBuildJobMatchMap,
   CreateCandidateSource as WailsCreateCandidateSource,
+  CreateJobDescription as WailsCreateJobDescription,
   DeleteCandidateSource as WailsDeleteCandidateSource,
   DeleteEvidenceFact as WailsDeleteEvidenceFact,
+  DeleteJobDescription as WailsDeleteJobDescription,
   DeleteSourceSection as WailsDeleteSourceSection,
+  DeleteTailoredBulletDraft as WailsDeleteTailoredBulletDraft,
   DetectSourceSections as WailsDetectSourceSections,
   DraftCandidateProfileFromSource as WailsDraftCandidateProfileFromSource,
   ExtractEvidenceFacts as WailsExtractEvidenceFacts,
+  GenerateTailoredBulletDrafts as WailsGenerateTailoredBulletDrafts,
   GetCandidateProfile as WailsGetCandidateProfile,
   GetHealth as WailsGetHealth,
   GetRecentEvents as WailsGetRecentEvents,
@@ -13,16 +18,23 @@ import {
   GetToolStatus as WailsGetToolStatus,
   ImportCandidateSourceFile as WailsImportCandidateSourceFile,
   InstallTectonic as WailsInstallTectonic,
+  ListJobDescriptions as WailsListJobDescriptions,
+  ListJobFactMatches as WailsListJobFactMatches,
+  ListJobRequirements as WailsListJobRequirements,
   ListCandidateSources as WailsListCandidateSources,
   ListEvidenceFacts as WailsListEvidenceFacts,
   ListSourceSections as WailsListSourceSections,
+  ListTailoredBulletDrafts as WailsListTailoredBulletDrafts,
+  ParseJobDescription as WailsParseJobDescription,
   RenderSamplePDF as WailsRenderSamplePDF,
   SaveAPIKey as WailsSaveAPIKey,
   SaveCandidateProfile as WailsSaveCandidateProfile,
   SaveSettings as WailsSaveSettings,
   TestLLM as WailsTestLLM,
   UpdateEvidenceFactReview as WailsUpdateEvidenceFactReview,
+  UpdateJobDescription as WailsUpdateJobDescription,
   UpdateSourceSection as WailsUpdateSourceSection,
+  UpdateTailoredBulletDraft as WailsUpdateTailoredBulletDraft,
 } from '../wailsjs/go/main/App';
 
 export type CandidateProfile = {
@@ -96,6 +108,57 @@ export type EvidenceFact = {
   updated_at: string;
 };
 
+export type JobDescription = {
+  id: number;
+  company: string;
+  title: string;
+  url: string;
+  raw_text: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JobRequirement = {
+  id: number;
+  job_id: number;
+  category: string;
+  requirement_text: string;
+  keywords: string[];
+  priority: string;
+  source_quote: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JobFactMatch = {
+  id: number;
+  job_id: number;
+  requirement_id: number;
+  fact_id: number;
+  score: number;
+  rationale: string;
+  coverage_status: string;
+  fact_status: string;
+  fact_text: string;
+  evidence_quote: string;
+  risk_flags: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type TailoredBulletDraft = {
+  id: number;
+  job_id: number;
+  requirement_id: number;
+  fact_ids: number[];
+  draft_text: string;
+  rationale: string;
+  status: string;
+  risk_flags: string[];
+  created_at: string;
+  updated_at: string;
+};
+
 const hasWailsBackend = () => Boolean(window.go?.main?.App);
 
 const now = () => new Date().toISOString();
@@ -125,6 +188,10 @@ let mockProfile: CandidateProfile = {
 let mockSources: CandidateSource[] = [];
 let mockSections: SourceSection[] = [];
 let mockFacts: EvidenceFact[] = [];
+let mockJobs: JobDescription[] = [];
+let mockRequirements: JobRequirement[] = [];
+let mockMatches: JobFactMatch[] = [];
+let mockDrafts: TailoredBulletDraft[] = [];
 
 const mockEvents = [
   {
@@ -413,9 +480,9 @@ export async function ExtractEvidenceFacts(input: {source_id: number; section_id
     section_id: section.id,
     fact_text: item.fact_text,
     evidence_quote: item.evidence_quote,
-    technologies: [],
-    confidence: 'medium',
-    risk_flags: ['mock_review'],
+    technologies: item.technologies,
+    confidence: item.confidence,
+    risk_flags: item.risk_flags,
     status: 'needs_review',
     auto_approved: false,
     review_note: '',
@@ -458,6 +525,188 @@ export async function DeleteEvidenceFact(input: {id: number}) {
   }
   mockFacts = mockFacts.filter((fact) => fact.id !== input.id);
   mockEvents.unshift(mockEvent('info', 'mock fact deleted'));
+}
+
+export async function ListJobDescriptions() {
+  if (hasWailsBackend()) {
+    return WailsListJobDescriptions();
+  }
+  return mockJobs;
+}
+
+export async function CreateJobDescription(input: {company: string; title: string; url: string; raw_text: string}) {
+  if (hasWailsBackend()) {
+    return WailsCreateJobDescription(input);
+  }
+  const timestamp = now();
+  const job: JobDescription = {
+    id: Date.now(),
+    company: input.company.trim(),
+    title: input.title.trim() || 'Untitled job',
+    url: input.url.trim(),
+    raw_text: input.raw_text.trim(),
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+  mockJobs = [job, ...mockJobs];
+  mockEvents.unshift(mockEvent('info', 'mock job saved'));
+  return job;
+}
+
+export async function UpdateJobDescription(input: {id: number; company: string; title: string; url: string; raw_text: string}) {
+  if (hasWailsBackend()) {
+    return WailsUpdateJobDescription(input);
+  }
+  const timestamp = now();
+  mockJobs = mockJobs.map((job) => job.id === input.id ? {
+    ...job,
+    company: input.company.trim(),
+    title: input.title.trim() || 'Untitled job',
+    url: input.url.trim(),
+    raw_text: input.raw_text.trim(),
+    updated_at: timestamp,
+  } : job);
+  return mockJobs.find((job) => job.id === input.id);
+}
+
+export async function DeleteJobDescription(input: {id: number}) {
+  if (hasWailsBackend()) {
+    return WailsDeleteJobDescription(input);
+  }
+  mockJobs = mockJobs.filter((job) => job.id !== input.id);
+  mockRequirements = mockRequirements.filter((req) => req.job_id !== input.id);
+  mockMatches = mockMatches.filter((match) => match.job_id !== input.id);
+  mockDrafts = mockDrafts.filter((draft) => draft.job_id !== input.id);
+  mockEvents.unshift(mockEvent('info', 'mock job deleted'));
+}
+
+export async function ParseJobDescription(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsParseJobDescription(jobID);
+  }
+  const job = mockJobs.find((item) => item.id === jobID);
+  if (!job) return [];
+  const timestamp = now();
+  const lines = job.raw_text.split(/\n|\.|;/).map((line) => line.trim()).filter((line) => line.length > 10);
+  const reqs = lines.slice(0, 12).map((line, index): JobRequirement => ({
+    id: Date.now() + index,
+    job_id: jobID,
+    category: mockRequirementCategory(line),
+    requirement_text: line.replace(/^[-•]\s*/, ''),
+    keywords: extractKeywords(line),
+    priority: index < 3 ? 'high' : 'medium',
+    source_quote: line,
+    created_at: timestamp,
+    updated_at: timestamp,
+  }));
+  mockRequirements = [...reqs, ...mockRequirements.filter((req) => req.job_id !== jobID)];
+  mockMatches = mockMatches.filter((match) => match.job_id !== jobID);
+  mockDrafts = mockDrafts.filter((draft) => draft.job_id !== jobID);
+  mockEvents.unshift(mockEvent('info', 'mock job requirements parsed'));
+  return reqs;
+}
+
+export async function ListJobRequirements(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsListJobRequirements(jobID);
+  }
+  return mockRequirements.filter((req) => req.job_id === jobID);
+}
+
+export async function BuildJobMatchMap(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsBuildJobMatchMap(jobID);
+  }
+  const timestamp = now();
+  const requirements = mockRequirements.filter((req) => req.job_id === jobID);
+  const matches: JobFactMatch[] = [];
+  for (const req of requirements) {
+    const reqTerms = new Set(req.keywords.map((word) => word.toLowerCase()));
+    for (const fact of mockFacts) {
+      const factText = `${fact.fact_text} ${fact.technologies.join(' ')}`.toLowerCase();
+      const overlap = [...reqTerms].filter((term) => factText.includes(term));
+      if (!overlap.length) continue;
+      matches.push({
+        id: Date.now() + matches.length,
+        job_id: jobID,
+        requirement_id: req.id,
+        fact_id: fact.id,
+        score: Math.min(1, 0.45 + overlap.length * 0.18),
+        rationale: `Keyword overlap: ${overlap.join(', ')}`,
+        coverage_status: overlap.length >= 2 ? 'strong' : 'partial',
+        fact_status: fact.status,
+        fact_text: fact.fact_text,
+        evidence_quote: fact.evidence_quote,
+        risk_flags: fact.risk_flags,
+        created_at: timestamp,
+        updated_at: timestamp,
+      });
+    }
+  }
+  mockMatches = [...matches, ...mockMatches.filter((match) => match.job_id !== jobID)];
+  mockEvents.unshift(mockEvent('info', 'mock match map built'));
+  return matches;
+}
+
+export async function ListJobFactMatches(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsListJobFactMatches(jobID);
+  }
+  return mockMatches.filter((match) => match.job_id === jobID);
+}
+
+export async function GenerateTailoredBulletDrafts(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsGenerateTailoredBulletDrafts(jobID);
+  }
+  const timestamp = now();
+  const grouped = new Map<number, JobFactMatch[]>();
+  mockMatches.filter((match) => match.job_id === jobID).forEach((match) => {
+    grouped.set(match.requirement_id, [...(grouped.get(match.requirement_id) ?? []), match]);
+  });
+  const drafts: TailoredBulletDraft[] = [...grouped.entries()].map(([requirementID, matches], index) => {
+    const topMatches = matches.sort((a, b) => b.score - a.score).slice(0, 2);
+    const risky = topMatches.flatMap((match) => match.fact_status === 'approved' ? match.risk_flags : [match.fact_status, ...match.risk_flags]);
+    return {
+      id: Date.now() + index,
+      job_id: jobID,
+      requirement_id: requirementID,
+      fact_ids: topMatches.map((match) => match.fact_id),
+      draft_text: `- ${topMatches[0]?.fact_text ?? 'Tailored bullet needs evidence.'}`,
+      rationale: topMatches.map((match) => match.rationale).join('; '),
+      status: 'needs_review',
+      risk_flags: [...new Set(risky)].filter(Boolean),
+      created_at: timestamp,
+      updated_at: timestamp,
+    };
+  });
+  mockDrafts = [...drafts, ...mockDrafts.filter((draft) => draft.job_id !== jobID)];
+  mockEvents.unshift(mockEvent('info', 'mock tailored bullet drafts generated'));
+  return drafts;
+}
+
+export async function ListTailoredBulletDrafts(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsListTailoredBulletDrafts(jobID);
+  }
+  return mockDrafts.filter((draft) => draft.job_id === jobID);
+}
+
+export async function UpdateTailoredBulletDraft(input: {id: number; draft_text: string; rationale: string; status: string; risk_flags: string[]}) {
+  if (hasWailsBackend()) {
+    return WailsUpdateTailoredBulletDraft(input);
+  }
+  const timestamp = now();
+  mockDrafts = mockDrafts.map((draft) => draft.id === input.id ? {...draft, ...input, updated_at: timestamp} : draft);
+  return mockDrafts.find((draft) => draft.id === input.id);
+}
+
+export async function DeleteTailoredBulletDraft(input: {id: number}) {
+  if (hasWailsBackend()) {
+    return WailsDeleteTailoredBulletDraft(input);
+  }
+  mockDrafts = mockDrafts.filter((draft) => draft.id !== input.id);
+  mockEvents.unshift(mockEvent('info', 'mock bullet draft deleted'));
 }
 
 function mockEvent(level: string, message: string) {
@@ -716,10 +965,7 @@ function fallbackFactsFromSection(section: SourceSection) {
   const metadataCount = section.section_type === 'experience' || section.section_type === 'education' ? 2 : section.section_type === 'project' ? 1 : 0;
   return lines
     .filter((line, index) => index >= metadataCount && !isKnownSectionHeading(line) && line.replace(/^- /, '').trim().length >= 12)
-    .map((line) => ({
-      fact_text: line.replace(/^- /, '').trim(),
-      evidence_quote: line,
-    }));
+    .flatMap((line) => atomicFactsFromLine(line));
 }
 
 function ensureKnownSectionHeadingsOnLines(text: string) {
@@ -860,4 +1106,182 @@ function splitDateRange(value: string): [string, string] {
     return [parts[0].trim(), parts.slice(1).join('-').trim()];
   }
   return ['', value.trim()];
+}
+
+function compactEvidenceFact(value: string) {
+  return atomicFactsFromLine(value)[0]?.fact_text ?? compactCoreEvidenceFact(value);
+}
+
+function atomicFactsFromLine(value: string) {
+  const text = value.replace(/^- /, '').replace(/\.$/, '').trim();
+  const technologies = extractTechnologies(text);
+  const riskFlags = inferRiskFlags(text);
+  const confidence = inferConfidence(text, technologies, riskFlags);
+  const base = {
+    evidence_quote: value,
+    technologies,
+    confidence,
+    risk_flags: riskFlags,
+  };
+  const facts = [
+    compactCoreEvidenceFact(text),
+  ];
+  const scope = inferScope(text);
+  if (scope) facts.push(keyValueFact('scope', scope, 'tools', technologies.join(', ')));
+  const environment = inferEnvironment(text);
+  if (environment) facts.push(keyValueFact('environment', environment, 'tools', technologies.join(', ')));
+  const figures = extractFigures(text);
+  const outcome = inferOutcome(text);
+  if (figures.length || outcome) facts.push(keyValueFact('metric', figures.join(', '), 'outcome', outcome));
+  return [...new Set(facts.filter(Boolean))].map((factText) => ({
+    ...base,
+    fact_text: factText,
+  }));
+}
+
+function compactCoreEvidenceFact(value: string) {
+  const text = value.replace(/^- /, '').replace(/\.$/, '').trim();
+  const technologies = extractTechnologies(text);
+  return keyValueFact(
+    'actions', extractActions(text).join(', '),
+    'artifact', inferArtifact(text, technologies),
+    'tools', technologies.join(', '),
+  ) || `evidence=${text}`;
+}
+
+function inferAction(text: string) {
+  return extractActions(text)[0] ?? '';
+}
+
+function extractActions(text: string) {
+  const lower = text.toLowerCase();
+  return [...new Set(['built', 'shipped', 'added', 'implemented', 'designed', 'developed', 'created', 'improved', 'reduced', 'migrated', 'automated', 'supported', 'tested', 'integrated', 'delivered', 'optimized', 'deployed']
+    .filter((action) => lower.includes(`${action} `) || lower.startsWith(action)))];
+}
+
+function inferArtifact(text: string, technologies: string[]) {
+  let cleaned = text.replace(/^- /, '').replace(/\.$/, '').trim();
+  const actions = extractActions(cleaned);
+  if (actions.length) {
+    const index = cleaned.toLowerCase().indexOf(actions[0]);
+    if (index >= 0) cleaned = cleaned.slice(index + actions[0].length).trim();
+  }
+  while (/^(and|shipped|built)\s+/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^(and|shipped|built)\s+/i, '').trim();
+  }
+  for (const stop of [' for ', ' across ', ' against ', ' using ', ' with ', ' by ', ' through ', ' to ', ', reducing ', ', improving ']) {
+    const index = cleaned.toLowerCase().indexOf(stop);
+    if (index > 0) cleaned = cleaned.slice(0, index);
+  }
+  for (const tech of technologies) {
+    cleaned = cleaned.replace(new RegExp(`\\b${escapeRegExp(tech)}\\b`, 'ig'), '');
+  }
+  return cleaned.replace(/[ /]+/g, ' ').trim();
+}
+
+function inferScope(text: string) {
+  const cleaned = text.replace(/^- /, '').replace(/\.$/, '').trim();
+  const lower = cleaned.toLowerCase();
+  for (const marker of [' for ', ' across ', ' covering ', ' coverage for ']) {
+    const index = lower.indexOf(marker);
+    if (index < 0) continue;
+    let scope = cleaned.slice(index + marker.length);
+    for (const stop of [' against ', ' using ', ' with ', ' by ', ' through ', ' to ']) {
+      const stopIndex = scope.toLowerCase().indexOf(stop);
+      if (stopIndex > 0) scope = scope.slice(0, stopIndex);
+    }
+    return scope.trim();
+  }
+  return '';
+}
+
+function inferEnvironment(text: string) {
+  const cleaned = text.replace(/^- /, '').replace(/\.$/, '').trim();
+  const lower = cleaned.toLowerCase();
+  for (const marker of [' against ', ' in ', ' on ']) {
+    const index = lower.indexOf(marker);
+    if (index < 0) continue;
+    const candidate = cleaned.slice(index + marker.length).trim();
+    const candidateLower = candidate.toLowerCase();
+    if (candidateLower.includes('workflow') || candidateLower.includes('production') || candidateLower.includes('staging') || candidateLower.includes('linux') || candidateLower.includes('internal system')) {
+      return candidate;
+    }
+  }
+  return '';
+}
+
+function inferOutcome(text: string) {
+  const cleaned = text.replace(/^- /, '').replace(/\.$/, '').trim();
+  const lower = cleaned.toLowerCase();
+  for (const marker of [' reducing ', ' reduced ', ' improving ', ' improved ', ' delivering ', ' delivered ', ' enabling ', ' enabled ']) {
+    const index = lower.indexOf(marker);
+    if (index >= 0) return cleaned.slice(index + 1).trim();
+  }
+  if (lower.includes('coverage')) return 'test coverage';
+  if (lower.includes('production')) return 'production delivery';
+  return '';
+}
+
+function extractFigures(text: string) {
+  return [...new Set(text.match(/\b\d+(?:\.\d+)?\s*(?:%|percent|ms|s|sec|seconds|min|minutes|x|k|m|hours?|days?|weeks?|months?|years?)\b/gi) ?? [])];
+}
+
+function extractTechnologies(text: string) {
+  const known = ['FastAPI', 'PostgreSQL', 'React', 'TypeScript', 'JavaScript', 'Python', 'Go', 'Golang', 'Java', 'C#', 'C++', 'Node.js', 'Node', 'Express', 'Linux', 'Docker', 'Kubernetes', 'AWS', 'Azure', 'GCP', 'Terraform', 'Postgres', 'SQLite', 'MySQL', 'Redis', 'Locust', 'Playwright', 'Tailwind', 'Vite', 'Wails', 'GitHub Actions', 'CI/CD', 'REST', 'GraphQL', 'RBAC', 'SQL', 'NoSQL', 'MongoDB', 'DynamoDB'];
+  const lower = text.toLowerCase();
+  return [...new Set(known
+    .filter((tech) => lower.includes(tech.toLowerCase()))
+    .map((tech) => tech === 'Golang' ? 'Go' : tech === 'Postgres' ? 'PostgreSQL' : tech))];
+}
+
+function inferRiskFlags(text: string) {
+  const lower = text.toLowerCase();
+  const flags: string[] = [];
+  if (lower.includes('approximately') || lower.includes('around ') || lower.includes('~')) flags.push('unclear_metric');
+  if (lower.includes('supported') && !lower.includes('built') && !lower.includes('implemented')) flags.push('unclear_ownership');
+  if (lower.includes('staging-style') || lower.includes('prototype')) flags.push('production_vs_project_ambiguity');
+  return [...new Set(flags)];
+}
+
+function inferConfidence(text: string, technologies: string[], riskFlags: string[]) {
+  const lower = text.toLowerCase();
+  if (riskFlags.length) return 'medium';
+  if (technologies.length || extractFigures(text).length) return 'high';
+  if (lower.includes('built') || lower.includes('shipped') || lower.includes('implemented')) return 'high';
+  return 'medium';
+}
+
+function keyValueFact(...parts: string[]) {
+  const pairs: string[] = [];
+  for (let index = 0; index + 1 < parts.length; index += 2) {
+    const key = parts[index].trim();
+    const value = parts[index + 1].replace(/\.$/, '').trim();
+    if (key && value) pairs.push(`${key}=${value}`);
+  }
+  return pairs.join('; ');
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function mockRequirementCategory(line: string) {
+  const lower = line.toLowerCase();
+  if (lower.includes('must') || lower.includes('required') || lower.includes('experience with')) return 'must_have';
+  if (lower.includes('nice') || lower.includes('preferred') || lower.includes('bonus')) return 'nice_to_have';
+  if (lower.includes('senior') || lower.includes('years') || lower.includes('lead')) return 'seniority';
+  if (lower.includes('industry') || lower.includes('domain')) return 'domain';
+  return 'responsibility';
+}
+
+function extractKeywords(text: string) {
+  const stop = new Set(['with', 'and', 'the', 'for', 'you', 'will', 'must', 'have', 'need', 'needs', 'role', 'work', 'build', 'using']);
+  return [...new Set(
+    text
+      .replace(/[^A-Za-z0-9+#. ]/g, ' ')
+      .split(/\s+/)
+      .map((word) => word.trim())
+      .filter((word) => word.length > 2 && !stop.has(word.toLowerCase()))
+      .slice(0, 8),
+  )];
 }

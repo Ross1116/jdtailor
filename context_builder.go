@@ -499,8 +499,12 @@ Rules:
 - Return JSON shaped as {"facts":[{"fact_text":"","evidence_quote":"","technologies":[],"confidence":"high|medium|low","risk_flags":[]}]}
 - No markdown, no commentary.
 - evidence_quote must be an exact quote from the section.
-- Extract claims from bullet/details lines, not from the heading, company line, role line, or dates alone.
-- Do not return a fact that simply restates the whole section.
+- fact_text must use compact key=value atoms, not resume bullets or sentences. Examples: "actions=added; artifact=load-test coverage; tools=Locust", "scope=login, project listing", "metric=25%%; outcome=reduced manual workload".
+- Return one fact per independently reusable claim. Split compound bullets into multiple facts for core work, scope, environment, and outcome/metrics.
+- Extract keywords, figures, tools, domains, artifacts, and outcomes from bullet/details lines, not from the heading, company line, role line, or dates alone.
+- Do not return a fact that simply restates the whole section or evidence quote.
+- Fill technologies with explicit tools/languages/frameworks/databases/cloud products from the evidence quote.
+- Use high confidence when the quote explicitly states the tool/action/outcome; medium for inferred wording; low for ambiguous ownership or vague claims.
 - Add risk_flags for unclear ownership, unclear metric, ambiguous technology, leadership implication, or production vs project ambiguity.
 
 Heading: %s
@@ -514,7 +518,11 @@ Content:
 	}
 	parsed, err := parseExtractedFacts(text)
 	if err != nil {
-		return nil, err
+		parsed = fallbackFactsFromSection(section)
+		if len(parsed) == 0 {
+			return nil, fmt.Errorf("LLM returned unusable fact JSON and no local facts could be extracted: %w", err)
+		}
+		_ = s.LogEvent("warning", "fact extraction used local fallback: "+err.Error())
 	}
 	parsed = refineExtractedFacts(section, parsed)
 	inserted, err := s.insertExtractedFacts(section, parsed)
@@ -612,6 +620,7 @@ func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFac
 
 	ids := make([]int64, 0, len(facts))
 	for _, fact := range facts {
+		fact = enrichExtractedFact(section, fact)
 		fact.FactText = strings.TrimSpace(fact.FactText)
 		fact.EvidenceQuote = strings.TrimSpace(fact.EvidenceQuote)
 		if fact.FactText == "" || fact.EvidenceQuote == "" {
@@ -674,6 +683,9 @@ func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFac
 
 func parseExtractedFacts(text string) ([]extractedFact, error) {
 	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, errors.New("LLM returned empty fact response")
+	}
 	if strings.HasPrefix(text, "```") {
 		text = strings.TrimPrefix(text, "```json")
 		text = strings.TrimPrefix(text, "```")
@@ -685,9 +697,12 @@ func parseExtractedFacts(text string) ([]extractedFact, error) {
 	if start >= 0 && end > start {
 		text = text[start : end+1]
 	}
+	if !strings.HasPrefix(strings.TrimSpace(text), "{") {
+		return nil, errors.New("LLM fact response did not contain a JSON object")
+	}
 	var parsed extractedFactsResponse
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("LLM fact JSON could not be parsed: %w", err)
 	}
 	if len(parsed.Facts) == 0 {
 		return nil, errors.New("LLM returned no facts")
@@ -703,6 +718,7 @@ func parseExtractedFacts(text string) ([]extractedFact, error) {
 func refineExtractedFacts(section SourceSection, facts []extractedFact) []extractedFact {
 	filtered := make([]extractedFact, 0, len(facts))
 	for _, fact := range facts {
+		fact = enrichExtractedFact(section, fact)
 		if isTrivialExtractedFact(section, fact) {
 			continue
 		}
@@ -745,14 +761,283 @@ func fallbackFactsFromSection(section SourceSection) []extractedFact {
 		if len(factText) < 12 {
 			continue
 		}
-		facts = append(facts, extractedFact{
-			FactText:      factText,
-			EvidenceQuote: trimmed,
-			Confidence:    "medium",
-			RiskFlags:     []string{},
-		})
+		facts = append(facts, atomicFactsFromLine(section, factText, trimmed)...)
 	}
 	return facts
+}
+
+func atomicFactsFromLine(section SourceSection, factText string, evidenceQuote string) []extractedFact {
+	technologies := extractTechnologies(evidenceQuote)
+	riskFlags := inferEvidenceRiskFlags(evidenceQuote)
+	confidence := inferEvidenceConfidence(evidenceQuote, technologies, riskFlags)
+	base := extractedFact{
+		EvidenceQuote: evidenceQuote,
+		Technologies:  technologies,
+		Confidence:    confidence,
+		RiskFlags:     riskFlags,
+	}
+	facts := []extractedFact{}
+	if core := compactCoreEvidenceFact(factText); core != "" {
+		item := base
+		item.FactText = core
+		facts = append(facts, item)
+	}
+	if scope := inferScope(factText); scope != "" {
+		item := base
+		item.FactText = keyValueFact("scope", scope, "tools", strings.Join(technologies, ", "))
+		facts = append(facts, item)
+	}
+	if environment := inferEnvironment(factText); environment != "" {
+		item := base
+		item.FactText = keyValueFact("environment", environment, "tools", strings.Join(technologies, ", "))
+		facts = append(facts, item)
+	}
+	if outcome := inferOutcome(factText); outcome != "" || len(extractFigures(factText)) > 0 {
+		item := base
+		item.FactText = keyValueFact("metric", strings.Join(extractFigures(factText), ", "), "outcome", outcome)
+		facts = append(facts, item)
+	}
+	if len(facts) == 0 {
+		item := base
+		item.FactText = "evidence=" + strings.Trim(strings.TrimSpace(factText), ".")
+		facts = append(facts, item)
+	}
+	return dedupeExtractedFacts(facts)
+}
+
+func enrichExtractedFact(section SourceSection, fact extractedFact) extractedFact {
+	fact.EvidenceQuote = strings.TrimSpace(fact.EvidenceQuote)
+	fact.FactText = strings.TrimSpace(fact.FactText)
+	quoteWithoutBullet := strings.TrimSpace(strings.TrimPrefix(fact.EvidenceQuote, "- "))
+	if fact.FactText == "" || strings.EqualFold(fact.FactText, fact.EvidenceQuote) || strings.EqualFold(fact.FactText, quoteWithoutBullet) || looksLikeSentence(fact.FactText) {
+		source := firstNonEmpty(quoteWithoutBullet, fact.FactText)
+		fact.FactText = compactEvidenceFact(source, section)
+	}
+	if len(fact.Technologies) == 0 {
+		fact.Technologies = extractTechnologies(firstNonEmpty(fact.EvidenceQuote, fact.FactText))
+	}
+	fact.RiskFlags = normalizeStringList(append(fact.RiskFlags, inferEvidenceRiskFlags(firstNonEmpty(fact.EvidenceQuote, fact.FactText))...))
+	if strings.TrimSpace(fact.Confidence) == "" || strings.EqualFold(fact.Confidence, "medium") {
+		fact.Confidence = inferEvidenceConfidence(firstNonEmpty(fact.EvidenceQuote, fact.FactText), fact.Technologies, fact.RiskFlags)
+	}
+	return fact
+}
+
+func looksLikeSentence(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.Contains(value, ";") || strings.Contains(value, ":") {
+		return false
+	}
+	return strings.HasSuffix(value, ".") || len(strings.Fields(value)) > 9
+}
+
+func compactEvidenceFact(text string, section SourceSection) string {
+	atoms := atomicFactsFromLine(section, text, firstNonEmpty(text))
+	if len(atoms) > 0 {
+		return atoms[0].FactText
+	}
+	return compactCoreEvidenceFact(text)
+}
+
+func compactCoreEvidenceFact(text string) string {
+	text = strings.Trim(strings.TrimSpace(strings.TrimPrefix(text, "- ")), ".")
+	technologies := extractTechnologies(text)
+	pairs := []string{}
+	if actions := extractActions(text); len(actions) > 0 {
+		pairs = append(pairs, "actions="+strings.Join(actions, ", "))
+	}
+	if artifact := inferArtifact(text, technologies); artifact != "" {
+		pairs = append(pairs, "artifact="+artifact)
+	}
+	if len(technologies) > 0 {
+		pairs = append(pairs, "tools="+strings.Join(technologies, ", "))
+	}
+	if len(pairs) == 0 {
+		pairs = append(pairs, "evidence="+text)
+	}
+	return strings.Join(pairs, "; ")
+}
+
+func inferAction(text string) string {
+	actions := extractActions(text)
+	if len(actions) == 0 {
+		return ""
+	}
+	return actions[0]
+}
+
+func extractActions(text string) []string {
+	lower := strings.ToLower(text)
+	actions := []string{"built", "shipped", "added", "implemented", "designed", "developed", "created", "improved", "reduced", "migrated", "automated", "supported", "tested", "integrated", "delivered", "optimized", "deployed"}
+	found := []string{}
+	for _, action := range actions {
+		if strings.Contains(lower, action+" ") || strings.HasPrefix(lower, action) {
+			found = append(found, action)
+		}
+	}
+	return normalizeStringList(found)
+}
+
+func inferArtifact(text string, technologies []string) string {
+	cleaned := strings.Trim(strings.TrimSpace(strings.TrimPrefix(text, "- ")), ".")
+	lower := strings.ToLower(cleaned)
+	actions := extractActions(cleaned)
+	if len(actions) > 0 {
+		actionIndex := strings.Index(lower, actions[0])
+		if actionIndex >= 0 {
+			cleaned = strings.TrimSpace(cleaned[actionIndex+len(actions[0]):])
+		}
+	}
+	for strings.HasPrefix(strings.ToLower(cleaned), "and ") || strings.HasPrefix(strings.ToLower(cleaned), "shipped ") || strings.HasPrefix(strings.ToLower(cleaned), "built ") {
+		_, rest, ok := strings.Cut(cleaned, " ")
+		if !ok {
+			break
+		}
+		cleaned = strings.TrimSpace(rest)
+	}
+	for _, stop := range []string{" for ", " across ", " against ", " using ", " with ", " by ", " through ", " to ", ", reducing ", ", improving "} {
+		if index := strings.Index(strings.ToLower(cleaned), stop); index > 0 {
+			cleaned = cleaned[:index]
+		}
+	}
+	for _, tech := range technologies {
+		cleaned = regexp.MustCompile(`(?i)\b`+regexp.QuoteMeta(tech)+`\b`).ReplaceAllString(cleaned, "")
+	}
+	cleaned = regexp.MustCompile(`[ /]+`).ReplaceAllString(cleaned, " ")
+	return strings.TrimSpace(cleaned)
+}
+
+func inferScope(text string) string {
+	cleaned := strings.Trim(strings.TrimSpace(strings.TrimPrefix(text, "- ")), ".")
+	lower := strings.ToLower(cleaned)
+	for _, marker := range []string{" for ", " across ", " covering ", " coverage for "} {
+		if index := strings.Index(lower, marker); index >= 0 {
+			scope := cleaned[index+len(marker):]
+			for _, stop := range []string{" against ", " using ", " with ", " by ", " through ", " to "} {
+				if stopIndex := strings.Index(strings.ToLower(scope), stop); stopIndex > 0 {
+					scope = scope[:stopIndex]
+				}
+			}
+			return strings.TrimSpace(scope)
+		}
+	}
+	return ""
+}
+
+func inferEnvironment(text string) string {
+	cleaned := strings.Trim(strings.TrimSpace(strings.TrimPrefix(text, "- ")), ".")
+	lower := strings.ToLower(cleaned)
+	for _, marker := range []string{" against ", " in ", " on "} {
+		index := strings.Index(lower, marker)
+		if index < 0 {
+			continue
+		}
+		candidate := strings.TrimSpace(cleaned[index+len(marker):])
+		candidateLower := strings.ToLower(candidate)
+		if strings.Contains(candidateLower, "workflow") || strings.Contains(candidateLower, "production") || strings.Contains(candidateLower, "staging") || strings.Contains(candidateLower, "linux") || strings.Contains(candidateLower, "internal system") {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func inferOutcome(text string) string {
+	cleaned := strings.Trim(strings.TrimSpace(strings.TrimPrefix(text, "- ")), ".")
+	lower := strings.ToLower(cleaned)
+	for _, marker := range []string{" reducing ", " reduced ", " improving ", " improved ", " delivering ", " delivered ", " enabling ", " enabled "} {
+		if index := strings.Index(lower, marker); index >= 0 {
+			return strings.TrimSpace(cleaned[index+1:])
+		}
+	}
+	if strings.Contains(lower, "coverage") {
+		return "test coverage"
+	}
+	if strings.Contains(lower, "production") {
+		return "production delivery"
+	}
+	return ""
+}
+
+func keyValueFact(parts ...string) string {
+	pairs := []string{}
+	for i := 0; i+1 < len(parts); i += 2 {
+		key := strings.TrimSpace(parts[i])
+		value := strings.Trim(strings.TrimSpace(parts[i+1]), ".")
+		if key == "" || value == "" {
+			continue
+		}
+		pairs = append(pairs, key+"="+value)
+	}
+	return strings.Join(pairs, "; ")
+}
+
+func dedupeExtractedFacts(facts []extractedFact) []extractedFact {
+	seen := map[string]bool{}
+	next := []extractedFact{}
+	for _, fact := range facts {
+		key := strings.ToLower(strings.TrimSpace(fact.FactText))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		next = append(next, fact)
+	}
+	return next
+}
+
+func extractFigures(text string) []string {
+	matches := regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:%|percent|ms|s|sec|seconds|min|minutes|x|k|m|hours?|days?|weeks?|months?|years?)\b`).FindAllString(text, -1)
+	return normalizeStringList(matches)
+}
+
+func extractTechnologies(text string) []string {
+	known := []string{
+		"FastAPI", "PostgreSQL", "React", "TypeScript", "JavaScript", "Python", "Go", "Golang", "Java", "C#", "C++", "Node", "Node.js", "Express",
+		"Linux", "Docker", "Kubernetes", "AWS", "Azure", "GCP", "Terraform", "Postgres", "SQLite", "MySQL", "Redis", "Locust", "Playwright",
+		"Tailwind", "Vite", "Wails", "GitHub Actions", "CI/CD", "REST", "GraphQL", "RBAC", "SQL", "NoSQL", "MongoDB", "DynamoDB",
+	}
+	found := []string{}
+	lower := strings.ToLower(text)
+	for _, tech := range known {
+		if strings.Contains(lower, strings.ToLower(tech)) {
+			if tech == "Golang" {
+				tech = "Go"
+			}
+			if tech == "Postgres" {
+				tech = "PostgreSQL"
+			}
+			found = append(found, tech)
+		}
+	}
+	return normalizeStringList(found)
+}
+
+func inferEvidenceRiskFlags(text string) []string {
+	lower := strings.ToLower(text)
+	flags := []string{}
+	if strings.Contains(lower, "approximately") || strings.Contains(lower, "around ") || strings.Contains(lower, "~") {
+		flags = append(flags, "unclear_metric")
+	}
+	if strings.Contains(lower, "supported") && !strings.Contains(lower, "built") && !strings.Contains(lower, "implemented") {
+		flags = append(flags, "unclear_ownership")
+	}
+	if strings.Contains(lower, "staging-style") || strings.Contains(lower, "prototype") {
+		flags = append(flags, "production_vs_project_ambiguity")
+	}
+	return normalizeStringList(flags)
+}
+
+func inferEvidenceConfidence(text string, technologies []string, riskFlags []string) string {
+	if len(riskFlags) > 0 {
+		return "medium"
+	}
+	if len(technologies) > 0 || len(extractFigures(text)) > 0 {
+		return "high"
+	}
+	if strings.Contains(strings.ToLower(text), "built") || strings.Contains(strings.ToLower(text), "shipped") || strings.Contains(strings.ToLower(text), "implemented") {
+		return "high"
+	}
+	return "medium"
 }
 
 func metadataLines(section SourceSection) []string {

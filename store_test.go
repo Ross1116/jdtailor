@@ -486,7 +486,7 @@ func TestRefineExtractedFactsFallsBackToBulletEvidence(t *testing.T) {
 	if len(facts) != 1 {
 		t.Fatalf("facts len = %d, want 1: %+v", len(facts), facts)
 	}
-	if facts[0].FactText != "Built FastAPI systems." || facts[0].EvidenceQuote != "- Built FastAPI systems." {
+	if !strings.Contains(facts[0].FactText, "tools=FastAPI") || !strings.Contains(facts[0].FactText, "actions=built") || facts[0].EvidenceQuote != "- Built FastAPI systems." {
 		t.Fatalf("fallback fact = %+v", facts[0])
 	}
 }
@@ -584,6 +584,9 @@ func TestParseExtractedFactsRequiresEvidenceQuotes(t *testing.T) {
 	if err == nil {
 		t.Fatal("parseExtractedFacts() error = nil, want missing evidence error")
 	}
+	if _, err := parseExtractedFacts(""); err == nil || !strings.Contains(err.Error(), "empty fact response") {
+		t.Fatalf("parseExtractedFacts() empty error = %v, want empty fact response", err)
+	}
 
 	facts, err := parseExtractedFacts("```json\n{\"facts\":[{\"fact_text\":\"Built APIs\",\"evidence_quote\":\"Built APIs\",\"technologies\":[\"Go\"],\"confidence\":\"high\",\"risk_flags\":[]}]}\n```")
 	if err != nil {
@@ -591,6 +594,76 @@ func TestParseExtractedFactsRequiresEvidenceQuotes(t *testing.T) {
 	}
 	if len(facts) != 1 || facts[0].EvidenceQuote != "Built APIs" {
 		t.Fatalf("facts = %+v", facts)
+	}
+}
+
+func TestExtractEvidenceFactsFallsBackOnEmptyLLMResponse(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	t.Setenv("OPENROUTER_API_KEY", "sk-test")
+	if _, err := store.SaveSettings(SaveSettingsInput{Provider: "openrouter", Model: "deepseek/test"}); err != nil {
+		t.Fatalf("SaveSettings() error = %v", err)
+	}
+	source, err := store.CreateCandidateSource(CreateCandidateSourceInput{
+		Title:   "Resume",
+		RawText: "PROJECTS\nCueMate | 2026\n- Built FastAPI recommendation APIs.",
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidateSource() error = %v", err)
+	}
+	sections, err := store.DetectSourceSections(source.ID)
+	if err != nil {
+		t.Fatalf("DetectSourceSections() error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":""}}]}`))
+	}))
+	defer server.Close()
+	restoreURL := openRouterChatCompletionsURLForTest(server.URL)
+	defer restoreURL()
+
+	facts, err := store.ExtractEvidenceFacts(t.Context(), ExtractEvidenceFactsInput{
+		SourceID:  source.ID,
+		SectionID: sections[0].ID,
+	}, server.Client())
+	if err != nil {
+		t.Fatalf("ExtractEvidenceFacts() error = %v", err)
+	}
+	if len(facts) != 1 || !strings.Contains(facts[0].FactText, "tools=FastAPI") || facts[0].Confidence != "high" {
+		t.Fatalf("facts = %+v", facts)
+	}
+}
+
+func TestFallbackFactsExtractAtomsTechnologiesAndConfidence(t *testing.T) {
+	section := SourceSection{
+		Heading:     "Load testing",
+		SectionType: "project",
+		Content:     "CueMate | 2026\n- Added Locust load-test coverage for login, project listing, asset listing, and booking creation against staging-style workflows.",
+	}
+	facts := fallbackFactsFromSection(section)
+	if len(facts) != 4 {
+		t.Fatalf("facts len = %d, want 4: %+v", len(facts), facts)
+	}
+	parts := make([]string, 0, len(facts))
+	for _, fact := range facts {
+		parts = append(parts, fact.FactText)
+	}
+	combined := strings.Join(parts, "\n")
+	if strings.Contains(combined, "Added Locust") ||
+		!strings.Contains(combined, "tools=Locust") ||
+		!strings.Contains(combined, "scope=login") ||
+		!strings.Contains(combined, "environment=staging-style workflows") ||
+		!strings.Contains(combined, "outcome=test coverage") {
+		t.Fatalf("facts not atomized: %+v", facts)
+	}
+	if len(facts[0].Technologies) != 1 || facts[0].Technologies[0] != "Locust" {
+		t.Fatalf("technologies = %+v, want Locust", facts[0].Technologies)
+	}
+	if facts[0].Confidence != "medium" || len(facts[0].RiskFlags) == 0 {
+		t.Fatalf("confidence/risk = %q/%+v, want medium with staging risk", facts[0].Confidence, facts[0].RiskFlags)
 	}
 }
 
@@ -650,6 +723,207 @@ func TestInsertExtractedFactsReviewPolicy(t *testing.T) {
 	}
 	if reviewed.Status != factStatusApproved || reviewed.ReviewNote == "" {
 		t.Fatalf("reviewed = %+v", reviewed)
+	}
+}
+
+func TestJobContextMigrationCreatesTables(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	for _, table := range []string{"job_descriptions", "job_requirements", "job_fact_matches", "tailored_bullet_drafts"} {
+		var name string
+		if err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name); err != nil {
+			t.Fatalf("table %s missing: %v", table, err)
+		}
+	}
+}
+
+func TestJobDescriptionCascadeWorkflow(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Acme",
+		Title:   "Backend Engineer",
+		URL:     "https://example.test/job",
+		RawText: "We need FastAPI experience.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	updated, err := store.UpdateJobDescription(UpdateJobDescriptionInput{
+		ID:      job.ID,
+		Company: "Acme Co",
+		Title:   "Senior Backend Engineer",
+		URL:     job.URL,
+		RawText: job.RawText,
+	})
+	if err != nil {
+		t.Fatalf("UpdateJobDescription() error = %v", err)
+	}
+	if updated.Company != "Acme Co" || updated.Title != "Senior Backend Engineer" {
+		t.Fatalf("updated job = %+v", updated)
+	}
+
+	requirements, err := store.replaceJobRequirements(updated, []parsedJobRequirement{{
+		Category:        "must_have",
+		RequirementText: "FastAPI experience",
+		Keywords:        []string{"FastAPI"},
+		Priority:        "high",
+		SourceQuote:     "FastAPI experience",
+	}})
+	if err != nil {
+		t.Fatalf("replaceJobRequirements() error = %v", err)
+	}
+	section, facts := createFactsForJobTests(t, store)
+	matches, err := store.replaceJobMatches(updated.ID, []parsedJobMatch{{
+		RequirementID:  requirements[0].ID,
+		FactID:         facts[0].ID,
+		Score:          0.9,
+		Rationale:      "Direct FastAPI evidence.",
+		CoverageStatus: "strong",
+	}}, requirements, []factPromptContext{{
+		ID:             facts[0].ID,
+		Status:         facts[0].Status,
+		Confidence:     facts[0].Confidence,
+		RiskFlags:      facts[0].RiskFlags,
+		FactText:       facts[0].FactText,
+		EvidenceQuote:  facts[0].EvidenceQuote,
+		SectionHeading: section.Heading,
+	}})
+	if err != nil {
+		t.Fatalf("replaceJobMatches() error = %v", err)
+	}
+	if matches[0].FactStatus != facts[0].Status {
+		t.Fatalf("match fact status = %q, want %q", matches[0].FactStatus, facts[0].Status)
+	}
+	if _, err := store.replaceBulletDrafts(updated.ID, []parsedBulletDraft{{
+		RequirementID: requirements[0].ID,
+		FactIDs:       []int64{facts[0].ID},
+		DraftText:     "Built FastAPI APIs for production planning workflows.",
+		Rationale:     "Uses exact FastAPI evidence.",
+	}}, requirements, []factPromptContext{{ID: facts[0].ID}}); err != nil {
+		t.Fatalf("replaceBulletDrafts() error = %v", err)
+	}
+
+	if err := store.DeleteJobDescription(DeleteInput{ID: updated.ID}); err != nil {
+		t.Fatalf("DeleteJobDescription() error = %v", err)
+	}
+	for table, column := range map[string]string{
+		"job_requirements":       "job_id",
+		"job_fact_matches":       "job_id",
+		"tailored_bullet_drafts": "job_id",
+	} {
+		var count int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE `+column+` = ?`, updated.ID).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s count = %d, want 0", table, count)
+		}
+	}
+}
+
+func TestParseJobRequirementsValidation(t *testing.T) {
+	requirements, err := parseJobRequirements(`{"requirements":[{"category":"must_have","requirement_text":"FastAPI","keywords":["FastAPI"],"priority":"high","source_quote":"FastAPI"}]}`)
+	if err != nil {
+		t.Fatalf("parseJobRequirements() error = %v", err)
+	}
+	if len(requirements) != 1 || requirements[0].Category != "must_have" {
+		t.Fatalf("requirements = %+v", requirements)
+	}
+	if _, err := parseJobRequirements(`{"requirements":[]}`); err == nil {
+		t.Fatal("parseJobRequirements() empty error = nil")
+	}
+	if _, err := parseJobRequirements(`{"requirements":[{"requirement_text":"FastAPI"}]}`); err == nil {
+		t.Fatal("parseJobRequirements() missing quote error = nil")
+	}
+}
+
+func TestJobLLMWorkflowUsesAllFactStatusesAndDraftReview(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	t.Setenv("OPENROUTER_API_KEY", "sk-test")
+	if _, err := store.SaveSettings(SaveSettingsInput{Provider: "openrouter", Model: "deepseek/test"}); err != nil {
+		t.Fatalf("SaveSettings() error = %v", err)
+	}
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Acme",
+		Title:   "Backend Engineer",
+		RawText: "Must have FastAPI experience. Nice to have Linux automation.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	_, facts := createFactsForJobTests(t, store)
+
+	call := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call++
+		var request chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		content := request.Messages[len(request.Messages)-1].Content
+		switch call {
+		case 1:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"requirements\":[{\"category\":\"must_have\",\"requirement_text\":\"FastAPI experience\",\"keywords\":[\"FastAPI\"],\"priority\":\"high\",\"source_quote\":\"FastAPI experience\"}]}"}}]}`))
+		case 2:
+			for _, fact := range facts {
+				if !strings.Contains(content, fact.Status) {
+					t.Fatalf("match prompt missing fact status %q: %s", fact.Status, content)
+				}
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"matches\":[{\"requirement_id\":1,\"fact_id\":1,\"score\":0.9,\"rationale\":\"Direct evidence\",\"coverage_status\":\"strong\"},{\"requirement_id\":1,\"fact_id\":999,\"score\":1,\"rationale\":\"Invalid\",\"coverage_status\":\"strong\"}]}"}}]}`))
+		case 3:
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"drafts\":[{\"requirement_id\":1,\"fact_ids\":[1,999],\"draft_text\":\"Built FastAPI APIs for planning workflows.\",\"rationale\":\"Direct evidence\",\"risk_flags\":[]}]}"}}]}`))
+		default:
+			t.Fatalf("unexpected LLM call %d", call)
+		}
+	}))
+	defer server.Close()
+	restoreURL := openRouterChatCompletionsURLForTest(server.URL)
+	defer restoreURL()
+
+	requirements, err := store.ParseJobDescription(t.Context(), job.ID, server.Client())
+	if err != nil {
+		t.Fatalf("ParseJobDescription() error = %v", err)
+	}
+	matches, err := store.BuildJobMatchMap(t.Context(), job.ID, server.Client())
+	if err != nil {
+		t.Fatalf("BuildJobMatchMap() error = %v", err)
+	}
+	if len(matches) != 1 || matches[0].RequirementID != requirements[0].ID || matches[0].FactID != facts[0].ID {
+		t.Fatalf("matches = %+v", matches)
+	}
+	drafts, err := store.GenerateTailoredBulletDrafts(t.Context(), job.ID, server.Client())
+	if err != nil {
+		t.Fatalf("GenerateTailoredBulletDrafts() error = %v", err)
+	}
+	if len(drafts) != 1 || len(drafts[0].FactIDs) != 1 || drafts[0].FactIDs[0] != facts[0].ID {
+		t.Fatalf("drafts = %+v", drafts)
+	}
+	updated, err := store.UpdateTailoredBulletDraft(UpdateTailoredBulletDraftInput{
+		ID:        drafts[0].ID,
+		DraftText: "Built FastAPI APIs tailored to Acme planning workflows.",
+		Rationale: "Edited by user.",
+		Status:    "accepted",
+		RiskFlags: []string{"needs_review_source"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateTailoredBulletDraft() error = %v", err)
+	}
+	if updated.Status != "accepted" || !strings.Contains(updated.DraftText, "Acme") || len(updated.RiskFlags) != 1 {
+		t.Fatalf("updated draft = %+v", updated)
 	}
 }
 
@@ -740,6 +1014,51 @@ func TestRenderSamplePDFWithFakeExecutable(t *testing.T) {
 	if _, err := os.Stat(result.PDFPath); err != nil {
 		t.Fatalf("pdf missing: %v", err)
 	}
+}
+
+func createFactsForJobTests(t *testing.T, store *Store) (SourceSection, []EvidenceFact) {
+	t.Helper()
+	source, err := store.CreateCandidateSource(CreateCandidateSourceInput{
+		Title:   "Resume",
+		RawText: "PROJECTS\nBuilt FastAPI APIs.\nBuilt Linux automation.",
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidateSource() error = %v", err)
+	}
+	sections, err := store.DetectSourceSections(source.ID)
+	if err != nil {
+		t.Fatalf("DetectSourceSections() error = %v", err)
+	}
+	facts, err := store.insertExtractedFacts(sections[0], []extractedFact{
+		{
+			FactText:      "Built FastAPI APIs.",
+			EvidenceQuote: "Built FastAPI APIs.",
+			Confidence:    "high",
+		},
+		{
+			FactText:      "Built Linux automation.",
+			EvidenceQuote: "Built Linux automation.",
+			Confidence:    "medium",
+			RiskFlags:     []string{"ambiguous_scope"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("insertExtractedFacts() error = %v", err)
+	}
+	rejected, err := store.UpdateEvidenceFactReview(UpdateEvidenceFactReviewInput{
+		ID:            facts[1].ID,
+		FactText:      facts[1].FactText,
+		EvidenceQuote: facts[1].EvidenceQuote,
+		Confidence:    facts[1].Confidence,
+		RiskFlags:     facts[1].RiskFlags,
+		Status:        "rejected",
+		ReviewNote:    "Not relevant.",
+	})
+	if err != nil {
+		t.Fatalf("UpdateEvidenceFactReview() error = %v", err)
+	}
+	facts[1] = rejected
+	return sections[0], facts
 }
 
 func TestHelperProcess(t *testing.T) {

@@ -233,6 +233,90 @@ func (a *App) DeleteEvidenceFact(input DeleteInput) error {
 	return a.store.DeleteEvidenceFact(input)
 }
 
+func (a *App) ListJobDescriptions() ([]JobDescription, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListJobDescriptions()
+}
+
+func (a *App) CreateJobDescription(input CreateJobDescriptionInput) (JobDescription, error) {
+	if err := a.ensureStore(); err != nil {
+		return JobDescription{}, err
+	}
+	return a.store.CreateJobDescription(input)
+}
+
+func (a *App) UpdateJobDescription(input UpdateJobDescriptionInput) (JobDescription, error) {
+	if err := a.ensureStore(); err != nil {
+		return JobDescription{}, err
+	}
+	return a.store.UpdateJobDescription(input)
+}
+
+func (a *App) DeleteJobDescription(input DeleteInput) error {
+	if err := a.ensureStore(); err != nil {
+		return err
+	}
+	return a.store.DeleteJobDescription(input)
+}
+
+func (a *App) ParseJobDescription(jobID int64) ([]JobRequirement, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ParseJobDescription(a.ctx, jobID, nil)
+}
+
+func (a *App) BuildJobMatchMap(jobID int64) ([]JobFactMatch, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.BuildJobMatchMap(a.ctx, jobID, nil)
+}
+
+func (a *App) GenerateTailoredBulletDrafts(jobID int64) ([]TailoredBulletDraft, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.GenerateTailoredBulletDrafts(a.ctx, jobID, nil)
+}
+
+func (a *App) ListJobRequirements(jobID int64) ([]JobRequirement, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListJobRequirements(jobID)
+}
+
+func (a *App) ListJobFactMatches(jobID int64) ([]JobFactMatch, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListJobFactMatches(jobID)
+}
+
+func (a *App) ListTailoredBulletDrafts(jobID int64) ([]TailoredBulletDraft, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListTailoredBulletDrafts(jobID)
+}
+
+func (a *App) UpdateTailoredBulletDraft(input UpdateTailoredBulletDraftInput) (TailoredBulletDraft, error) {
+	if err := a.ensureStore(); err != nil {
+		return TailoredBulletDraft{}, err
+	}
+	return a.store.UpdateTailoredBulletDraft(input)
+}
+
+func (a *App) DeleteTailoredBulletDraft(input DeleteInput) error {
+	if err := a.ensureStore(); err != nil {
+		return err
+	}
+	return a.store.DeleteTailoredBulletDraft(input)
+}
+
 func (a *App) ensureStore() error {
 	if a.store != nil {
 		return nil

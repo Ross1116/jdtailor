@@ -153,6 +153,24 @@ export namespace main {
 	        this.raw_text = source["raw_text"];
 	    }
 	}
+	export class CreateJobDescriptionInput {
+	    company: string;
+	    title: string;
+	    url: string;
+	    raw_text: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CreateJobDescriptionInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.company = source["company"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	        this.raw_text = source["raw_text"];
+	    }
+	}
 	export class DeleteInput {
 	    id: number;
 	
@@ -271,6 +289,94 @@ export namespace main {
 	        this.error = source["error"];
 	    }
 	}
+	export class JobDescription {
+	    id: number;
+	    company: string;
+	    title: string;
+	    url: string;
+	    raw_text: string;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobDescription(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.company = source["company"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	        this.raw_text = source["raw_text"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
+	export class JobFactMatch {
+	    id: number;
+	    job_id: number;
+	    requirement_id: number;
+	    fact_id: number;
+	    score: number;
+	    rationale: string;
+	    coverage_status: string;
+	    fact_status: string;
+	    fact_text: string;
+	    evidence_quote: string;
+	    risk_flags: string[];
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobFactMatch(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.job_id = source["job_id"];
+	        this.requirement_id = source["requirement_id"];
+	        this.fact_id = source["fact_id"];
+	        this.score = source["score"];
+	        this.rationale = source["rationale"];
+	        this.coverage_status = source["coverage_status"];
+	        this.fact_status = source["fact_status"];
+	        this.fact_text = source["fact_text"];
+	        this.evidence_quote = source["evidence_quote"];
+	        this.risk_flags = source["risk_flags"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
+	export class JobRequirement {
+	    id: number;
+	    job_id: number;
+	    category: string;
+	    requirement_text: string;
+	    keywords: string[];
+	    priority: string;
+	    source_quote: string;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobRequirement(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.job_id = source["job_id"];
+	        this.category = source["category"];
+	        this.requirement_text = source["requirement_text"];
+	        this.keywords = source["keywords"];
+	        this.priority = source["priority"];
+	        this.source_quote = source["source_quote"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
 	export class LLMTestResult {
 	    success: boolean;
 	    provider: string;
@@ -387,6 +493,36 @@ export namespace main {
 	        this.updated_at = source["updated_at"];
 	    }
 	}
+	export class TailoredBulletDraft {
+	    id: number;
+	    job_id: number;
+	    requirement_id: number;
+	    fact_ids: number[];
+	    draft_text: string;
+	    rationale: string;
+	    status: string;
+	    risk_flags: string[];
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TailoredBulletDraft(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.job_id = source["job_id"];
+	        this.requirement_id = source["requirement_id"];
+	        this.fact_ids = source["fact_ids"];
+	        this.draft_text = source["draft_text"];
+	        this.rationale = source["rationale"];
+	        this.status = source["status"];
+	        this.risk_flags = source["risk_flags"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
 	export class ToolStatus {
 	    api_key_configured: boolean;
 	    api_key_source: string;
@@ -435,6 +571,26 @@ export namespace main {
 	        this.review_note = source["review_note"];
 	    }
 	}
+	export class UpdateJobDescriptionInput {
+	    id: number;
+	    company: string;
+	    title: string;
+	    url: string;
+	    raw_text: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateJobDescriptionInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.company = source["company"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	        this.raw_text = source["raw_text"];
+	    }
+	}
 	export class UpdateSourceSectionInput {
 	    id: number;
 	    heading: string;
@@ -451,6 +607,26 @@ export namespace main {
 	        this.heading = source["heading"];
 	        this.section_type = source["section_type"];
 	        this.content = source["content"];
+	    }
+	}
+	export class UpdateTailoredBulletDraftInput {
+	    id: number;
+	    draft_text: string;
+	    rationale: string;
+	    status: string;
+	    risk_flags: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateTailoredBulletDraftInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.draft_text = source["draft_text"];
+	        this.rationale = source["rationale"];
+	        this.status = source["status"];
+	        this.risk_flags = source["risk_flags"];
 	    }
 	}
 
