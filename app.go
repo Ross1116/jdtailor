@@ -233,6 +233,14 @@ func (a *App) DeleteEvidenceFact(input DeleteInput) error {
 	return a.store.DeleteEvidenceFact(input)
 }
 
+func (a *App) DeleteAllEvidenceFacts() error {
+	if err := a.ensureStore(); err != nil {
+		return err
+	}
+
+	return a.store.DeleteAllEvidenceFacts()
+}
+
 func (a *App) ListJobDescriptions() ([]JobDescription, error) {
 	if err := a.ensureStore(); err != nil {
 		return nil, err
@@ -315,6 +323,69 @@ func (a *App) DeleteTailoredBulletDraft(input DeleteInput) error {
 		return err
 	}
 	return a.store.DeleteTailoredBulletDraft(input)
+}
+
+func (a *App) ListPromptRules() ([]PromptRule, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListPromptRules()
+}
+
+func (a *App) UpdatePromptRule(input UpdatePromptRuleInput) (PromptRule, error) {
+	if err := a.ensureStore(); err != nil {
+		return PromptRule{}, err
+	}
+	return a.store.UpdatePromptRule(input)
+}
+
+func (a *App) ListPromptResearchSources() ([]PromptResearchSource, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListPromptResearchSources()
+}
+
+func (a *App) AnalyzeJobDescription(jobID int64) (JobAnalysis, error) {
+	if err := a.ensureStore(); err != nil {
+		return JobAnalysis{}, err
+	}
+	return a.store.AnalyzeJobDescription(jobID)
+}
+
+func (a *App) GetJobAnalysis(jobID int64) (JobAnalysis, error) {
+	if err := a.ensureStore(); err != nil {
+		return JobAnalysis{}, err
+	}
+	return a.store.GetJobAnalysis(jobID)
+}
+
+func (a *App) GenerateFitAnalysis(jobID int64) (JobFitAnalysis, error) {
+	if err := a.ensureStore(); err != nil {
+		return JobFitAnalysis{}, err
+	}
+	return a.store.GenerateFitAnalysis(jobID)
+}
+
+func (a *App) GetFitAnalysis(jobID int64) (JobFitAnalysis, error) {
+	if err := a.ensureStore(); err != nil {
+		return JobFitAnalysis{}, err
+	}
+	return a.store.GetFitAnalysis(jobID)
+}
+
+func (a *App) GenerateApplicationStrategy(jobID int64) (ApplicationStrategy, error) {
+	if err := a.ensureStore(); err != nil {
+		return ApplicationStrategy{}, err
+	}
+	return a.store.GenerateApplicationStrategy(jobID)
+}
+
+func (a *App) GetApplicationStrategy(jobID int64) (ApplicationStrategy, error) {
+	if err := a.ensureStore(); err != nil {
+		return ApplicationStrategy{}, err
+	}
+	return a.store.GetApplicationStrategy(jobID)
 }
 
 func (a *App) ensureStore() error {

@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -620,6 +623,72 @@ func TestDeleteCandidateSourceCascadesContext(t *testing.T) {
 	}
 }
 
+func TestDeleteAllEvidenceFactsClearsDependentJobOutputs(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Title:   "Backend Engineer",
+		RawText: "Must build APIs.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	requirements, err := store.replaceJobRequirements(job, []parsedJobRequirement{{
+		Category:        "must_have",
+		RequirementText: "Must build APIs.",
+		Keywords:        []string{"api"},
+		Priority:        "high",
+		SourceQuote:     "Must build APIs.",
+	}})
+	if err != nil {
+		t.Fatalf("replaceJobRequirements() error = %v", err)
+	}
+	_, facts := createFactsForJobTests(t, store)
+	if _, err := store.replaceJobMatches(job.ID, []parsedJobMatch{{
+		RequirementID:  requirements[0].ID,
+		FactID:         facts[0].ID,
+		Score:          0.8,
+		CoverageStatus: "strong",
+	}}, requirements, []factPromptContext{{ID: facts[0].ID, Status: facts[0].Status}}); err != nil {
+		t.Fatalf("replaceJobMatches() error = %v", err)
+	}
+	if _, err := store.replaceBulletDrafts(job.ID, []parsedBulletDraft{{
+		RequirementID: requirements[0].ID,
+		FactIDs:       []int64{facts[0].ID},
+		DraftText:     "Built API workflows with reliable backend delivery.",
+	}}, requirements, []factPromptContext{{ID: facts[0].ID, SectionHeading: "Sitespace", SectionType: "experience"}}); err != nil {
+		t.Fatalf("replaceBulletDrafts() error = %v", err)
+	}
+	if _, err := store.GenerateFitAnalysis(job.ID); err != nil {
+		t.Fatalf("GenerateFitAnalysis() error = %v", err)
+	}
+	if err := store.DeleteAllEvidenceFacts(); err != nil {
+		t.Fatalf("DeleteAllEvidenceFacts() error = %v", err)
+	}
+	factsAfter, err := store.ListEvidenceFacts("all")
+	if err != nil {
+		t.Fatalf("ListEvidenceFacts() error = %v", err)
+	}
+	matchesAfter, err := store.ListJobFactMatches(job.ID)
+	if err != nil {
+		t.Fatalf("ListJobFactMatches() error = %v", err)
+	}
+	draftsAfter, err := store.ListTailoredBulletDrafts(job.ID)
+	if err != nil {
+		t.Fatalf("ListTailoredBulletDrafts() error = %v", err)
+	}
+	if len(factsAfter) != 0 || len(matchesAfter) != 0 || len(draftsAfter) != 0 {
+		t.Fatalf("remaining facts/matches/drafts = %+v/%+v/%+v", factsAfter, matchesAfter, draftsAfter)
+	}
+	if _, err := store.GetFitAnalysis(job.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetFitAnalysis() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
 func TestParseExtractedFactsRequiresEvidenceQuotes(t *testing.T) {
 	_, err := parseExtractedFacts(`{"facts":[{"fact_text":"Built APIs","confidence":"high"}]}`)
 	if err == nil {
@@ -705,6 +774,39 @@ func TestFallbackFactsExtractAtomsTechnologiesAndConfidence(t *testing.T) {
 	}
 	if facts[0].Confidence != "medium" || len(facts[0].RiskFlags) == 0 {
 		t.Fatalf("confidence/risk = %q/%+v, want medium with staging risk", facts[0].Confidence, facts[0].RiskFlags)
+	}
+}
+
+func TestInsertExtractedFactsRepairsParaphrasedEvidenceQuote(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	source, err := store.CreateCandidateSource(CreateCandidateSourceInput{
+		Title:   "Resume",
+		RawText: "PROJECTS\nBuilt features end to end across APIs, integrations, and workflow logic.",
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidateSource() error = %v", err)
+	}
+	sections, err := store.DetectSourceSections(source.ID)
+	if err != nil {
+		t.Fatalf("DetectSourceSections() error = %v", err)
+	}
+	inserted, err := store.insertExtractedFacts(sections[0], []extractedFact{{
+		FactText:      "actions=built; artifact=backend features",
+		EvidenceQuote: "Hands-on experience designing core backend architecture and building features end to end, from system boundaries to APIs, integrations, and workflow logic.",
+		Confidence:    "medium",
+	}})
+	if err != nil {
+		t.Fatalf("insertExtractedFacts() error = %v", err)
+	}
+	if len(inserted) != 1 || inserted[0].EvidenceQuote != "Built features end to end across APIs, integrations, and workflow logic." {
+		t.Fatalf("inserted = %+v", inserted)
+	}
+	if inserted[0].OriginHeading == "" || inserted[0].OriginType == "" || len(inserted[0].Context) == 0 {
+		t.Fatalf("origin context missing: %+v", inserted[0])
 	}
 }
 
@@ -988,6 +1090,51 @@ func TestJobLLMWorkflowUsesAllFactStatusesAndDraftReview(t *testing.T) {
 	}
 }
 
+func TestBulletDraftsRespectOriginBudgets(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Acme",
+		Title:   "Backend Engineer",
+		RawText: "Build APIs.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	requirements, err := store.replaceJobRequirements(job, []parsedJobRequirement{{
+		Category:        "responsibility",
+		RequirementText: "Build APIs.",
+		Keywords:        []string{"API"},
+		Priority:        "high",
+		SourceQuote:     "Build APIs.",
+	}})
+	if err != nil {
+		t.Fatalf("replaceJobRequirements() error = %v", err)
+	}
+	facts := []factPromptContext{}
+	drafts := []parsedBulletDraft{}
+	for i := 1; i <= 6; i++ {
+		id := int64(i)
+		facts = append(facts, factPromptContext{ID: id, Status: "approved", SectionHeading: "Acme | Backend Engineer", SectionType: "experience"})
+		drafts = append(drafts, parsedBulletDraft{RequirementID: requirements[0].ID, FactIDs: []int64{id}, DraftText: fmt.Sprintf("Built backend API workflow %d with reliable integration behavior.", i)})
+	}
+	for i := 7; i <= 9; i++ {
+		id := int64(i)
+		facts = append(facts, factPromptContext{ID: id, Status: "approved", SectionHeading: "CueMate", SectionType: "project"})
+		drafts = append(drafts, parsedBulletDraft{RequirementID: requirements[0].ID, FactIDs: []int64{id}, DraftText: fmt.Sprintf("Built project API workflow %d with reliable integration behavior.", i)})
+	}
+	inserted, err := store.replaceBulletDrafts(job.ID, drafts, requirements, facts)
+	if err != nil {
+		t.Fatalf("replaceBulletDrafts() error = %v", err)
+	}
+	if len(inserted) != 7 {
+		t.Fatalf("drafts len = %d, want 7: %+v", len(inserted), inserted)
+	}
+}
+
 func TestCreateJobDescriptionInfersDetailsFromRawText(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
@@ -1168,6 +1315,87 @@ func TestBuildJobMatchMapFallsBackOnLLMTimeout(t *testing.T) {
 	}
 	if len(matches) == 0 || matches[0].FactID != facts[0].ID {
 		t.Fatalf("matches = %+v", matches)
+	}
+}
+
+func TestRulesAnalysisFitAndStrategyWorkflow(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	rules, err := store.ListPromptRules()
+	if err != nil {
+		t.Fatalf("ListPromptRules() error = %v", err)
+	}
+	if len(rules) == 0 {
+		t.Fatalf("prompt rules not seeded")
+	}
+	updated, err := store.UpdatePromptRule(UpdatePromptRuleInput{
+		ID:      rules[0].ID,
+		Content: rules[0].Content + " Keep phrasing concrete.",
+		Enabled: false,
+	})
+	if err != nil {
+		t.Fatalf("UpdatePromptRule() error = %v", err)
+	}
+	if updated.Enabled || updated.Version <= rules[0].Version {
+		t.Fatalf("updated rule = %+v", updated)
+	}
+	sources, err := store.ListPromptResearchSources()
+	if err != nil {
+		t.Fatalf("ListPromptResearchSources() error = %v", err)
+	}
+	if len(sources) == 0 {
+		t.Fatalf("prompt research sources not seeded")
+	}
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Acme",
+		Title:   "Cloud Backend Engineer",
+		RawText: "Strong experience building scalable distributed cloud applications.\nHands-on experience with serverless and event-driven architectures.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	requirements, err := store.replaceJobRequirements(job, []parsedJobRequirement{
+		{Category: "must_have", RequirementText: "Strong experience building scalable distributed cloud applications.", Keywords: []string{"cloud", "distributed", "scalable"}, Priority: "high", SourceQuote: "Strong experience building scalable distributed cloud applications."},
+		{Category: "responsibility", RequirementText: "Hands-on experience with serverless and event-driven architectures.", Keywords: []string{"serverless", "event-driven"}, Priority: "high", SourceQuote: "Hands-on experience with serverless and event-driven architectures."},
+	})
+	if err != nil {
+		t.Fatalf("replaceJobRequirements() error = %v", err)
+	}
+	analysis, err := store.AnalyzeJobDescription(job.ID)
+	if err != nil {
+		t.Fatalf("AnalyzeJobDescription() error = %v", err)
+	}
+	if len(analysis.TopPainPoints) == 0 || analysis.RoleArchetype == "" {
+		t.Fatalf("analysis = %+v", analysis)
+	}
+	_, facts := createFactsForJobTests(t, store)
+	if _, err := store.replaceJobMatches(job.ID, []parsedJobMatch{{
+		RequirementID:  requirements[0].ID,
+		FactID:         facts[0].ID,
+		Score:          0.76,
+		Rationale:      "Backend API evidence transfers partially to cloud app delivery.",
+		CoverageStatus: "strong",
+	}}, requirements, []factPromptContext{{ID: facts[0].ID, Status: facts[0].Status}}); err != nil {
+		t.Fatalf("replaceJobMatches() error = %v", err)
+	}
+	fit, err := store.GenerateFitAnalysis(job.ID)
+	if err != nil {
+		t.Fatalf("GenerateFitAnalysis() error = %v", err)
+	}
+	if fit.OverallScore <= 0 || len(fit.Analysis) != len(requirements) {
+		t.Fatalf("fit = %+v", fit)
+	}
+	strategy, err := store.GenerateApplicationStrategy(job.ID)
+	if err != nil {
+		t.Fatalf("GenerateApplicationStrategy() error = %v", err)
+	}
+	if len(strategy.ApprovedFactIDs) == 0 || len(strategy.DoNotOverclaim) == 0 {
+		t.Fatalf("strategy = %+v", strategy)
 	}
 }
 

@@ -18,6 +18,40 @@ export namespace main {
 	        this.created_at = source["created_at"];
 	    }
 	}
+	export class ApplicationStrategy {
+	    job_id: number;
+	    approved_fact_ids: number[];
+	    rejected_fact_ids: number[];
+	    weak_or_missing_requirements: string[];
+	    resume_headline: string;
+	    experience_titles: Record<string, string>;
+	    positioning_strategy: string;
+	    keywords: string[];
+	    do_not_overclaim: string[];
+	    fit_summary: string;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ApplicationStrategy(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.job_id = source["job_id"];
+	        this.approved_fact_ids = source["approved_fact_ids"];
+	        this.rejected_fact_ids = source["rejected_fact_ids"];
+	        this.weak_or_missing_requirements = source["weak_or_missing_requirements"];
+	        this.resume_headline = source["resume_headline"];
+	        this.experience_titles = source["experience_titles"];
+	        this.positioning_strategy = source["positioning_strategy"];
+	        this.keywords = source["keywords"];
+	        this.do_not_overclaim = source["do_not_overclaim"];
+	        this.fit_summary = source["fit_summary"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
 	export class CandidateContact {
 	    full_name: string;
 	    email: string;
@@ -192,6 +226,9 @@ export namespace main {
 	    technologies: string[];
 	    confidence: string;
 	    risk_flags: string[];
+	    origin_heading: string;
+	    origin_type: string;
+	    context: string[];
 	    status: string;
 	    auto_approved: boolean;
 	    review_note: string;
@@ -212,6 +249,9 @@ export namespace main {
 	        this.technologies = source["technologies"];
 	        this.confidence = source["confidence"];
 	        this.risk_flags = source["risk_flags"];
+	        this.origin_heading = source["origin_heading"];
+	        this.origin_type = source["origin_type"];
+	        this.context = source["context"];
 	        this.status = source["status"];
 	        this.auto_approved = source["auto_approved"];
 	        this.review_note = source["review_note"];
@@ -231,6 +271,30 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.source_id = source["source_id"];
 	        this.section_id = source["section_id"];
+	    }
+	}
+	export class FitNeedAnalysis {
+	    requirement_id: number;
+	    jd_need: string;
+	    matching_fact_ids: number[];
+	    evidence_strength: string;
+	    gap_level: string;
+	    confidence: string;
+	    risk: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FitNeedAnalysis(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.requirement_id = source["requirement_id"];
+	        this.jd_need = source["jd_need"];
+	        this.matching_fact_ids = source["matching_fact_ids"];
+	        this.evidence_strength = source["evidence_strength"];
+	        this.gap_level = source["gap_level"];
+	        this.confidence = source["confidence"];
+	        this.risk = source["risk"];
 	    }
 	}
 	export class Health {
@@ -287,6 +351,52 @@ export namespace main {
 	        this.status = source["status"];
 	        this.executable_path = source["executable_path"];
 	        this.error = source["error"];
+	    }
+	}
+	export class JobAnalysis {
+	    job_id: number;
+	    company: string;
+	    role_title: string;
+	    location: string;
+	    work_arrangement: string;
+	    salary: string;
+	    top_pain_points: string[];
+	    required_skills: string[];
+	    preferred_skills: string[];
+	    responsibilities: string[];
+	    seniority_level: string;
+	    role_archetype: string;
+	    keywords: string[];
+	    risk_flags: string[];
+	    job_poster: string;
+	    company_url: string;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobAnalysis(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.job_id = source["job_id"];
+	        this.company = source["company"];
+	        this.role_title = source["role_title"];
+	        this.location = source["location"];
+	        this.work_arrangement = source["work_arrangement"];
+	        this.salary = source["salary"];
+	        this.top_pain_points = source["top_pain_points"];
+	        this.required_skills = source["required_skills"];
+	        this.preferred_skills = source["preferred_skills"];
+	        this.responsibilities = source["responsibilities"];
+	        this.seniority_level = source["seniority_level"];
+	        this.role_archetype = source["role_archetype"];
+	        this.keywords = source["keywords"];
+	        this.risk_flags = source["risk_flags"];
+	        this.job_poster = source["job_poster"];
+	        this.company_url = source["company_url"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
 	    }
 	}
 	export class JobDescription {
@@ -349,6 +459,52 @@ export namespace main {
 	        this.updated_at = source["updated_at"];
 	    }
 	}
+	export class JobFitAnalysis {
+	    job_id: number;
+	    overall_score: number;
+	    recommendation: string;
+	    strengths: string[];
+	    critical_gaps: string[];
+	    reality_check: string;
+	    analysis: FitNeedAnalysis[];
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobFitAnalysis(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.job_id = source["job_id"];
+	        this.overall_score = source["overall_score"];
+	        this.recommendation = source["recommendation"];
+	        this.strengths = source["strengths"];
+	        this.critical_gaps = source["critical_gaps"];
+	        this.reality_check = source["reality_check"];
+	        this.analysis = this.convertValues(source["analysis"], FitNeedAnalysis);
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class JobRequirement {
 	    id: number;
 	    job_id: number;
@@ -399,6 +555,64 @@ export namespace main {
 	        this.latency_ms = source["latency_ms"];
 	        this.status_code = source["status_code"];
 	        this.error = source["error"];
+	    }
+	}
+	export class PromptResearchSource {
+	    id: number;
+	    source_type: string;
+	    trust_tier: string;
+	    title: string;
+	    url: string;
+	    extracted_pattern: string;
+	    app_adaptation: string;
+	    accessed_at: string;
+	    created_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PromptResearchSource(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.source_type = source["source_type"];
+	        this.trust_tier = source["trust_tier"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	        this.extracted_pattern = source["extracted_pattern"];
+	        this.app_adaptation = source["app_adaptation"];
+	        this.accessed_at = source["accessed_at"];
+	        this.created_at = source["created_at"];
+	    }
+	}
+	export class PromptRule {
+	    id: number;
+	    rule_key: string;
+	    category: string;
+	    title: string;
+	    content: string;
+	    enabled: boolean;
+	    version: number;
+	    source: string;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PromptRule(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.rule_key = source["rule_key"];
+	        this.category = source["category"];
+	        this.title = source["title"];
+	        this.content = source["content"];
+	        this.enabled = source["enabled"];
+	        this.version = source["version"];
+	        this.source = source["source"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
 	    }
 	}
 	export class RenderPDFResult {
@@ -589,6 +803,22 @@ export namespace main {
 	        this.title = source["title"];
 	        this.url = source["url"];
 	        this.raw_text = source["raw_text"];
+	    }
+	}
+	export class UpdatePromptRuleInput {
+	    id: number;
+	    content: string;
+	    enabled: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdatePromptRuleInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.content = source["content"];
+	        this.enabled = source["enabled"];
 	    }
 	}
 	export class UpdateSourceSectionInput {

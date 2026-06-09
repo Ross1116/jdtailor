@@ -1,8 +1,10 @@
 import {
+  AnalyzeJobDescription as WailsAnalyzeJobDescription,
   BuildJobMatchMap as WailsBuildJobMatchMap,
   CreateCandidateSource as WailsCreateCandidateSource,
   CreateJobDescription as WailsCreateJobDescription,
   DeleteCandidateSource as WailsDeleteCandidateSource,
+  DeleteAllEvidenceFacts as WailsDeleteAllEvidenceFacts,
   DeleteEvidenceFact as WailsDeleteEvidenceFact,
   DeleteJobDescription as WailsDeleteJobDescription,
   DeleteSourceSection as WailsDeleteSourceSection,
@@ -11,8 +13,13 @@ import {
   DraftCandidateProfileFromSource as WailsDraftCandidateProfileFromSource,
   ExtractEvidenceFacts as WailsExtractEvidenceFacts,
   GenerateTailoredBulletDrafts as WailsGenerateTailoredBulletDrafts,
+  GenerateApplicationStrategy as WailsGenerateApplicationStrategy,
+  GenerateFitAnalysis as WailsGenerateFitAnalysis,
+  GetApplicationStrategy as WailsGetApplicationStrategy,
   GetCandidateProfile as WailsGetCandidateProfile,
+  GetFitAnalysis as WailsGetFitAnalysis,
   GetHealth as WailsGetHealth,
+  GetJobAnalysis as WailsGetJobAnalysis,
   GetRecentEvents as WailsGetRecentEvents,
   GetSettings as WailsGetSettings,
   GetToolStatus as WailsGetToolStatus,
@@ -21,6 +28,8 @@ import {
   ListJobDescriptions as WailsListJobDescriptions,
   ListJobFactMatches as WailsListJobFactMatches,
   ListJobRequirements as WailsListJobRequirements,
+  ListPromptResearchSources as WailsListPromptResearchSources,
+  ListPromptRules as WailsListPromptRules,
   ListCandidateSources as WailsListCandidateSources,
   ListEvidenceFacts as WailsListEvidenceFacts,
   ListSourceSections as WailsListSourceSections,
@@ -33,6 +42,7 @@ import {
   TestLLM as WailsTestLLM,
   UpdateEvidenceFactReview as WailsUpdateEvidenceFactReview,
   UpdateJobDescription as WailsUpdateJobDescription,
+  UpdatePromptRule as WailsUpdatePromptRule,
   UpdateSourceSection as WailsUpdateSourceSection,
   UpdateTailoredBulletDraft as WailsUpdateTailoredBulletDraft,
 } from '../wailsjs/go/main/App';
@@ -101,6 +111,9 @@ export type EvidenceFact = {
   technologies: string[];
   confidence: string;
   risk_flags: string[];
+  origin_heading: string;
+  origin_type: string;
+  context: string[];
   status: string;
   auto_approved: boolean;
   review_note: string;
@@ -159,6 +172,89 @@ export type TailoredBulletDraft = {
   updated_at: string;
 };
 
+export type JobAnalysis = {
+  job_id: number;
+  company: string;
+  role_title: string;
+  location: string;
+  work_arrangement: string;
+  salary: string;
+  top_pain_points: string[];
+  required_skills: string[];
+  preferred_skills: string[];
+  responsibilities: string[];
+  seniority_level: string;
+  role_archetype: string;
+  keywords: string[];
+  risk_flags: string[];
+  job_poster: string;
+  company_url: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type FitNeedAnalysis = {
+  requirement_id: number;
+  jd_need: string;
+  matching_fact_ids: number[];
+  evidence_strength: string;
+  gap_level: string;
+  confidence: string;
+  risk: string;
+};
+
+export type JobFitAnalysis = {
+  job_id: number;
+  overall_score: number;
+  recommendation: string;
+  strengths: string[];
+  critical_gaps: string[];
+  reality_check: string;
+  analysis: FitNeedAnalysis[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ApplicationStrategy = {
+  job_id: number;
+  approved_fact_ids: number[];
+  rejected_fact_ids: number[];
+  weak_or_missing_requirements: string[];
+  resume_headline: string;
+  experience_titles: Record<string, string>;
+  positioning_strategy: string;
+  keywords: string[];
+  do_not_overclaim: string[];
+  fit_summary: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PromptRule = {
+  id: number;
+  rule_key: string;
+  category: string;
+  title: string;
+  content: string;
+  enabled: boolean;
+  version: number;
+  source: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PromptResearchSource = {
+  id: number;
+  source_type: string;
+  trust_tier: string;
+  title: string;
+  url: string;
+  extracted_pattern: string;
+  app_adaptation: string;
+  accessed_at: string;
+  created_at: string;
+};
+
 const hasWailsBackend = () => Boolean(window.go?.main?.App);
 
 const now = () => new Date().toISOString();
@@ -192,6 +288,11 @@ let mockJobs: JobDescription[] = [];
 let mockRequirements: JobRequirement[] = [];
 let mockMatches: JobFactMatch[] = [];
 let mockDrafts: TailoredBulletDraft[] = [];
+let mockAnalyses: JobAnalysis[] = [];
+let mockFitAnalyses: JobFitAnalysis[] = [];
+let mockStrategies: ApplicationStrategy[] = [];
+let mockPromptRules: PromptRule[] = defaultMockPromptRules();
+const mockPromptSources: PromptResearchSource[] = defaultMockPromptSources();
 
 const mockEvents = [
   {
@@ -483,6 +584,9 @@ export async function ExtractEvidenceFacts(input: {source_id: number; section_id
     technologies: item.technologies,
     confidence: item.confidence,
     risk_flags: item.risk_flags,
+    origin_heading: section.heading,
+    origin_type: section.section_type,
+    context: factContextAtoms(section),
     status: 'needs_review',
     auto_approved: false,
     review_note: '',
@@ -525,6 +629,18 @@ export async function DeleteEvidenceFact(input: {id: number}) {
   }
   mockFacts = mockFacts.filter((fact) => fact.id !== input.id);
   mockEvents.unshift(mockEvent('info', 'mock fact deleted'));
+}
+
+export async function DeleteAllEvidenceFacts() {
+  if (hasWailsBackend()) {
+    return WailsDeleteAllEvidenceFacts();
+  }
+  mockFacts = [];
+  mockMatches = [];
+  mockDrafts = [];
+  mockFitAnalyses = [];
+  mockStrategies = [];
+  mockEvents.unshift(mockEvent('info', 'mock all evidence facts deleted'));
 }
 
 export async function ListJobDescriptions() {
@@ -607,6 +723,7 @@ export async function ParseJobDescription(jobID: number) {
   mockRequirements = [...reqs, ...mockRequirements.filter((req) => req.job_id !== jobID)];
   mockMatches = mockMatches.filter((match) => match.job_id !== jobID);
   mockDrafts = mockDrafts.filter((draft) => draft.job_id !== jobID);
+  mockAnalyses = [buildMockJobAnalysis(job, reqs), ...mockAnalyses.filter((analysis) => analysis.job_id !== jobID)];
   mockEvents.unshift(mockEvent('info', 'mock job requirements parsed'));
   return reqs;
 }
@@ -714,6 +831,105 @@ export async function DeleteTailoredBulletDraft(input: {id: number}) {
   }
   mockDrafts = mockDrafts.filter((draft) => draft.id !== input.id);
   mockEvents.unshift(mockEvent('info', 'mock bullet draft deleted'));
+}
+
+export async function ListPromptRules() {
+  if (hasWailsBackend()) {
+    return WailsListPromptRules();
+  }
+  return mockPromptRules;
+}
+
+export async function UpdatePromptRule(input: {id: number; content: string; enabled: boolean}) {
+  if (hasWailsBackend()) {
+    return WailsUpdatePromptRule(input);
+  }
+  const timestamp = now();
+  mockPromptRules = mockPromptRules.map((rule) => rule.id === input.id ? {
+    ...rule,
+    content: input.content.trim(),
+    enabled: input.enabled,
+    version: rule.version + 1,
+    updated_at: timestamp,
+  } : rule);
+  return mockPromptRules.find((rule) => rule.id === input.id);
+}
+
+export async function ListPromptResearchSources() {
+  if (hasWailsBackend()) {
+    return WailsListPromptResearchSources();
+  }
+  return mockPromptSources;
+}
+
+export async function AnalyzeJobDescription(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsAnalyzeJobDescription(jobID);
+  }
+  const job = mockJobs.find((item) => item.id === jobID);
+  if (!job) throw new Error('job not found');
+  const requirements = mockRequirements.filter((req) => req.job_id === jobID);
+  const analysis = buildMockJobAnalysis(job, requirements);
+  mockAnalyses = [analysis, ...mockAnalyses.filter((item) => item.job_id !== jobID)];
+  return analysis;
+}
+
+export async function GetJobAnalysis(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsGetJobAnalysis(jobID);
+  }
+  return mockAnalyses.find((analysis) => analysis.job_id === jobID);
+}
+
+export async function GenerateFitAnalysis(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsGenerateFitAnalysis(jobID);
+  }
+  const fit = buildMockFitAnalysis(jobID);
+  mockFitAnalyses = [fit, ...mockFitAnalyses.filter((item) => item.job_id !== jobID)];
+  return fit;
+}
+
+export async function GetFitAnalysis(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsGetFitAnalysis(jobID);
+  }
+  return mockFitAnalyses.find((fit) => fit.job_id === jobID);
+}
+
+export async function GenerateApplicationStrategy(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsGenerateApplicationStrategy(jobID);
+  }
+  const job = mockJobs.find((item) => item.id === jobID);
+  if (!job) throw new Error('job not found');
+  const analysis = mockAnalyses.find((item) => item.job_id === jobID) ?? buildMockJobAnalysis(job, mockRequirements.filter((req) => req.job_id === jobID));
+  const fit = mockFitAnalyses.find((item) => item.job_id === jobID) ?? buildMockFitAnalysis(jobID);
+  const approved = mockMatches.filter((match) => match.job_id === jobID && match.fact_status === 'approved').map((match) => match.fact_id);
+  const rejected = mockMatches.filter((match) => match.job_id === jobID && match.fact_status !== 'approved').map((match) => match.fact_id);
+  const strategy: ApplicationStrategy = {
+    job_id: jobID,
+    approved_fact_ids: [...new Set(approved)],
+    rejected_fact_ids: [...new Set(rejected)],
+    weak_or_missing_requirements: fit.critical_gaps,
+    resume_headline: `${analysis.role_archetype || 'Software engineer'} for ${job.title}`.trim(),
+    experience_titles: {default: job.title},
+    positioning_strategy: 'Lead with strongest approved evidence for the top JD pain points; avoid unsupported gaps.',
+    keywords: analysis.keywords.slice(0, 12),
+    do_not_overclaim: fit.critical_gaps,
+    fit_summary: fit.reality_check,
+    created_at: now(),
+    updated_at: now(),
+  };
+  mockStrategies = [strategy, ...mockStrategies.filter((item) => item.job_id !== jobID)];
+  return strategy;
+}
+
+export async function GetApplicationStrategy(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsGetApplicationStrategy(jobID);
+  }
+  return mockStrategies.find((strategy) => strategy.job_id === jobID);
 }
 
 function mockEvent(level: string, message: string) {
@@ -973,6 +1189,36 @@ function fallbackFactsFromSection(section: SourceSection) {
   return lines
     .filter((line, index) => index >= metadataCount && !isKnownSectionHeading(line) && line.replace(/^- /, '').trim().length >= 12)
     .flatMap((line) => atomicFactsFromLine(line));
+}
+
+function factContextAtoms(section: SourceSection) {
+  const atoms = [
+    keyValueFact('origin_heading', section.heading),
+    keyValueFact('section_type', section.section_type),
+    ...sectionMetadataContext(section),
+  ];
+  return [...new Set(atoms.filter(Boolean))];
+}
+
+function sectionMetadataContext(section: SourceSection) {
+  const lines = section.content.split('\n').map((line) => line.trim()).filter(Boolean);
+  const atoms: string[] = [];
+  const firstParts = splitPipeLine(lines[0] ?? '');
+  const secondParts = splitPipeLine(lines[1] ?? '');
+  if (section.section_type === 'experience') {
+    if (firstParts[0]) atoms.push(keyValueFact('organization', firstParts[0]));
+    if (firstParts.length > 1) atoms.push(keyValueFact('location', firstParts.slice(1).join(' | ')));
+    if (secondParts[0]) atoms.push(keyValueFact('role', secondParts[0]));
+    if (secondParts.length > 1) atoms.push(keyValueFact('dates', secondParts[secondParts.length - 1]));
+  } else if (section.section_type === 'project') {
+    if (firstParts[0]) atoms.push(keyValueFact('project', firstParts[0]));
+    if (firstParts.length > 1) atoms.push(keyValueFact('project_context', firstParts.slice(1).join(' | ')));
+  } else if (section.section_type === 'education') {
+    if (firstParts[0]) atoms.push(keyValueFact('organization', firstParts[0]));
+    if (secondParts[0]) atoms.push(keyValueFact('credential', secondParts[0]));
+    if (secondParts.length > 1) atoms.push(keyValueFact('dates', secondParts[secondParts.length - 1]));
+  }
+  return atoms;
 }
 
 function ensureKnownSectionHeadingsOnLines(text: string) {
@@ -1272,6 +1518,84 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function buildMockJobAnalysis(job: JobDescription, requirements: JobRequirement[]): JobAnalysis {
+  const required = requirements.filter((req) => req.priority === 'high' || req.category === 'must_have');
+  const preferred = requirements.filter((req) => req.category === 'nice_to_have');
+  const responsibilities = requirements.filter((req) => req.category === 'responsibility');
+  const keywords = [...new Set(requirements.flatMap((req) => req.keywords))];
+  return {
+    job_id: job.id,
+    company: job.company,
+    role_title: job.title,
+    location: inferLocationFromJD(job.raw_text),
+    work_arrangement: inferArrangementFromJD(job.raw_text),
+    salary: '',
+    top_pain_points: [...responsibilities, ...required].map((req) => req.requirement_text).slice(0, 3),
+    required_skills: [...new Set(required.flatMap((req) => req.keywords))],
+    preferred_skills: [...new Set(preferred.flatMap((req) => req.keywords))],
+    responsibilities: responsibilities.map((req) => req.requirement_text),
+    seniority_level: requirements.some((req) => /senior|lead|mentor/i.test(req.requirement_text)) ? 'senior' : 'mid',
+    role_archetype: inferRoleArchetypeFromJD(job.title, keywords),
+    keywords,
+    risk_flags: requirements.some((req) => req.category === 'domain') ? ['domain_requirement'] : [],
+    job_poster: '',
+    company_url: '',
+    created_at: now(),
+    updated_at: now(),
+  };
+}
+
+function buildMockFitAnalysis(jobID: number): JobFitAnalysis {
+  const requirements = mockRequirements.filter((req) => req.job_id === jobID);
+  const matches = mockMatches.filter((match) => match.job_id === jobID);
+  const rows: FitNeedAnalysis[] = requirements.map((req) => {
+    const reqMatches = matches.filter((match) => match.requirement_id === req.id);
+    const best = reqMatches.sort((a, b) => b.score - a.score)[0];
+    const gap = !best ? 'critical' : best.score >= 0.75 ? 'covered' : best.score >= 0.45 ? 'partial' : 'critical';
+    return {
+      requirement_id: req.id,
+      jd_need: req.requirement_text,
+      matching_fact_ids: reqMatches.map((match) => match.fact_id),
+      evidence_strength: best?.coverage_status ?? 'gap',
+      gap_level: gap,
+      confidence: best?.coverage_status === 'strong' ? 'high' : best ? 'medium' : 'low',
+      risk: best ? '' : 'no matching evidence',
+    };
+  });
+  const score = rows.length ? Math.round(rows.reduce((sum, row) => sum + (row.gap_level === 'covered' ? 1 : row.gap_level === 'partial' ? 0.55 : 0), 0) / rows.length * 100) : 0;
+  return {
+    job_id: jobID,
+    overall_score: score,
+    recommendation: score >= 70 ? 'Apply' : score >= 55 ? 'Apply With Caution' : score >= 40 ? 'Upskill First' : 'Look Elsewhere',
+    strengths: rows.filter((row) => row.gap_level === 'covered').map((row) => row.jd_need),
+    critical_gaps: rows.filter((row) => row.gap_level === 'critical').map((row) => row.jd_need),
+    reality_check: `${score}% evidence-backed fit based on ${requirements.length} parsed requirements.`,
+    analysis: rows,
+    created_at: now(),
+    updated_at: now(),
+  };
+}
+
+function inferLocationFromJD(rawText: string) {
+  return rawText.split('\n').find((line) => /melbourne|sydney|australia/i.test(line))?.trim() ?? '';
+}
+
+function inferArrangementFromJD(rawText: string) {
+  const lower = rawText.toLowerCase();
+  if (lower.includes('remote')) return 'remote';
+  if (lower.includes('hybrid')) return 'hybrid';
+  if (lower.includes('onsite') || lower.includes('on-site')) return 'onsite';
+  return '';
+}
+
+function inferRoleArchetypeFromJD(title: string, keywords: string[]) {
+  const joined = `${title} ${keywords.join(' ')}`.toLowerCase();
+  if (joined.includes('cloud') || joined.includes('azure') || joined.includes('aws')) return 'cloud software engineer';
+  if (joined.includes('backend') || joined.includes('api')) return 'backend engineer';
+  if (joined.includes('react') || joined.includes('full stack')) return 'full stack engineer';
+  return 'software engineer';
+}
+
 function inferJobDetailsFromText(rawText: string) {
   const lines = rawText
     .split('\n')
@@ -1372,4 +1696,54 @@ function extractKeywords(text: string) {
       .filter((word) => word.length > 2 && !stop.has(word.toLowerCase()))
       .slice(0, 8),
   )];
+}
+
+function defaultMockPromptRules(): PromptRule[] {
+  const timestamp = now();
+  return [
+    ['truth.no_fabrication', 'validation', 'No fabrication', 'Use only sourced facts. Never invent tools, metrics, titles, leadership, production scope, cloud platforms, or business impact.'],
+    ['jd.top_pain_points', 'jd_parse', 'Top pain points first', 'Prioritize the top 3 employer pain points over exhaustive requirement lists.'],
+    ['resume.human_style', 'resume', 'Human technical style', 'Write concise, specific engineering language. Avoid fake enthusiasm, generic praise, and AI-sounding filler.'],
+    ['fit.blunt_reality', 'fit_analysis', 'Blunt fit analysis', 'Act like a brutally honest hiring fit analyzer. Output an evidence-backed percentage, strengths alignment, critical gaps, reality check, and a directive recommendation.'],
+    ['fit.competitive_market', 'fit_analysis', 'Competitive market calibration', 'Assume competitive roles receive many qualified applicants. A partial transferable match is not enough for Apply unless several high-priority needs are directly supported by approved evidence.'],
+  ].map(([ruleKey, category, title, content], index) => ({
+    id: index + 1,
+    rule_key: ruleKey,
+    category,
+    title,
+    content,
+    enabled: true,
+    version: 1,
+    source: 'mock defaults',
+    created_at: timestamp,
+    updated_at: timestamp,
+  }));
+}
+
+function defaultMockPromptSources(): PromptResearchSource[] {
+  const timestamp = now();
+  return [
+    {
+      id: 1,
+      source_type: 'official_docs',
+      trust_tier: 'official',
+      title: 'OpenAI prompt engineering',
+      url: 'https://developers.openai.com/api/docs/guides/prompt-engineering',
+      extracted_pattern: 'Clear task instructions, delimiters, relevant context, and evals.',
+      app_adaptation: 'PromptBuilder uses task/schema/rules/tagged input sections.',
+      accessed_at: '2026-06-09',
+      created_at: timestamp,
+    },
+    {
+      id: 2,
+      source_type: 'community',
+      trust_tier: 'forum',
+      title: 'Reddit resume tailoring cautions',
+      url: 'https://www.reddit.com/r/resumes/comments/1lnsrap/chatgpt_for_resume_tailoring/',
+      extracted_pattern: 'AI resume tailoring needs manual review and anti-fabrication checks.',
+      app_adaptation: 'Unsupported JD terms become do-not-overclaim strategy items.',
+      accessed_at: '2026-06-09',
+      created_at: timestamp,
+    },
+  ];
 }

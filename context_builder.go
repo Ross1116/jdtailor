@@ -113,6 +113,9 @@ type EvidenceFact struct {
 	Technologies  []string `json:"technologies"`
 	Confidence    string   `json:"confidence"`
 	RiskFlags     []string `json:"risk_flags"`
+	OriginHeading string   `json:"origin_heading"`
+	OriginType    string   `json:"origin_type"`
+	Context       []string `json:"context"`
 	Status        string   `json:"status"`
 	AutoApproved  bool     `json:"auto_approved"`
 	ReviewNote    string   `json:"review_note"`
@@ -141,6 +144,7 @@ type extractedFact struct {
 	Technologies  []string `json:"technologies"`
 	Confidence    string   `json:"confidence"`
 	RiskFlags     []string `json:"risk_flags"`
+	Context       []string `json:"context"`
 }
 
 func (s *Store) GetCandidateProfile() (CandidateProfile, error) {
@@ -498,11 +502,12 @@ Your job is to convert messy resume/source text into small truthful evidence ato
 Extract atomic, evidence-backed candidate facts from one source section.
 
 # Output JSON schema
-{"facts":[{"fact_text":"","evidence_quote":"","technologies":[],"confidence":"high|medium|low","risk_flags":[]}]}
+{"facts":[{"fact_text":"","evidence_quote":"","technologies":[],"confidence":"high|medium|low","risk_flags":[],"context":[]}]}
 
 # Fact contract
 - `+"`evidence_quote`"+` must be an exact quote from <section_content>.
 - `+"`fact_text`"+` must be compact key=value atoms, not prose bullets.
+- `+"`context`"+` must include useful origin atoms available at extraction time, such as origin_heading, section_type, organization, role, project, dates, or location.
 - Split compound bullets into independent facts: core work, scope, environment, tools, metrics, outcomes.
 - Prefer hard facts useful for future resume generation: actions, artifacts, tools, domains, scale, audience, metrics, outcomes.
 - Ignore headings, company/role/date-only lines, formatting artifacts, and claims not supported by the quote.
@@ -514,6 +519,12 @@ Extract atomic, evidence-backed candidate facts from one source section.
 - actions=added; artifact=load-test coverage; tools=Locust
 - scope=login, project listing, booking creation; tools=Locust
 - metric=25%%; outcome=reduced manual workload
+
+# Good context examples
+- origin_heading=Sitespace - Backend Engineer (Founding Team)
+- section_type=experience
+- organization=Sitespace
+- role=Backend Engineer (Founding Team)
 
 # Bad outputs
 - Full sentence resume bullets.
@@ -556,7 +567,7 @@ Extract atomic, evidence-backed candidate facts from one source section.
 }
 
 func (s *Store) ListEvidenceFacts(status string) ([]EvidenceFact, error) {
-	query := `SELECT id, source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, status, auto_approved, review_note, created_at, updated_at FROM evidence_facts`
+	query := `SELECT id, source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, origin_heading, origin_type, context_json, status, auto_approved, review_note, created_at, updated_at FROM evidence_facts`
 	args := []any{}
 	if strings.TrimSpace(status) != "" && status != "all" {
 		query += ` WHERE status = ?`
@@ -622,6 +633,31 @@ func (s *Store) DeleteEvidenceFact(input DeleteInput) error {
 	return nil
 }
 
+func (s *Store) DeleteAllEvidenceFacts() error {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, statement := range []string{
+		`DELETE FROM tailored_bullet_drafts`,
+		`DELETE FROM job_fact_matches`,
+		`DELETE FROM job_fit_analyses`,
+		`DELETE FROM application_strategies`,
+		`DELETE FROM evidence_facts`,
+	} {
+		if _, err := tx.ExecContext(context.Background(), statement); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	_ = s.LogEvent("info", "all evidence facts deleted")
+	return nil
+}
+
 func (s *Store) DraftCandidateProfileFromSource(sourceID int64) (CandidateProfile, error) {
 	source, err := s.getCandidateSource(sourceID)
 	if err != nil {
@@ -649,7 +685,11 @@ func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFac
 			continue
 		}
 		if !strings.Contains(section.Content, fact.EvidenceQuote) {
-			return nil, fmt.Errorf("evidence quote is not present in source section: %q", fact.EvidenceQuote)
+			repairedQuote := closestEvidenceQuote(section.Content, fact.EvidenceQuote)
+			if repairedQuote == "" {
+				return nil, fmt.Errorf("evidence quote is not present in source section: %q", fact.EvidenceQuote)
+			}
+			fact.EvidenceQuote = repairedQuote
 		}
 		confidence := normalizeConfidence(fact.Confidence)
 		riskFlags := normalizeStringList(fact.RiskFlags)
@@ -662,11 +702,16 @@ func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFac
 		if err != nil {
 			return nil, err
 		}
+		contextAtoms := factContextAtoms(section, fact)
+		contextJSON, err := encodeStringList(contextAtoms)
+		if err != nil {
+			return nil, err
+		}
 		result, err := tx.ExecContext(
 			context.Background(),
 			`INSERT INTO evidence_facts
-				(source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, status, auto_approved, review_note, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
+				(source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, origin_heading, origin_type, context_json, status, auto_approved, review_note, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
 			section.SourceID,
 			section.ID,
 			fact.FactText,
@@ -674,6 +719,9 @@ func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFac
 			techJSON,
 			confidence,
 			riskJSON,
+			strings.TrimSpace(section.Heading),
+			normalizeSectionType(section.SectionType, section.Heading),
+			contextJSON,
 			status,
 			boolToInt(autoApproved),
 			now,
@@ -842,7 +890,120 @@ func enrichExtractedFact(section SourceSection, fact extractedFact) extractedFac
 	if strings.TrimSpace(fact.Confidence) == "" || strings.EqualFold(fact.Confidence, "medium") {
 		fact.Confidence = inferEvidenceConfidence(firstNonEmpty(fact.EvidenceQuote, fact.FactText), fact.Technologies, fact.RiskFlags)
 	}
+	fact.Context = factContextAtoms(section, fact)
 	return fact
+}
+
+func factContextAtoms(section SourceSection, fact extractedFact) []string {
+	atoms := []string{}
+	if heading := strings.TrimSpace(section.Heading); heading != "" {
+		atoms = append(atoms, "origin_heading="+heading)
+	}
+	sectionType := normalizeSectionType(section.SectionType, section.Heading)
+	if sectionType != "" {
+		atoms = append(atoms, "section_type="+sectionType)
+	}
+	atoms = append(atoms, sectionMetadataContext(section)...)
+	atoms = append(atoms, fact.Context...)
+	return normalizeStringList(atoms)
+}
+
+func sectionMetadataContext(section SourceSection) []string {
+	lines := metadataLines(section)
+	if len(lines) == 0 {
+		return nil
+	}
+	sectionType := normalizeSectionType(section.SectionType, section.Heading)
+	atoms := []string{}
+	firstParts := splitPipeLine(lines[0])
+	secondParts := []string{}
+	if len(lines) > 1 {
+		secondParts = splitPipeLine(lines[1])
+	}
+	switch sectionType {
+	case "experience":
+		if len(firstParts) > 0 {
+			atoms = append(atoms, "organization="+firstParts[0])
+		}
+		if len(firstParts) > 1 {
+			atoms = append(atoms, "location="+strings.Join(firstParts[1:], " | "))
+		}
+		if len(secondParts) > 0 {
+			atoms = append(atoms, "role="+secondParts[0])
+		}
+		if len(secondParts) > 1 {
+			atoms = append(atoms, "dates="+secondParts[len(secondParts)-1])
+		}
+	case "project":
+		if len(firstParts) > 0 {
+			atoms = append(atoms, "project="+firstParts[0])
+		}
+		if len(firstParts) > 1 {
+			atoms = append(atoms, "project_context="+strings.Join(firstParts[1:], " | "))
+		}
+	case "education":
+		if len(firstParts) > 0 {
+			atoms = append(atoms, "organization="+firstParts[0])
+		}
+		if len(secondParts) > 0 {
+			atoms = append(atoms, "credential="+secondParts[0])
+		}
+		if len(secondParts) > 1 {
+			atoms = append(atoms, "dates="+secondParts[len(secondParts)-1])
+		}
+	default:
+		if len(firstParts) > 0 && strings.Contains(lines[0], "|") {
+			atoms = append(atoms, "context_line="+strings.Join(firstParts, " | "))
+		}
+	}
+	return atoms
+}
+
+func closestEvidenceQuote(sectionContent string, quote string) string {
+	quoteTerms := evidenceQuoteTerms(quote)
+	if len(quoteTerms) == 0 {
+		return ""
+	}
+	bestLine := ""
+	bestScore := 0
+	for _, line := range strings.Split(sectionContent, "\n") {
+		candidate := strings.TrimSpace(line)
+		if candidate == "" || isKnownSectionHeading(candidate) {
+			continue
+		}
+		score := 0
+		candidateLower := strings.ToLower(candidate)
+		for _, term := range quoteTerms {
+			if strings.Contains(candidateLower, term) {
+				score++
+			}
+		}
+		if score > bestScore {
+			bestScore = score
+			bestLine = candidate
+		}
+	}
+	if bestScore >= minInt(4, len(quoteTerms)) || bestScore*2 >= len(quoteTerms) {
+		return bestLine
+	}
+	return ""
+}
+
+func evidenceQuoteTerms(value string) []string {
+	stop := map[string]bool{}
+	for _, word := range []string{"the", "and", "for", "with", "from", "that", "this", "into", "core", "logic"} {
+		stop[word] = true
+	}
+	terms := []string{}
+	for _, token := range strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '#'
+	}) {
+		if len(token) < 4 || stop[token] {
+			continue
+		}
+		terms = append(terms, token)
+	}
+	return normalizeStringList(terms)
 }
 
 func looksLikeSentence(value string) bool {
@@ -1843,7 +2004,7 @@ func (s *Store) getSourceSection(id int64) (SourceSection, error) {
 func (s *Store) getEvidenceFact(id int64) (EvidenceFact, error) {
 	rows, err := s.db.QueryContext(
 		context.Background(),
-		`SELECT id, source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, status, auto_approved, review_note, created_at, updated_at
+		`SELECT id, source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, origin_heading, origin_type, context_json, status, auto_approved, review_note, created_at, updated_at
 		FROM evidence_facts WHERE id = ?`,
 		id,
 	)
@@ -1902,6 +2063,7 @@ func scanEvidenceFacts(rows *sql.Rows) ([]EvidenceFact, error) {
 		var fact EvidenceFact
 		var technologiesJSON string
 		var riskFlagsJSON string
+		var contextJSON string
 		var autoApproved int
 		if err := rows.Scan(
 			&fact.ID,
@@ -1912,6 +2074,9 @@ func scanEvidenceFacts(rows *sql.Rows) ([]EvidenceFact, error) {
 			&technologiesJSON,
 			&fact.Confidence,
 			&riskFlagsJSON,
+			&fact.OriginHeading,
+			&fact.OriginType,
+			&contextJSON,
 			&fact.Status,
 			&autoApproved,
 			&fact.ReviewNote,
@@ -1922,6 +2087,7 @@ func scanEvidenceFacts(rows *sql.Rows) ([]EvidenceFact, error) {
 		}
 		fact.Technologies = decodeStringList(technologiesJSON)
 		fact.RiskFlags = decodeStringList(riskFlagsJSON)
+		fact.Context = decodeStringList(contextJSON)
 		fact.AutoApproved = intToBool(autoApproved)
 		facts = append(facts, fact)
 	}

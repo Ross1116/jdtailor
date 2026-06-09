@@ -23,6 +23,8 @@ import {
   Wrench,
 } from 'lucide-react';
 import {
+  AnalyzeJobDescription,
+  ApplicationStrategy,
   CandidateProfile,
   CandidateProfileRecord,
   CandidateSource,
@@ -30,6 +32,7 @@ import {
   CreateCandidateSource,
   CreateJobDescription,
   DeleteCandidateSource,
+  DeleteAllEvidenceFacts,
   DeleteEvidenceFact,
   DeleteJobDescription,
   DeleteSourceSection,
@@ -39,19 +42,28 @@ import {
   EvidenceFact,
   ExtractEvidenceFacts,
   GenerateTailoredBulletDrafts,
+  GenerateApplicationStrategy,
+  GenerateFitAnalysis,
   GetCandidateProfile,
+  GetApplicationStrategy,
+  GetFitAnalysis,
   GetHealth,
+  GetJobAnalysis,
   GetRecentEvents,
   GetSettings,
   GetToolStatus,
   JobDescription,
+  JobAnalysis,
   JobFactMatch,
+  JobFitAnalysis,
   JobRequirement,
   ListCandidateSources,
   ListEvidenceFacts,
   ListJobDescriptions,
   ListJobFactMatches,
   ListJobRequirements,
+  ListPromptResearchSources,
+  ListPromptRules,
   ListSourceSections,
   ListTailoredBulletDrafts,
   RenderSamplePDF,
@@ -67,6 +79,9 @@ import {
   UpdateTailoredBulletDraft,
   InstallTectonic,
   ParseJobDescription,
+  PromptResearchSource,
+  PromptRule,
+  UpdatePromptRule,
 } from './backend';
 
 type Health = {
@@ -149,6 +164,8 @@ function App() {
   });
   const [toolStatus, setToolStatus] = useState<ToolStatus | null>(null);
   const [events, setEvents] = useState<AppEvent[]>([]);
+  const [promptRules, setPromptRules] = useState<PromptRule[]>([]);
+  const [promptSources, setPromptSources] = useState<PromptResearchSource[]>([]);
   const [profile, setProfile] = useState<CandidateProfile>(emptyProfile);
   const [sources, setSources] = useState<CandidateSource[]>([]);
   const [sections, setSections] = useState<SourceSection[]>([]);
@@ -157,6 +174,9 @@ function App() {
   const [jobRequirements, setJobRequirements] = useState<JobRequirement[]>([]);
   const [jobMatches, setJobMatches] = useState<JobFactMatch[]>([]);
   const [bulletDrafts, setBulletDrafts] = useState<TailoredBulletDraft[]>([]);
+  const [jobAnalysis, setJobAnalysis] = useState<JobAnalysis | null>(null);
+  const [fitAnalysis, setFitAnalysis] = useState<JobFitAnalysis | null>(null);
+  const [applicationStrategy, setApplicationStrategy] = useState<ApplicationStrategy | null>(null);
   const [selectedSourceID, setSelectedSourceID] = useState<number>(0);
   const [selectedSectionID, setSelectedSectionID] = useState<number>(0);
   const [selectedJobID, setSelectedJobID] = useState<number>(0);
@@ -202,6 +222,8 @@ function App() {
         nextSettings,
         nextStatus,
         nextEvents,
+        nextPromptRules,
+        nextPromptSources,
         nextProfile,
         nextSources,
         nextSections,
@@ -212,6 +234,8 @@ function App() {
         GetSettings(),
         GetToolStatus(),
         GetRecentEvents(),
+        ListPromptRules(),
+        ListPromptResearchSources(),
         GetCandidateProfile(),
         ListCandidateSources(),
         ListSourceSections(0),
@@ -222,6 +246,8 @@ function App() {
       setSettings(nextSettings as Settings);
       setToolStatus(nextStatus as ToolStatus);
       setEvents((nextEvents ?? []) as AppEvent[]);
+      setPromptRules((nextPromptRules ?? []) as PromptRule[]);
+      setPromptSources((nextPromptSources ?? []) as PromptResearchSource[]);
       setProfile(normalizeProfile(nextProfile as CandidateProfile));
       setSources((nextSources ?? []) as CandidateSource[]);
       setSections((nextSections ?? []) as SourceSection[]);
@@ -273,16 +299,25 @@ function App() {
       setJobRequirements([]);
       setJobMatches([]);
       setBulletDrafts([]);
+      setJobAnalysis(null);
+      setFitAnalysis(null);
+      setApplicationStrategy(null);
       return;
     }
-    const [requirements, matches, drafts] = await Promise.all([
+    const [requirements, matches, drafts, analysis, fit, strategy] = await Promise.all([
       ListJobRequirements(jobID),
       ListJobFactMatches(jobID),
       ListTailoredBulletDrafts(jobID),
+      GetJobAnalysis(jobID).catch(() => null),
+      GetFitAnalysis(jobID).catch(() => null),
+      GetApplicationStrategy(jobID).catch(() => null),
     ]);
     setJobRequirements(normalizeRequirements(requirements as JobRequirement[] | null | undefined));
     setJobMatches(normalizeMatches(matches as JobFactMatch[] | null | undefined));
     setBulletDrafts(normalizeDrafts(drafts as TailoredBulletDraft[] | null | undefined));
+    setJobAnalysis(normalizeJobAnalysis(analysis as JobAnalysis | null | undefined));
+    setFitAnalysis(normalizeFitAnalysis(fit as JobFitAnalysis | null | undefined));
+    setApplicationStrategy(normalizeApplicationStrategy(strategy as ApplicationStrategy | null | undefined));
   }
 
   async function runAction(name: string, action: () => Promise<void>) {
@@ -479,6 +514,21 @@ function App() {
     });
   }
 
+  async function deleteAllFacts() {
+    if (!window.confirm('Delete all evidence facts, match maps, and bullet drafts?')) {
+      return;
+    }
+    await runAction('delete-all-facts', async () => {
+      await DeleteAllEvidenceFacts();
+      setFacts([]);
+      setJobMatches([]);
+      setBulletDrafts([]);
+      setFitAnalysis(null);
+      setApplicationStrategy(null);
+      await refreshEvents();
+    });
+  }
+
   async function saveJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await runAction('save-job', async () => {
@@ -516,6 +566,9 @@ function App() {
     setJobRequirements([]);
     setJobMatches([]);
     setBulletDrafts([]);
+    setJobAnalysis(null);
+    setFitAnalysis(null);
+    setApplicationStrategy(null);
   }
 
   function updateJobDraft(nextDraft: JobDraft) {
@@ -549,8 +602,12 @@ function App() {
     await runAction('parse-job', async () => {
       const requirements = (await ParseJobDescription(selectedJobID)) as JobRequirement[];
       setJobRequirements(normalizeRequirements(requirements));
+      const analysis = (await AnalyzeJobDescription(selectedJobID)) as JobAnalysis;
+      setJobAnalysis(normalizeJobAnalysis(analysis));
       setJobMatches([]);
       setBulletDrafts([]);
+      setFitAnalysis(null);
+      setApplicationStrategy(null);
       await refreshEvents();
     });
   }
@@ -560,6 +617,27 @@ function App() {
     await runAction('build-match-map', async () => {
       const matches = (await BuildJobMatchMap(selectedJobID)) as JobFactMatch[];
       setJobMatches(normalizeMatches(matches));
+      setFitAnalysis(null);
+      setApplicationStrategy(null);
+      await refreshEvents();
+    });
+  }
+
+  async function generateFit() {
+    if (!selectedJobID) return;
+    await runAction('generate-fit', async () => {
+      const fit = (await GenerateFitAnalysis(selectedJobID)) as JobFitAnalysis;
+      setFitAnalysis(normalizeFitAnalysis(fit));
+      setApplicationStrategy(null);
+      await refreshEvents();
+    });
+  }
+
+  async function generateStrategy() {
+    if (!selectedJobID) return;
+    await runAction('generate-strategy', async () => {
+      const strategy = (await GenerateApplicationStrategy(selectedJobID)) as ApplicationStrategy;
+      setApplicationStrategy(normalizeApplicationStrategy(strategy));
       await refreshEvents();
     });
   }
@@ -641,6 +719,18 @@ function App() {
     });
   }
 
+  async function savePromptRule(rule: PromptRule) {
+    await runAction(`save-rule-${rule.id}`, async () => {
+      const saved = (await UpdatePromptRule({
+        id: rule.id,
+        content: rule.content,
+        enabled: rule.enabled,
+      })) as PromptRule;
+      setPromptRules((previous) => previous.map((item) => item.id === saved.id ? saved : item));
+      await refreshEvents();
+    });
+  }
+
   useEffect(() => {
     load();
   }, []);
@@ -717,8 +807,11 @@ function App() {
         {activeTab === 'jobs' && (
           <JobsView
             busyAction={busyAction}
+            applicationStrategy={applicationStrategy}
             draft={jobDraft}
             facts={facts}
+            fitAnalysis={fitAnalysis}
+            jobAnalysis={jobAnalysis}
             jobs={jobs}
             matches={jobMatches}
             onBuildMatchMap={buildMatchMap}
@@ -727,6 +820,8 @@ function App() {
             onDeleteJob={deleteJob}
             onDraftChange={updateJobDraft}
             onGenerateDrafts={generateBulletDrafts}
+            onGenerateFit={generateFit}
+            onGenerateStrategy={generateStrategy}
             onNewJob={newJob}
             onParseJob={parseJob}
             onSaveDraft={(draft) => updateBulletDraft(draft)}
@@ -763,6 +858,7 @@ function App() {
             facts={facts}
             onChange={(fact) => setFacts((previous) => normalizeFacts(previous.map((item) => item.id === fact.id ? fact : item)))}
             onDelete={deleteFact}
+            onDeleteAll={deleteAllFacts}
             onReview={reviewFact}
           />
         )}
@@ -779,9 +875,13 @@ function App() {
             onInstallTectonic={installTectonic}
             onRenderSamplePDF={renderSamplePDF}
             onRunLLMTest={runLLMTest}
+            onPromptRuleChange={(rule) => setPromptRules((previous) => previous.map((item) => item.id === rule.id ? rule : item))}
             onSaveAPIKey={saveAPIKey}
+            onSavePromptRule={savePromptRule}
             onSaveSettings={saveSettings}
             pdfResult={pdfResult}
+            promptRules={promptRules}
+            promptSources={promptSources}
             settings={settings}
             setSettings={setSettings}
             tectonicStatus={tectonicStatus}
@@ -980,8 +1080,11 @@ function SourcesView({
 
 function JobsView({
   busyAction,
+  applicationStrategy,
   draft,
   facts,
+  fitAnalysis,
+  jobAnalysis,
   jobs,
   matches,
   onBuildMatchMap,
@@ -990,6 +1093,8 @@ function JobsView({
   onDeleteJob,
   onDraftChange,
   onGenerateDrafts,
+  onGenerateFit,
+  onGenerateStrategy,
   onNewJob,
   onParseJob,
   onSaveDraft,
@@ -1001,8 +1106,11 @@ function JobsView({
   tailoredDrafts,
 }: {
   busyAction: string;
+  applicationStrategy: ApplicationStrategy | null;
   draft: JobDraft;
   facts: EvidenceFact[];
+  fitAnalysis: JobFitAnalysis | null;
+  jobAnalysis: JobAnalysis | null;
   jobs: JobDescription[];
   matches: JobFactMatch[];
   onBuildMatchMap: () => void;
@@ -1011,6 +1119,8 @@ function JobsView({
   onDeleteJob: (id: number) => void;
   onDraftChange: (draft: JobDraft) => void;
   onGenerateDrafts: () => void;
+  onGenerateFit: () => void;
+  onGenerateStrategy: () => void;
   onNewJob: () => void;
   onParseJob: () => void;
   onSaveDraft: (draft: TailoredBulletDraft) => void;
@@ -1065,7 +1175,7 @@ function JobsView({
               <TextInput label="URL" value={draft.url} onChange={(value) => onDraftChange({...draft, url: value})} />
             </div>
             <TextArea label="Raw JD text" rows={10} value={draft.raw_text} onChange={(value) => onDraftChange({...draft, raw_text: value})} />
-            <div className="grid gap-3 md:grid-cols-4">
+            <div className="grid gap-3 md:grid-cols-6">
               <IconButton label={selectedJobID ? 'Update JD' : 'Save JD'} submit disabled={busyAction === 'save-job' || draft.raw_text.trim() === ''}>
                 <Save size={16} />
               </IconButton>
@@ -1075,11 +1185,67 @@ function JobsView({
               <IconButton label="Build matches" onClick={onBuildMatchMap} disabled={!selectedJobID || requirements.length === 0 || facts.length === 0 || busyAction === 'build-match-map'}>
                 <ListChecks size={16} />
               </IconButton>
+              <IconButton label="Fit" onClick={onGenerateFit} disabled={!selectedJobID || requirements.length === 0 || busyAction === 'generate-fit'}>
+                <Activity size={16} />
+              </IconButton>
+              <IconButton label="Strategy" onClick={onGenerateStrategy} disabled={!selectedJobID || !fitAnalysis || busyAction === 'generate-strategy'}>
+                <Wrench size={16} />
+              </IconButton>
               <IconButton label="Draft bullets" onClick={onGenerateDrafts} disabled={!selectedJobID || matches.length === 0 || busyAction === 'generate-bullets'}>
                 <Sparkles size={16} />
               </IconButton>
             </div>
           </form>
+        </Panel>
+
+        <Panel icon={<Activity size={18} />} title="JD analysis and strategy" subtitle="Top pain points, evidence-backed fit, and resume positioning.">
+          <div className="grid gap-3 lg:grid-cols-3">
+            <SummaryBlock
+              title="Top pain points"
+              empty="Parse a saved JD."
+              items={jobAnalysis?.top_pain_points ?? []}
+            />
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+              <p className="text-sm font-semibold text-slate-950">Fit</p>
+              {fitAnalysis ? (
+                <div className="mt-2 space-y-2 text-sm text-slate-700">
+                  <div className="flex flex-wrap gap-2">
+                    <StatusBadge text={`${fitAnalysis.overall_score}%`} />
+                    <StatusBadge text={fitAnalysis.recommendation} />
+                  </div>
+                  <p>{fitAnalysis.reality_check}</p>
+                </div>
+              ) : (
+                <p className="mt-2 text-sm text-slate-500">Generate fit after matches.</p>
+              )}
+            </div>
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+              <p className="text-sm font-semibold text-slate-950">Strategy</p>
+              {applicationStrategy ? (
+                <div className="mt-2 space-y-2 text-sm text-slate-700">
+                  <p className="font-medium text-slate-900">{applicationStrategy.resume_headline}</p>
+                  <p>{applicationStrategy.positioning_strategy}</p>
+                </div>
+              ) : (
+                <p className="mt-2 text-sm text-slate-500">Generate strategy after fit.</p>
+              )}
+            </div>
+            <SummaryBlock
+              title="Keywords"
+              empty="No keywords yet."
+              items={(applicationStrategy?.keywords ?? jobAnalysis?.keywords ?? []).slice(0, 10)}
+            />
+            <SummaryBlock
+              title="Do not overclaim"
+              empty="No blocked gaps yet."
+              items={applicationStrategy?.do_not_overclaim ?? fitAnalysis?.critical_gaps ?? []}
+            />
+            <SummaryBlock
+              title="Required skills"
+              empty="No required skills yet."
+              items={jobAnalysis?.required_skills ?? []}
+            />
+          </div>
         </Panel>
 
         <Panel icon={<ListChecks size={18} />} title="Requirements and matches" subtitle="All fact statuses are shown so risky evidence stays visible.">
@@ -1279,12 +1445,14 @@ function FactsView({
   facts,
   onChange,
   onDelete,
+  onDeleteAll,
   onReview,
 }: {
   busyAction: string;
   facts: EvidenceFact[];
   onChange: (fact: EvidenceFact) => void;
   onDelete: (id: number) => void;
+  onDeleteAll: () => void | Promise<void>;
   onReview: (fact: EvidenceFact, status: string) => void | Promise<void>;
 }) {
   const [filter, setFilter] = useState('needs_review');
@@ -1323,7 +1491,14 @@ function FactsView({
               </button>
             ))}
           </div>
-          <SecondaryButton label="Approve visible" onClick={approveVisible} />
+          <div className="flex flex-wrap gap-2">
+            <SecondaryButton label="Approve visible" onClick={approveVisible} />
+            <DangerButton label="Delete all facts" onClick={() => {
+              if (facts.length > 0 && busyAction !== 'delete-all-facts') {
+                void onDeleteAll();
+              }
+            }} />
+          </div>
         </div>
 
         {facts.length === 0 ? (
@@ -1344,12 +1519,22 @@ function FactsView({
                   <StatusBadge text={fact.status} />
                   <StatusBadge text={fact.confidence} />
                   {fact.auto_approved && <StatusBadge text="auto approved" />}
+                  {fact.origin_type && <StatusBadge text={fact.origin_type} />}
                   {asStringArray(fact.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
                 </div>
                 <IconOnlyButton label="Delete fact" onClick={() => onDelete(fact.id)}>
                   <Trash2 size={16} />
                 </IconOnlyButton>
               </div>
+              {(fact.origin_heading || asStringArray(fact.context).length > 0) && (
+                <div className="mb-3 rounded-md border border-slate-200 bg-white px-3 py-2">
+                  <p className="text-xs font-semibold uppercase text-slate-500">Origin</p>
+                  {fact.origin_heading && <p className="mt-1 text-sm font-medium text-slate-800">{fact.origin_heading}</p>}
+                  {asStringArray(fact.context).length > 0 && (
+                    <p className="mt-1 text-xs text-slate-500">{asStringArray(fact.context).join(' | ')}</p>
+                  )}
+                </div>
+              )}
               <div className="grid gap-3 lg:grid-cols-2">
                 <TextArea label="Evidence atoms" rows={3} value={fact.fact_text} onChange={(value) => onChange({...fact, fact_text: value})} />
                 <TextArea label="Evidence quote" rows={3} value={fact.evidence_quote} onChange={(value) => onChange({...fact, evidence_quote: value})} />
@@ -1393,11 +1578,15 @@ function SettingsView({
   llmResult,
   onAPIKeyChange,
   onInstallTectonic,
+  onPromptRuleChange,
   onRenderSamplePDF,
   onRunLLMTest,
   onSaveAPIKey,
+  onSavePromptRule,
   onSaveSettings,
   pdfResult,
+  promptRules,
+  promptSources,
   settings,
   setSettings,
   tectonicStatus,
@@ -1411,11 +1600,15 @@ function SettingsView({
   llmResult: LLMTestResult | null;
   onAPIKeyChange: (value: string) => void;
   onInstallTectonic: () => void;
+  onPromptRuleChange: (rule: PromptRule) => void;
   onRenderSamplePDF: () => void;
   onRunLLMTest: () => void;
   onSaveAPIKey: (event: FormEvent<HTMLFormElement>) => void;
+  onSavePromptRule: (rule: PromptRule) => void;
   onSaveSettings: (event: FormEvent<HTMLFormElement>) => void;
   pdfResult: RenderPDFResult | null;
+  promptRules: PromptRule[];
+  promptSources: PromptResearchSource[];
   settings: Settings;
   setSettings: (settings: Settings) => void;
   tectonicStatus: string;
@@ -1474,6 +1667,56 @@ function SettingsView({
       </Panel>
 
       <div className="space-y-4">
+        <Panel icon={<ListChecks size={18} />} title="Prompt rules" subtitle="Compact rule digests used by JD, fit, strategy, and resume prompts.">
+          <div className="space-y-3">
+            {promptRules.length === 0 ? (
+              <EmptyState text="No prompt rules seeded yet." />
+            ) : (
+              promptRules.map((rule) => (
+                <div key={rule.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <StatusBadge text={rule.category} />
+                      <StatusBadge text={`v${rule.version}`} />
+                      <span className="text-sm font-semibold text-slate-950">{rule.title}</span>
+                    </div>
+                    <CheckInput
+                      checked={rule.enabled}
+                      label="Enabled"
+                      onChange={(checked) => onPromptRuleChange({...rule, enabled: checked})}
+                    />
+                  </div>
+                  <TextArea rows={3} label="Rule" value={rule.content} onChange={(value) => onPromptRuleChange({...rule, content: value})} />
+                  <div className="mt-3">
+                    <IconButton label="Save rule" onClick={() => onSavePromptRule(rule)} disabled={busyAction === `save-rule-${rule.id}`}>
+                      <Save size={16} />
+                    </IconButton>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </Panel>
+
+        <Panel icon={<FileText size={18} />} title="Prompt research" subtitle="Distilled source patterns used to shape app-specific prompts.">
+          <div className="space-y-2">
+            {promptSources.length === 0 ? (
+              <EmptyState text="No research sources seeded yet." />
+            ) : (
+              promptSources.map((source) => (
+                <div key={source.id} className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <StatusBadge text={source.trust_tier} />
+                    <StatusBadge text={source.source_type} />
+                    <span className="font-semibold text-slate-950">{source.title}</span>
+                  </div>
+                  <p className="text-slate-700">{source.app_adaptation}</p>
+                </div>
+              ))
+            )}
+          </div>
+        </Panel>
+
         <Panel icon={<Database size={18} />} title="Storage and PDF" subtitle="Foundation paths and render gate.">
           <div className="space-y-4">
             <div className="grid gap-3 md:grid-cols-2">
@@ -1592,6 +1835,22 @@ function StatusPill({state, text}: {state: LoadState; text: string}) {
       {state === 'ready' ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
       {text}
     </span>
+  );
+}
+
+function SummaryBlock({empty, items, title}: {empty: string; items: string[]; title: string}) {
+  const visible = asStringArray(items).slice(0, 6);
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+      <p className="text-sm font-semibold text-slate-950">{title}</p>
+      {visible.length === 0 ? (
+        <p className="mt-2 text-sm text-slate-500">{empty}</p>
+      ) : (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {visible.map((item) => <StatusBadge key={item} text={item} />)}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1902,6 +2161,9 @@ function normalizeFacts(value?: EvidenceFact[] | null) {
     ...fact,
     technologies: asStringArray(fact.technologies),
     risk_flags: asStringArray(fact.risk_flags),
+    origin_heading: fact.origin_heading || '',
+    origin_type: fact.origin_type || '',
+    context: asStringArray(fact.context),
   }));
 }
 
@@ -1925,6 +2187,45 @@ function normalizeDrafts(value?: TailoredBulletDraft[] | null) {
     fact_ids: asArray(draft.fact_ids),
     risk_flags: asStringArray(draft.risk_flags),
   }));
+}
+
+function normalizeJobAnalysis(value?: JobAnalysis | null): JobAnalysis | null {
+  if (!value) return null;
+  return {
+    ...value,
+    top_pain_points: asStringArray(value.top_pain_points),
+    required_skills: asStringArray(value.required_skills),
+    preferred_skills: asStringArray(value.preferred_skills),
+    responsibilities: asStringArray(value.responsibilities),
+    keywords: asStringArray(value.keywords),
+    risk_flags: asStringArray(value.risk_flags),
+  };
+}
+
+function normalizeFitAnalysis(value?: JobFitAnalysis | null): JobFitAnalysis | null {
+  if (!value) return null;
+  return {
+    ...value,
+    strengths: asStringArray(value.strengths),
+    critical_gaps: asStringArray(value.critical_gaps),
+    analysis: asArray(value.analysis).map((item) => ({
+      ...item,
+      matching_fact_ids: asArray(item.matching_fact_ids),
+    })),
+  };
+}
+
+function normalizeApplicationStrategy(value?: ApplicationStrategy | null): ApplicationStrategy | null {
+  if (!value) return null;
+  return {
+    ...value,
+    approved_fact_ids: asArray(value.approved_fact_ids),
+    rejected_fact_ids: asArray(value.rejected_fact_ids),
+    weak_or_missing_requirements: asStringArray(value.weak_or_missing_requirements),
+    experience_titles: value.experience_titles ?? {},
+    keywords: asStringArray(value.keywords),
+    do_not_overclaim: asStringArray(value.do_not_overclaim),
+  };
 }
 
 function asArray<T>(value?: T[] | null): T[] {

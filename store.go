@@ -429,6 +429,96 @@ func (s *Store) migrate(ctx context.Context) error {
 				);
 			`,
 		},
+		{
+			version: 6,
+			sql: `
+				CREATE TABLE IF NOT EXISTS prompt_rules (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					rule_key TEXT NOT NULL UNIQUE,
+					category TEXT NOT NULL,
+					title TEXT NOT NULL,
+					content TEXT NOT NULL,
+					enabled INTEGER NOT NULL DEFAULT 1,
+					version INTEGER NOT NULL DEFAULT 1,
+					source TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS prompt_research_sources (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					source_type TEXT NOT NULL,
+					trust_tier TEXT NOT NULL,
+					title TEXT NOT NULL,
+					url TEXT NOT NULL,
+					extracted_pattern TEXT NOT NULL,
+					app_adaptation TEXT NOT NULL,
+					accessed_at TEXT NOT NULL,
+					created_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS job_analyses (
+					job_id INTEGER PRIMARY KEY REFERENCES job_descriptions(id) ON DELETE CASCADE,
+					company TEXT NOT NULL DEFAULT '',
+					role_title TEXT NOT NULL DEFAULT '',
+					location TEXT NOT NULL DEFAULT '',
+					work_arrangement TEXT NOT NULL DEFAULT '',
+					salary TEXT NOT NULL DEFAULT '',
+					top_pain_points_json TEXT NOT NULL DEFAULT '[]',
+					required_skills_json TEXT NOT NULL DEFAULT '[]',
+					preferred_skills_json TEXT NOT NULL DEFAULT '[]',
+					responsibilities_json TEXT NOT NULL DEFAULT '[]',
+					seniority_level TEXT NOT NULL DEFAULT '',
+					role_archetype TEXT NOT NULL DEFAULT '',
+					keywords_json TEXT NOT NULL DEFAULT '[]',
+					risk_flags_json TEXT NOT NULL DEFAULT '[]',
+					job_poster TEXT NOT NULL DEFAULT '',
+					company_url TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS job_fit_analyses (
+					job_id INTEGER PRIMARY KEY REFERENCES job_descriptions(id) ON DELETE CASCADE,
+					overall_score INTEGER NOT NULL DEFAULT 0,
+					recommendation TEXT NOT NULL DEFAULT '',
+					strengths_json TEXT NOT NULL DEFAULT '[]',
+					critical_gaps_json TEXT NOT NULL DEFAULT '[]',
+					reality_check TEXT NOT NULL DEFAULT '',
+					analysis_json TEXT NOT NULL DEFAULT '[]',
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS application_strategies (
+					job_id INTEGER PRIMARY KEY REFERENCES job_descriptions(id) ON DELETE CASCADE,
+					approved_fact_ids_json TEXT NOT NULL DEFAULT '[]',
+					rejected_fact_ids_json TEXT NOT NULL DEFAULT '[]',
+					weak_or_missing_json TEXT NOT NULL DEFAULT '[]',
+					resume_headline TEXT NOT NULL DEFAULT '',
+					experience_titles_json TEXT NOT NULL DEFAULT '{}',
+					positioning_strategy TEXT NOT NULL DEFAULT '',
+					keywords_json TEXT NOT NULL DEFAULT '[]',
+					do_not_overclaim_json TEXT NOT NULL DEFAULT '[]',
+					fit_summary TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+			`,
+		},
+		{
+			version: 7,
+			sql: `
+				ALTER TABLE evidence_facts ADD COLUMN origin_heading TEXT NOT NULL DEFAULT '';
+				ALTER TABLE evidence_facts ADD COLUMN origin_type TEXT NOT NULL DEFAULT '';
+				ALTER TABLE evidence_facts ADD COLUMN context_json TEXT NOT NULL DEFAULT '[]';
+
+				UPDATE evidence_facts
+				SET origin_heading = COALESCE((SELECT heading FROM source_sections WHERE source_sections.id = evidence_facts.section_id), ''),
+					origin_type = COALESCE((SELECT section_type FROM source_sections WHERE source_sections.id = evidence_facts.section_id), '')
+				WHERE origin_heading = '' OR origin_type = '';
+			`,
+		},
 	}
 
 	for _, migration := range migrations {
@@ -463,6 +553,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 
 	if err := s.ensureDefaultSettings(ctx); err != nil {
+		return err
+	}
+	if err := s.seedPromptDefaults(ctx); err != nil {
 		return err
 	}
 

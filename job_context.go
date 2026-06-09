@@ -131,6 +131,8 @@ type factPromptContext struct {
 	EvidenceQuote  string   `json:"evidence_quote"`
 	Technologies   []string `json:"technologies"`
 	SectionHeading string   `json:"section_heading"`
+	SectionType    string   `json:"section_type"`
+	Context        []string `json:"context"`
 }
 
 func (s *Store) ListJobDescriptions() ([]JobDescription, error) {
@@ -276,7 +278,12 @@ Parse the pasted job description into resume-tailoring requirements.
 			return nil, fmt.Errorf("LLM request failed and no local requirements could be extracted: %w", err)
 		}
 		_ = s.LogEvent("warning", "job requirements used local fallback after LLM request failure: "+err.Error())
-		return s.replaceJobRequirements(job, parsed)
+		requirements, replaceErr := s.replaceJobRequirements(job, parsed)
+		if replaceErr != nil {
+			return nil, replaceErr
+		}
+		_ = s.replaceJobAnalysis(buildJobAnalysis(job, requirements))
+		return requirements, nil
 	}
 	parsed, err := parseJobRequirements(text)
 	if err != nil {
@@ -286,7 +293,12 @@ Parse the pasted job description into resume-tailoring requirements.
 		}
 		_ = s.LogEvent("warning", "job requirements used local fallback: "+err.Error())
 	}
-	return s.replaceJobRequirements(job, parsed)
+	requirements, err := s.replaceJobRequirements(job, parsed)
+	if err != nil {
+		return nil, err
+	}
+	_ = s.replaceJobAnalysis(buildJobAnalysis(job, requirements))
+	return requirements, nil
 }
 
 func (s *Store) BuildJobMatchMap(ctx context.Context, jobID int64, client *http.Client) ([]JobFactMatch, error) {
@@ -331,6 +343,7 @@ Build an evidence-backed match map for this job.
 # Rules
 - Use only IDs from <requirements_json> and <candidate_facts_json>.
 - Prefer approved facts. You may use needs_review or rejected facts only when highly relevant; mention that risk in rationale.
+- Every candidate fact includes extraction-time context atoms. Use context to distinguish role/project/organization origin before deciding relevance.
 - Do not match on generic words alone: engineer, software, application, team, role, business, agile, communication.
 - Rationale must explain the overlap and the missing caveat in one sentence.
 - Score range: strong 0.75-1.0, partial 0.45-0.74, weak 0.2-0.44.
@@ -403,6 +416,10 @@ Generate saved resume bullet suggestions for this job from the matched evidence.
 - Combine compatible facts only when they share a believable project/context.
 - Prefer concrete artifacts, technologies, scale, users/teams, metrics, and outcomes.
 - Keep each bullet 22 to 34 words.
+- Every fact includes extraction-time context plus section_heading and section_type. Treat context as the bullet origin.
+- Do not blend facts from different origins unless the draft remains truthful and natural.
+- Mention the origin in rationale so reviewers know where the bullet belongs.
+- Respect a one-page resume budget: max 5 bullets per experience origin, max 2 bullets per project origin, max 1 per education/certification origin.
 
 # Evidence rules
 - Every fact_id must exist in <candidate_facts_json>.
@@ -584,8 +601,10 @@ func (s *Store) replaceJobMatches(jobID int64, matches []parsedJobMatch, require
 		reqIDs[req.ID] = true
 	}
 	factIDs := map[int64]bool{}
+	factsByID := map[int64]factPromptContext{}
 	for _, fact := range facts {
 		factIDs[fact.ID] = true
+		factsByID[fact.ID] = fact
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	tx, err := s.db.BeginTx(context.Background(), nil)
@@ -638,8 +657,10 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 		reqIDs[req.ID] = true
 	}
 	factIDs := map[int64]bool{}
+	factsByID := map[int64]factPromptContext{}
 	for _, fact := range facts {
 		factIDs[fact.ID] = true
+		factsByID[fact.ID] = fact
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	tx, err := s.db.BeginTx(context.Background(), nil)
@@ -651,6 +672,7 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 		return nil, err
 	}
 	count := 0
+	originCounts := map[string]int{}
 	for _, draft := range drafts {
 		draft.DraftText = strings.TrimSpace(draft.DraftText)
 		if draft.DraftText == "" || !reqIDs[draft.RequirementID] {
@@ -663,6 +685,10 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 			}
 		}
 		if len(validFactIDs) == 0 {
+			continue
+		}
+		originKey, originBudget := draftOriginBudget(validFactIDs, factsByID)
+		if originBudget > 0 && originCounts[originKey] >= originBudget {
 			continue
 		}
 		factIDsJSON, err := encodeInt64List(validFactIDs)
@@ -689,6 +715,9 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 			return nil, err
 		}
 		count++
+		if originBudget > 0 {
+			originCounts[originKey]++
+		}
 	}
 	if count == 0 {
 		return nil, errors.New("LLM returned no usable bullet drafts")
@@ -727,6 +756,35 @@ func parseJobRequirements(text string) ([]parsedJobRequirement, error) {
 		filtered = filtered[:16]
 	}
 	return filtered, nil
+}
+
+func draftOriginBudget(factIDs []int64, factsByID map[int64]factPromptContext) (string, int) {
+	for _, factID := range factIDs {
+		fact, ok := factsByID[factID]
+		if !ok {
+			continue
+		}
+		sectionType := strings.TrimSpace(fact.SectionType)
+		heading := strings.TrimSpace(fact.SectionHeading)
+		if heading == "" {
+			heading = "unknown"
+		}
+		return sectionType + "|" + heading, bulletBudgetForSectionType(sectionType)
+	}
+	return "unknown|unknown", 2
+}
+
+func bulletBudgetForSectionType(sectionType string) int {
+	switch strings.TrimSpace(sectionType) {
+	case "experience":
+		return 5
+	case "project":
+		return 2
+	case "education", "certification":
+		return 1
+	default:
+		return 2
+	}
 }
 
 func parseJobMatches(text string) ([]parsedJobMatch, error) {
@@ -1211,6 +1269,9 @@ func compactFactPromptContext(fact factPromptContext) factPromptContext {
 	if len(fact.Technologies) > 8 {
 		fact.Technologies = fact.Technologies[:8]
 	}
+	if len(fact.Context) > 8 {
+		fact.Context = fact.Context[:8]
+	}
 	return fact
 }
 
@@ -1284,7 +1345,10 @@ func isJobStopWord(token string) bool {
 func (s *Store) listFactPromptContext() ([]factPromptContext, error) {
 	rows, err := s.db.QueryContext(
 		context.Background(),
-		`SELECT f.id, f.status, f.confidence, f.risk_flags_json, f.fact_text, f.evidence_quote, f.technologies_json, s.heading
+		`SELECT f.id, f.status, f.confidence, f.risk_flags_json, f.fact_text, f.evidence_quote, f.technologies_json,
+			COALESCE(NULLIF(f.origin_heading, ''), s.heading),
+			COALESCE(NULLIF(f.origin_type, ''), s.section_type),
+			f.context_json
 		FROM evidence_facts f
 		JOIN source_sections s ON s.id = f.section_id
 		ORDER BY f.id DESC`,
@@ -1298,11 +1362,13 @@ func (s *Store) listFactPromptContext() ([]factPromptContext, error) {
 		var fact factPromptContext
 		var riskJSON string
 		var techJSON string
-		if err := rows.Scan(&fact.ID, &fact.Status, &fact.Confidence, &riskJSON, &fact.FactText, &fact.EvidenceQuote, &techJSON, &fact.SectionHeading); err != nil {
+		var contextJSON string
+		if err := rows.Scan(&fact.ID, &fact.Status, &fact.Confidence, &riskJSON, &fact.FactText, &fact.EvidenceQuote, &techJSON, &fact.SectionHeading, &fact.SectionType, &contextJSON); err != nil {
 			return nil, err
 		}
 		fact.RiskFlags = decodeStringList(riskJSON)
 		fact.Technologies = decodeStringList(techJSON)
+		fact.Context = decodeStringList(contextJSON)
 		facts = append(facts, fact)
 	}
 	return facts, rows.Err()
