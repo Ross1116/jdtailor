@@ -119,6 +119,7 @@ type AppEvent = {
 
 type LoadState = 'loading' | 'ready' | 'error';
 type Tab = 'sources' | 'jobs' | 'profile' | 'sections' | 'facts' | 'settings';
+type JobDraft = {company: string; title: string; url: string; raw_text: string};
 
 const emptyProfile: CandidateProfile = {
   contact: {
@@ -137,7 +138,7 @@ const emptyProfile: CandidateProfile = {
 };
 
 function App() {
-  const [activeTab, setActiveTab] = useState<Tab>('sources');
+  const [activeTab, setActiveTab] = useState<Tab>('jobs');
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [error, setError] = useState('');
   const [health, setHealth] = useState<Health | null>(null);
@@ -164,7 +165,7 @@ function App() {
     title: '',
     raw_text: '',
   });
-  const [jobDraft, setJobDraft] = useState({
+  const [jobDraft, setJobDraft] = useState<JobDraft>({
     company: '',
     title: '',
     url: '',
@@ -233,6 +234,12 @@ function App() {
       const firstJob = (nextJobs as JobDescription[] | undefined)?.[0];
       if (!selectedJobID && firstJob) {
         setSelectedJobID(firstJob.id);
+        setJobDraft({
+          company: firstJob.company,
+          title: firstJob.title,
+          url: firstJob.url,
+          raw_text: firstJob.raw_text,
+        });
         await refreshJobContext(firstJob.id);
       }
       setLoadState('ready');
@@ -511,6 +518,20 @@ function App() {
     setBulletDrafts([]);
   }
 
+  function updateJobDraft(nextDraft: JobDraft) {
+    setJobDraft((previous) => {
+      if (nextDraft.raw_text === previous.raw_text) {
+        return nextDraft;
+      }
+      const inferred = inferJobDetailsFromText(nextDraft.raw_text);
+      return {
+        ...nextDraft,
+        company: nextDraft.company.trim() ? nextDraft.company : inferred.company,
+        title: nextDraft.title.trim() ? nextDraft.title : inferred.title,
+      };
+    });
+  }
+
   async function deleteJob(jobID: number) {
     await runAction(`delete-job-${jobID}`, async () => {
       await DeleteJobDescription({id: jobID});
@@ -647,8 +668,8 @@ function App() {
 
       <section className="border-b border-slate-200 bg-white">
         <nav className="mx-auto flex max-w-7xl gap-2 overflow-x-auto px-5 py-3">
-          <TabButton active={activeTab === 'sources'} label="Sources" icon={<Upload size={16} />} onClick={() => setActiveTab('sources')} />
           <TabButton active={activeTab === 'jobs'} label="Jobs" icon={<BriefcaseBusiness size={16} />} onClick={() => setActiveTab('jobs')} />
+          <TabButton active={activeTab === 'sources'} label="Sources" icon={<Upload size={16} />} onClick={() => setActiveTab('sources')} />
           <TabButton active={activeTab === 'profile'} label="Profile" icon={<UserRound size={16} />} onClick={() => setActiveTab('profile')} />
           <TabButton active={activeTab === 'sections'} label="Sections" icon={<Layers3 size={16} />} onClick={() => setActiveTab('sections')} />
           <TabButton active={activeTab === 'facts'} label={`Fact Review${queuedFacts.length ? ` ${queuedFacts.length}` : ''}`} icon={<ListChecks size={16} />} onClick={() => setActiveTab('facts')} />
@@ -704,7 +725,7 @@ function App() {
             onChangeDraft={(draft) => setBulletDrafts((previous) => normalizeDrafts(previous.map((item) => item.id === draft.id ? draft : item)))}
             onDeleteDraft={deleteBulletDraft}
             onDeleteJob={deleteJob}
-            onDraftChange={setJobDraft}
+            onDraftChange={updateJobDraft}
             onGenerateDrafts={generateBulletDrafts}
             onNewJob={newJob}
             onParseJob={parseJob}
@@ -980,7 +1001,7 @@ function JobsView({
   tailoredDrafts,
 }: {
   busyAction: string;
-  draft: {company: string; title: string; url: string; raw_text: string};
+  draft: JobDraft;
   facts: EvidenceFact[];
   jobs: JobDescription[];
   matches: JobFactMatch[];
@@ -988,7 +1009,7 @@ function JobsView({
   onChangeDraft: (draft: TailoredBulletDraft) => void;
   onDeleteDraft: (id: number) => void;
   onDeleteJob: (id: number) => void;
-  onDraftChange: (draft: {company: string; title: string; url: string; raw_text: string}) => void;
+  onDraftChange: (draft: JobDraft) => void;
   onGenerateDrafts: () => void;
   onNewJob: () => void;
   onParseJob: () => void;
@@ -1264,15 +1285,59 @@ function FactsView({
   facts: EvidenceFact[];
   onChange: (fact: EvidenceFact) => void;
   onDelete: (id: number) => void;
-  onReview: (fact: EvidenceFact, status: string) => void;
+  onReview: (fact: EvidenceFact, status: string) => void | Promise<void>;
 }) {
+  const [filter, setFilter] = useState('needs_review');
+  const counts = {
+    all: facts.length,
+    needs_review: facts.filter((fact) => fact.status === 'needs_review').length,
+    approved: facts.filter((fact) => fact.status === 'approved').length,
+    rejected: facts.filter((fact) => fact.status === 'rejected').length,
+  };
+  const filteredFacts = facts.filter((fact) => filter === 'all' || fact.status === filter);
+  const visibleFacts = filteredFacts.slice(0, 40);
+  const approveVisible = async () => {
+    for (const fact of visibleFacts.filter((item) => item.status === 'needs_review')) {
+      await onReview(fact, 'approved');
+    }
+  };
+
   return (
     <Panel icon={<ListChecks size={18} />} title="Fact review queue" subtitle="Approve the compact atoms; keep the quote as source evidence. Notes are optional.">
       <div className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+          <div className="flex flex-wrap gap-2">
+            {[
+              ['needs_review', `Needs review ${counts.needs_review}`],
+              ['approved', `Approved ${counts.approved}`],
+              ['rejected', `Rejected ${counts.rejected}`],
+              ['all', `All ${counts.all}`],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setFilter(value)}
+                className={`h-9 rounded-md border px-3 text-sm font-medium ${filter === value ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <SecondaryButton label="Approve visible" onClick={approveVisible} />
+        </div>
+
         {facts.length === 0 ? (
           <EmptyState text="No evidence facts extracted yet." />
+        ) : filteredFacts.length === 0 ? (
+          <EmptyState text="Nothing in this queue." />
         ) : (
-          facts.map((fact) => (
+          <>
+          {filteredFacts.length > visibleFacts.length && (
+            <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              Showing first {visibleFacts.length} of {filteredFacts.length}. Approve or delete some to continue through the queue.
+            </p>
+          )}
+          {visibleFacts.map((fact) => (
             <div key={fact.id} className="rounded-md border border-slate-200 bg-slate-50 p-4">
               <div className="mb-3 flex items-start justify-between gap-3">
                 <div className="flex flex-wrap items-center gap-2">
@@ -1286,8 +1351,8 @@ function FactsView({
                 </IconOnlyButton>
               </div>
               <div className="grid gap-3 lg:grid-cols-2">
-                <TextArea label="Evidence atoms" rows={5} value={fact.fact_text} onChange={(value) => onChange({...fact, fact_text: value})} />
-                <TextArea label="Evidence quote" rows={5} value={fact.evidence_quote} onChange={(value) => onChange({...fact, evidence_quote: value})} />
+                <TextArea label="Evidence atoms" rows={3} value={fact.fact_text} onChange={(value) => onChange({...fact, fact_text: value})} />
+                <TextArea label="Evidence quote" rows={3} value={fact.evidence_quote} onChange={(value) => onChange({...fact, evidence_quote: value})} />
               </div>
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <TextInput label="Technologies" value={asStringArray(fact.technologies).join(', ')} onChange={(value) => onChange({...fact, technologies: splitList(value)})} />
@@ -1311,7 +1376,8 @@ function FactsView({
                 <DangerButton label="Reject" onClick={() => onReview(fact, 'rejected')} />
               </div>
             </div>
-          ))
+          ))}
+          </>
         )}
       </div>
     </Panel>
@@ -1871,6 +1937,60 @@ function asStringArray(value?: string[] | null): string[] {
 
 function splitList(value: string) {
   return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function inferJobDetailsFromText(rawText: string) {
+  const lines = rawText
+    .split('\n')
+    .map(cleanJobDetailLine)
+    .filter((line) => line && !line.toLowerCase().startsWith('http'))
+    .slice(0, 12);
+  let company = '';
+  let title = '';
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    for (const prefix of ['company:', 'employer:', 'organisation:', 'organization:']) {
+      if (lower.startsWith(prefix)) {
+        company = line.slice(prefix.length).trim();
+      }
+    }
+    for (const prefix of ['job title:', 'role:', 'title:', 'position:']) {
+      if (lower.startsWith(prefix)) {
+        title = line.slice(prefix.length).trim();
+      }
+    }
+  }
+  if (!title) {
+    title = lines.find(looksLikeRoleTitle) ?? '';
+  }
+  if (!company) {
+    company = lines.find((line) => {
+      const lower = line.toLowerCase();
+      return line !== title &&
+        !looksLikeRoleTitle(line) &&
+        !lower.includes('responsibilities') &&
+        !lower.includes('requirements') &&
+        !lower.includes('about the role') &&
+        line.split(/\s+/).length <= 5;
+    }) ?? '';
+  }
+  if (title.includes(' at ') && !company) {
+    const [role, org] = title.split(/\s+at\s+/, 2);
+    title = role.trim();
+    company = org.trim();
+  }
+  return {company, title};
+}
+
+function cleanJobDetailLine(line: string) {
+  return line.trim().replace(/^[-•]\s*/, '').replace(/^[#*_`]+|[#*_`]+$/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function looksLikeRoleTitle(line: string) {
+  if (line.split(/\s+/).length > 9) {
+    return false;
+  }
+  return /engineer|developer|manager|analyst|designer|architect|consultant|specialist|lead|intern|graduate|backend|frontend|full stack|software|data|devops|platform/i.test(line);
 }
 
 function sourceTypeLabel(value: string) {

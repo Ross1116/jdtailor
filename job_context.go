@@ -147,7 +147,15 @@ func (s *Store) CreateJobDescription(input CreateJobDescriptionInput) (JobDescri
 	if rawText == "" {
 		return JobDescription{}, errors.New("job description text is required")
 	}
+	details := inferJobDetails(rawText)
+	company := strings.TrimSpace(input.Company)
+	if company == "" {
+		company = details.Company
+	}
 	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		title = details.Title
+	}
 	if title == "" {
 		title = "Untitled job"
 	}
@@ -155,7 +163,7 @@ func (s *Store) CreateJobDescription(input CreateJobDescriptionInput) (JobDescri
 	result, err := s.db.ExecContext(
 		context.Background(),
 		`INSERT INTO job_descriptions (company, title, url, raw_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		strings.TrimSpace(input.Company),
+		company,
 		title,
 		strings.TrimSpace(input.URL),
 		rawText,
@@ -181,14 +189,22 @@ func (s *Store) UpdateJobDescription(input UpdateJobDescriptionInput) (JobDescri
 	if rawText == "" {
 		return JobDescription{}, errors.New("job description text is required")
 	}
+	details := inferJobDetails(rawText)
+	company := strings.TrimSpace(input.Company)
+	if company == "" {
+		company = details.Company
+	}
 	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		title = details.Title
+	}
 	if title == "" {
 		title = "Untitled job"
 	}
 	_, err := s.db.ExecContext(
 		context.Background(),
 		`UPDATE job_descriptions SET company = ?, title = ?, url = ?, raw_text = ?, updated_at = ? WHERE id = ?`,
-		strings.TrimSpace(input.Company),
+		company,
 		title,
 		strings.TrimSpace(input.URL),
 		rawText,
@@ -220,26 +236,55 @@ func (s *Store) ParseJobDescription(ctx context.Context, jobID int64, client *ht
 	if err != nil {
 		return nil, err
 	}
-	system := "You parse job descriptions into requirements. Return strict JSON only."
-	user := fmt.Sprintf(`Parse this job description into distinct requirements.
+	system := `You are JD Tailor's job-description parser. Return strict JSON only.
+Extract only requirements that can change how a resume is tailored.`
+	user := fmt.Sprintf(`# Task
+Parse the pasted job description into resume-tailoring requirements.
 
-Rules:
-- Return JSON shaped as {"requirements":[{"category":"must_have|responsibility|nice_to_have|domain|seniority","requirement_text":"","keywords":[],"priority":"high|medium|low","source_quote":""}]}
-- source_quote must be an exact quote from the job description.
-- Keep requirements atomic and useful for matching resume evidence.
-- No markdown, no commentary.
+# Output JSON schema
+{"requirements":[{"category":"must_have|responsibility|nice_to_have|domain|seniority","requirement_text":"","keywords":[],"priority":"high|medium|low","source_quote":""}]}
 
-Company: %s
-Title: %s
-Job description:
-%s`, job.Company, job.Title, job.RawText)
-	text, err := s.GenerateLLMText(ctx, client, system, user, 2000)
+# Keep
+- Technical skills, tools, languages, frameworks, databases, cloud platforms.
+- Architecture and delivery expectations: distributed systems, security, observability, resilience, DevSecOps, testing, data models.
+- Concrete responsibilities that a resume bullet can support.
+- Seniority signals only when they imply experience depth, leadership, mentoring, influence, or years.
+- Domain requirements only when the JD explicitly asks for domain experience/background/knowledge.
+
+# Reject
+- LinkedIn/page chrome: logos, promoted text, profile match banners, Premium upsells, alumni/people panels, "helpful" prompts.
+- Company/about-us blurbs, generic mission statements, benefits, salary, location, contract duration, application instructions.
+- Role-title-only metadata such as "Software Engineer".
+- Generic soft skills unless concrete and evidence-backed: stakeholder management, mentoring, leadership, cross-functional delivery.
+
+# Quality bar
+- Return 8 to 16 highest-value requirements at most.
+- Make each requirement atomic: one skill/responsibility cluster per item.
+- `+"`source_quote`"+` must be an exact quote from <job_description>.
+- `+"`keywords`"+` should contain 2 to 8 matching terms, favoring tools and domain-specific nouns.
+- Do not invent requirements not stated in the JD.
+
+<job company="%s" title="%s">
+<job_description>
+%s
+</job_description>
+</job>`, job.Company, job.Title, compactPromptText(job.RawText, 18000))
+	text, err := s.GenerateLLMText(ctx, client, system, user, 1200)
 	if err != nil {
-		return nil, err
+		parsed := fallbackJobRequirements(job.RawText)
+		if len(parsed) == 0 {
+			return nil, fmt.Errorf("LLM request failed and no local requirements could be extracted: %w", err)
+		}
+		_ = s.LogEvent("warning", "job requirements used local fallback after LLM request failure: "+err.Error())
+		return s.replaceJobRequirements(job, parsed)
 	}
 	parsed, err := parseJobRequirements(text)
 	if err != nil {
-		return nil, err
+		parsed = fallbackJobRequirements(job.RawText)
+		if len(parsed) == 0 {
+			return nil, fmt.Errorf("LLM returned unusable requirement JSON and no local requirements could be extracted: %w", err)
+		}
+		_ = s.LogEvent("warning", "job requirements used local fallback: "+err.Error())
 	}
 	return s.replaceJobRequirements(job, parsed)
 }
@@ -267,29 +312,52 @@ func (s *Store) BuildJobMatchMap(ctx context.Context, jobID int64, client *http.
 		return nil, errors.New("extract evidence facts before matching")
 	}
 	requirementsJSON, _ := json.Marshal(requirements)
-	factsJSON, _ := json.Marshal(facts)
-	system := "You match job requirements to candidate evidence facts. Return strict JSON only."
-	user := fmt.Sprintf(`Build a match map from job requirements to candidate facts.
+	promptFacts := selectFactsForRequirements(requirements, facts, 90)
+	factsJSON, _ := json.Marshal(promptFacts)
+	system := `You are JD Tailor's evidence matcher. Return strict JSON only.
+Match job requirements to candidate facts only when the evidence genuinely supports the requirement.`
+	user := fmt.Sprintf(`# Task
+Build an evidence-backed match map for this job.
 
-Rules:
-- Return JSON shaped as {"matches":[{"requirement_id":0,"fact_id":0,"score":0.0,"rationale":"","coverage_status":"strong|partial|weak|gap"}]}
-- Use only requirement_id values and fact_id values provided below.
-- Facts include approved, needs_review, and rejected status; include rejected/needs_review only when relevant and explain the risk.
-- No markdown, no commentary.
+# Output JSON schema
+{"matches":[{"requirement_id":0,"fact_id":0,"score":0.0,"rationale":"","coverage_status":"strong|partial|weak"}]}
 
-Job: %s at %s
-Requirements:
+# Matching rubric
+- strong: direct support for the core requirement/tool/responsibility.
+- partial: supports an adjacent part of the requirement but misses an important tool, platform, scale, or domain.
+- weak: only broad transferable evidence; still real evidence, not a gap.
+- Do not output gaps. If no fact supports a requirement, omit it.
+
+# Rules
+- Use only IDs from <requirements_json> and <candidate_facts_json>.
+- Prefer approved facts. You may use needs_review or rejected facts only when highly relevant; mention that risk in rationale.
+- Do not match on generic words alone: engineer, software, application, team, role, business, agile, communication.
+- Rationale must explain the overlap and the missing caveat in one sentence.
+- Score range: strong 0.75-1.0, partial 0.45-0.74, weak 0.2-0.44.
+
+<job company="%s" title="%s"/>
+<requirements_json>
 %s
-
-Candidate facts:
-%s`, job.Title, job.Company, string(requirementsJSON), string(factsJSON))
-	text, err := s.GenerateLLMText(ctx, client, system, user, 2400)
+</requirements_json>
+<candidate_facts_json>
+%s
+</candidate_facts_json>`, job.Company, job.Title, string(requirementsJSON), string(factsJSON))
+	text, err := s.GenerateLLMText(ctx, client, system, user, 1600)
 	if err != nil {
-		return nil, err
+		parsed := fallbackJobMatches(requirements, facts)
+		if len(parsed) == 0 {
+			return nil, fmt.Errorf("LLM request failed and no local matches could be built: %w", err)
+		}
+		_ = s.LogEvent("warning", "job match map used local fallback after LLM request failure: "+err.Error())
+		return s.replaceJobMatches(jobID, parsed, requirements, facts)
 	}
 	parsed, err := parseJobMatches(text)
 	if err != nil {
-		return nil, err
+		parsed = fallbackJobMatches(requirements, facts)
+		if len(parsed) == 0 {
+			return nil, fmt.Errorf("LLM returned unusable match JSON and no local matches could be built: %w", err)
+		}
+		_ = s.LogEvent("warning", "job match map used local fallback: "+err.Error())
 	}
 	return s.replaceJobMatches(jobID, parsed, requirements, facts)
 }
@@ -319,28 +387,45 @@ func (s *Store) GenerateTailoredBulletDrafts(ctx context.Context, jobID int64, c
 	}
 	reqJSON, _ := json.Marshal(requirements)
 	matchJSON, _ := json.Marshal(matches)
-	factJSON, _ := json.Marshal(facts)
-	system := "You draft tailored resume bullets from evidence only. Return strict JSON only."
-	user := fmt.Sprintf(`Generate tailored bullet suggestions for this job.
+	promptFacts := selectFactsForMatches(matches, facts)
+	factJSON, _ := json.Marshal(promptFacts)
+	system := `You are JD Tailor's resume bullet drafter. Return strict JSON only.
+Write tailored bullet suggestions from provided evidence only; never invent source truth.`
+	user := fmt.Sprintf(`# Task
+Generate saved resume bullet suggestions for this job from the matched evidence.
 
-Rules:
-- Return JSON shaped as {"drafts":[{"requirement_id":0,"fact_ids":[0],"draft_text":"","rationale":"","risk_flags":[]}]}
-- Every fact_id must come from the provided candidate facts.
-- Do not introduce unsupported claims, metrics, tools, leadership, or production scope.
-- Include risk_flags when supporting facts are needs_review, rejected, low confidence, or ambiguous.
-- These are suggestions only, not source truth.
-- No markdown, no commentary.
+# Output JSON schema
+{"drafts":[{"requirement_id":0,"fact_ids":[0],"draft_text":"","rationale":"","risk_flags":[]}]}
 
-Job: %s at %s
-Requirements:
+# Bullet style
+- Start each draft_text with a strong past-tense action verb, no leading hyphen.
+- Make the bullet specific to the JD language when supported by facts.
+- Combine compatible facts only when they share a believable project/context.
+- Prefer concrete artifacts, technologies, scale, users/teams, metrics, and outcomes.
+- Keep each bullet 22 to 34 words.
+
+# Evidence rules
+- Every fact_id must exist in <candidate_facts_json>.
+- Do not introduce unsupported metrics, tools, cloud platforms, leadership, security, production scope, or business impact.
+- If evidence is weak/partial, phrase conservatively; do not overclaim the exact JD requirement.
+- Include risk_flags for needs_review facts, rejected facts, low confidence, ambiguous metric/scope, or inferred tailoring.
+- Drafts are suggestions only and must not mutate locked profile/source truth.
+
+# Rationale
+- Explain which requirement is targeted and why the facts support the wording.
+- Mention any missing JD detail that prevented stronger tailoring.
+
+<job company="%s" title="%s"/>
+<requirements_json>
 %s
-
-Matches:
+</requirements_json>
+<matches_json>
 %s
-
-Candidate facts:
-%s`, job.Title, job.Company, string(reqJSON), string(matchJSON), string(factJSON))
-	text, err := s.GenerateLLMText(ctx, client, system, user, 2400)
+</matches_json>
+<candidate_facts_json>
+%s
+</candidate_facts_json>`, job.Company, job.Title, string(reqJSON), string(matchJSON), string(factJSON))
+	text, err := s.GenerateLLMText(ctx, client, system, user, 1600)
 	if err != nil {
 		return nil, err
 	}
@@ -513,6 +598,9 @@ func (s *Store) replaceJobMatches(jobID int64, matches []parsedJobMatch, require
 	}
 	count := 0
 	for _, match := range matches {
+		if strings.EqualFold(match.CoverageStatus, "gap") || match.Score <= 0 {
+			continue
+		}
 		if !reqIDs[match.RequirementID] || !factIDs[match.FactID] {
 			continue
 		}
@@ -533,13 +621,14 @@ func (s *Store) replaceJobMatches(jobID int64, matches []parsedJobMatch, require
 		}
 		count++
 	}
-	if count == 0 {
-		return nil, errors.New("LLM returned no usable matches")
-	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	_ = s.LogEvent("info", "job match map built")
+	if count == 0 {
+		_ = s.LogEvent("warning", "job match map built with no evidence-backed matches")
+	} else {
+		_ = s.LogEvent("info", "job match map built")
+	}
 	return s.ListJobFactMatches(jobID)
 }
 
@@ -619,12 +708,25 @@ func parseJobRequirements(text string) ([]parsedJobRequirement, error) {
 	if len(parsed.Requirements) == 0 {
 		return nil, errors.New("LLM returned no requirements")
 	}
+	filtered := []parsedJobRequirement{}
 	for _, req := range parsed.Requirements {
 		if strings.TrimSpace(req.RequirementText) == "" || strings.TrimSpace(req.SourceQuote) == "" {
 			return nil, errors.New("every requirement must include requirement_text and source_quote")
 		}
+		req.RequirementText = strings.TrimSpace(req.RequirementText)
+		req.SourceQuote = strings.TrimSpace(req.SourceQuote)
+		if isIrrelevantJobRequirement(req) {
+			continue
+		}
+		filtered = append(filtered, req)
 	}
-	return parsed.Requirements, nil
+	if len(filtered) == 0 {
+		return nil, errors.New("LLM returned no relevant resume-tailoring requirements")
+	}
+	if len(filtered) > 16 {
+		filtered = filtered[:16]
+	}
+	return filtered, nil
 }
 
 func parseJobMatches(text string) ([]parsedJobMatch, error) {
@@ -635,7 +737,17 @@ func parseJobMatches(text string) ([]parsedJobMatch, error) {
 	if len(parsed.Matches) == 0 {
 		return nil, errors.New("LLM returned no matches")
 	}
-	return parsed.Matches, nil
+	filtered := []parsedJobMatch{}
+	for _, match := range parsed.Matches {
+		if strings.EqualFold(match.CoverageStatus, "gap") || match.Score <= 0 {
+			continue
+		}
+		filtered = append(filtered, match)
+	}
+	if len(filtered) == 0 {
+		return nil, errors.New("LLM returned no evidence-backed matches")
+	}
+	return filtered, nil
 }
 
 func parseBulletDrafts(text string) ([]parsedBulletDraft, error) {
@@ -656,6 +768,9 @@ func parseBulletDrafts(text string) ([]parsedBulletDraft, error) {
 
 func parseJSONObject(text string, target any) error {
 	text = strings.TrimSpace(text)
+	if text == "" {
+		return errors.New("LLM returned empty JSON response")
+	}
 	if strings.HasPrefix(text, "```") {
 		text = strings.TrimPrefix(text, "```json")
 		text = strings.TrimPrefix(text, "```")
@@ -667,7 +782,503 @@ func parseJSONObject(text string, target any) error {
 	if start >= 0 && end > start {
 		text = text[start : end+1]
 	}
-	return json.Unmarshal([]byte(text), target)
+	if !strings.HasPrefix(strings.TrimSpace(text), "{") {
+		return errors.New("LLM response did not contain a JSON object")
+	}
+	if err := json.Unmarshal([]byte(text), target); err != nil {
+		return fmt.Errorf("LLM JSON could not be parsed: %w", err)
+	}
+	return nil
+}
+
+func isIrrelevantJobRequirement(req parsedJobRequirement) bool {
+	text := strings.ToLower(strings.Join([]string{
+		req.Category,
+		req.RequirementText,
+		req.SourceQuote,
+		strings.Join(req.Keywords, " "),
+	}, " "))
+	if text == "" {
+		return true
+	}
+	irrelevantMarkers := []string{
+		"12-month", "12 month", "contract", "max term", "fixed term", "salary", "compensation", "benefit", "leave", "hybrid", "remote", "location", "office",
+		"how to apply", "application process", "submit your application", "recruit", "hiring", "interview", "equal opportunity", "diversity", "background check", "sponsorship",
+		"leading personal injury", "class actions law firm", "about us", "about the company", "company is", "we are a", "we're a", "our client",
+		"logo", "linkedin", "promoted by", "responses managed", "profile matches", "is this information helpful", "personalized tips", "top applicant", "retry premium", "people you can reach out", "school alumni", "clicked apply",
+	}
+	for _, marker := range irrelevantMarkers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	if isJobHeadingOrMetadata(req.RequirementText) || isJobHeadingOrMetadata(req.SourceQuote) {
+		return true
+	}
+	if !hasTailorableRequirementSignal(req.RequirementText, req.Keywords) {
+		return true
+	}
+	if strings.EqualFold(req.Category, "domain") && !strings.Contains(text, "experience") && !strings.Contains(text, "knowledge") && !strings.Contains(text, "background") {
+		return true
+	}
+	if strings.EqualFold(req.Category, "seniority") && !strings.Contains(text, "senior") && !strings.Contains(text, "lead") && !strings.Contains(text, "mentor") && !strings.Contains(text, "years") {
+		return true
+	}
+	if len(jobMatchTerms(req.RequirementText, req.Keywords)) == 0 {
+		return true
+	}
+	return false
+}
+
+func fallbackJobRequirements(raw string) []parsedJobRequirement {
+	lines := splitJobRequirementCandidates(raw)
+	requirements := []parsedJobRequirement{}
+	seen := map[string]bool{}
+	for _, line := range lines {
+		line = cleanJobDetailLine(line)
+		if len(line) < 12 {
+			continue
+		}
+		if isJobHeadingOrMetadata(line) || !hasTailorableRequirementSignal(line, nil) {
+			continue
+		}
+		keywords := extractJobKeywords(line)
+		req := parsedJobRequirement{
+			Category:        inferJobRequirementCategory(line),
+			RequirementText: strings.TrimSuffix(line, "."),
+			Keywords:        keywords,
+			Priority:        inferJobRequirementPriority(line, len(requirements)),
+			SourceQuote:     line,
+		}
+		if isIrrelevantJobRequirement(req) || len(req.Keywords) == 0 {
+			continue
+		}
+		key := strings.ToLower(req.RequirementText)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		requirements = append(requirements, req)
+		if len(requirements) >= 16 {
+			break
+		}
+	}
+	return requirements
+}
+
+func isJobHeadingOrMetadata(line string) bool {
+	cleaned := strings.TrimSpace(strings.ToLower(strings.Trim(line, ".:?!")))
+	if cleaned == "" {
+		return true
+	}
+	exact := map[string]bool{
+		"about": true, "about the job": true, "what are we looking for": true, "responsibilities": true, "requirements": true, "key responsibilities": true,
+		"software engineer": true, "slater and gordon lawyers": true, "slater and gordon lawyers logo": true,
+	}
+	if exact[cleaned] {
+		return true
+	}
+	if strings.Contains(cleaned, "·") || strings.Contains(cleaned, " clicked apply") || strings.HasSuffix(cleaned, " logo") {
+		return true
+	}
+	if len(strings.Fields(cleaned)) <= 4 && looksLikeRoleTitle(cleaned) {
+		return true
+	}
+	return false
+}
+
+func hasTailorableRequirementSignal(text string, keywords []string) bool {
+	lower := strings.ToLower(strings.Join(append([]string{text}, keywords...), " "))
+	signals := []string{
+		"experience", "hands-on", "strong", "deep", "knowledge", "understanding", "programming", "skills", "design", "build", "develop", "deliver", "modernis", "test", "support",
+		"architecture", "cloud", "serverless", "event-driven", "distributed", "scalable", "resilience", "observability", "security", "networking", "identity", "database", "nosql",
+		"devsecops", "agile", "solid", "containers", "messaging", "queues", "topics", "stakeholder", "mentor", "engineering practices", "technical excellence",
+	}
+	for _, signal := range signals {
+		if strings.Contains(lower, signal) {
+			return true
+		}
+	}
+	for _, tech := range []string{"fastapi", "postgresql", "react", "typescript", "javascript", "python", "golang", "java", "spring", "mysql", "node.js", "node", "azure", "cosmos db", "aws", "gcp", "docker", "kubernetes", "terraform", "redis"} {
+		if strings.Contains(lower, tech) {
+			return true
+		}
+	}
+	return false
+}
+
+func splitJobRequirementCandidates(raw string) []string {
+	candidates := []string{}
+	for _, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		for _, part := range strings.FieldsFunc(line, func(r rune) bool {
+			return r == ';' || r == '•'
+		}) {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				candidates = append(candidates, part)
+			}
+		}
+	}
+	return candidates
+}
+
+func inferJobRequirementCategory(line string) string {
+	lower := strings.ToLower(line)
+	if strings.Contains(lower, "nice") || strings.Contains(lower, "preferred") || strings.Contains(lower, "bonus") || strings.Contains(lower, "highly regarded") {
+		return "nice_to_have"
+	}
+	if strings.Contains(lower, "senior") || strings.Contains(lower, "years") || strings.Contains(lower, "mentor") || strings.Contains(lower, "lead ") {
+		return "seniority"
+	}
+	if strings.Contains(lower, "domain") || strings.Contains(lower, "industry") || strings.Contains(lower, "legal") || strings.Contains(lower, "finance") {
+		return "domain"
+	}
+	if strings.Contains(lower, "design") || strings.Contains(lower, "build") || strings.Contains(lower, "deliver") || strings.Contains(lower, "collaborate") || strings.Contains(lower, "champion") || strings.Contains(lower, "apply") {
+		return "responsibility"
+	}
+	return "must_have"
+}
+
+func inferJobRequirementPriority(line string, index int) string {
+	lower := strings.ToLower(line)
+	if strings.Contains(lower, "nice") || strings.Contains(lower, "preferred") || strings.Contains(lower, "bonus") || strings.Contains(lower, "highly regarded") {
+		return "low"
+	}
+	if index < 8 || strings.Contains(lower, "strong") || strings.Contains(lower, "deep") || strings.Contains(lower, "hands-on") || strings.Contains(lower, "must") {
+		return "high"
+	}
+	return "medium"
+}
+
+func extractJobKeywords(text string) []string {
+	stop := map[string]bool{}
+	for _, word := range []string{"the", "and", "for", "with", "that", "this", "you", "your", "our", "are", "will", "have", "has", "from", "into", "work", "role", "team", "need", "needs", "required", "requirement", "requirements", "experience", "strong", "deep", "hands", "excellent", "ability", "using", "including"} {
+		stop[word] = true
+	}
+	keywords := []string{}
+	for _, tech := range []string{"Node.js", "React.js", "Azure", "Cosmos DB", "NoSQL", "DevSecOps", "Agile", "SOLID", "serverless", "event-driven", "containers", "messaging", "queues", "topics", "cloud", "observability", "security", "networking", "resilience", "identity", "distributed", "scalable"} {
+		if strings.Contains(strings.ToLower(text), strings.ToLower(tech)) {
+			keywords = append(keywords, tech)
+		}
+	}
+	for _, token := range strings.FieldsFunc(text, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '#' && r != '+'
+	}) {
+		lower := strings.ToLower(strings.TrimSpace(token))
+		if len(lower) < 4 || stop[lower] {
+			continue
+		}
+		keywords = append(keywords, token)
+	}
+	if len(keywords) > 8 {
+		keywords = keywords[:8]
+	}
+	return normalizeStringList(keywords)
+}
+
+type inferredJobDetails struct {
+	Company string
+	Title   string
+}
+
+func inferJobDetails(raw string) inferredJobDetails {
+	lines := meaningfulJobLines(raw, 12)
+	details := inferredJobDetails{}
+	for _, line := range lines {
+		cleaned := cleanJobDetailLine(line)
+		lower := strings.ToLower(cleaned)
+		for _, prefix := range []string{"company:", "employer:", "organisation:", "organization:"} {
+			if strings.HasPrefix(lower, prefix) {
+				details.Company = strings.TrimSpace(cleaned[len(prefix):])
+			}
+		}
+		for _, prefix := range []string{"job title:", "role:", "title:", "position:"} {
+			if strings.HasPrefix(lower, prefix) {
+				details.Title = strings.TrimSpace(cleaned[len(prefix):])
+			}
+		}
+	}
+	if details.Title == "" {
+		for _, line := range lines {
+			cleaned := cleanJobDetailLine(line)
+			if looksLikeRoleTitle(cleaned) {
+				details.Title = cleaned
+				break
+			}
+		}
+	}
+	if details.Company == "" {
+		for _, line := range lines {
+			cleaned := cleanJobDetailLine(line)
+			lower := strings.ToLower(cleaned)
+			if cleaned == "" || cleaned == details.Title || looksLikeRoleTitle(cleaned) || strings.Contains(lower, "responsibilities") || strings.Contains(lower, "requirements") || strings.Contains(lower, "about the role") {
+				continue
+			}
+			if len(strings.Fields(cleaned)) <= 5 {
+				details.Company = strings.Trim(cleaned, "|- ")
+				break
+			}
+		}
+	}
+	if strings.Contains(details.Title, " at ") && details.Company == "" {
+		before, after, ok := strings.Cut(details.Title, " at ")
+		if ok {
+			details.Title = strings.TrimSpace(before)
+			details.Company = strings.TrimSpace(after)
+		}
+	}
+	return details
+}
+
+func meaningfulJobLines(raw string, limit int) []string {
+	lines := []string{}
+	for _, line := range strings.Split(raw, "\n") {
+		cleaned := cleanJobDetailLine(line)
+		if cleaned == "" || strings.HasPrefix(strings.ToLower(cleaned), "http") {
+			continue
+		}
+		lines = append(lines, cleaned)
+		if len(lines) >= limit {
+			break
+		}
+	}
+	return lines
+}
+
+func cleanJobDetailLine(line string) string {
+	line = strings.TrimSpace(line)
+	line = strings.TrimPrefix(line, "-")
+	line = strings.TrimPrefix(line, "•")
+	line = strings.TrimSpace(strings.Trim(line, "#*_`"))
+	return strings.Join(strings.Fields(line), " ")
+}
+
+func looksLikeRoleTitle(line string) bool {
+	lower := strings.ToLower(line)
+	if len(strings.Fields(line)) > 9 {
+		return false
+	}
+	roleTerms := []string{"engineer", "developer", "manager", "analyst", "designer", "architect", "consultant", "specialist", "lead", "intern", "graduate", "backend", "frontend", "full stack", "software", "data", "devops", "platform"}
+	for _, term := range roleTerms {
+		if strings.Contains(lower, term) {
+			return true
+		}
+	}
+	return false
+}
+
+func fallbackJobMatches(requirements []JobRequirement, facts []factPromptContext) []parsedJobMatch {
+	matches := []parsedJobMatch{}
+	for _, req := range requirements {
+		reqTerms := jobMatchTerms(req.RequirementText, req.Keywords)
+		if len(reqTerms) == 0 {
+			continue
+		}
+		candidates := []parsedJobMatch{}
+		for _, fact := range facts {
+			factText := strings.ToLower(strings.Join([]string{
+				fact.FactText,
+				fact.EvidenceQuote,
+				strings.Join(fact.Technologies, " "),
+				fact.SectionHeading,
+			}, " "))
+			overlap := []string{}
+			for _, term := range reqTerms {
+				if strings.Contains(factText, term) {
+					overlap = append(overlap, term)
+				}
+			}
+			overlap = normalizeStringList(overlap)
+			if len(overlap) == 0 {
+				continue
+			}
+			score := 0.35 + float64(len(overlap))*0.16
+			status := "partial"
+			if len(overlap) >= 3 || score >= 0.75 {
+				status = "strong"
+			}
+			if len(overlap) == 1 {
+				status = "weak"
+			}
+			candidates = append(candidates, parsedJobMatch{
+				RequirementID:  req.ID,
+				FactID:         fact.ID,
+				Score:          clampScore(score),
+				Rationale:      "Local keyword overlap: " + strings.Join(overlap, ", "),
+				CoverageStatus: status,
+			})
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			leftStatus := factStatusRank(factStatusForID(candidates[i].FactID, facts))
+			rightStatus := factStatusRank(factStatusForID(candidates[j].FactID, facts))
+			if leftStatus != rightStatus {
+				return leftStatus < rightStatus
+			}
+			return candidates[i].Score > candidates[j].Score
+		})
+		if len(candidates) > 5 {
+			candidates = candidates[:5]
+		}
+		matches = append(matches, candidates...)
+	}
+	return matches
+}
+
+func selectFactsForRequirements(requirements []JobRequirement, facts []factPromptContext, limit int) []factPromptContext {
+	type scoredFact struct {
+		fact  factPromptContext
+		score int
+	}
+	terms := []string{}
+	for _, req := range requirements {
+		terms = append(terms, jobMatchTerms(req.RequirementText, req.Keywords)...)
+	}
+	terms = normalizeStringList(terms)
+	scored := []scoredFact{}
+	for _, fact := range facts {
+		text := strings.ToLower(strings.Join([]string{
+			fact.FactText,
+			fact.EvidenceQuote,
+			strings.Join(fact.Technologies, " "),
+			fact.SectionHeading,
+		}, " "))
+		score := 0
+		for _, term := range terms {
+			if strings.Contains(text, term) {
+				score += 3
+			}
+		}
+		score += factPromptStatusWeight(fact.Status)
+		if len(fact.Technologies) > 0 {
+			score++
+		}
+		if score > 0 {
+			scored = append(scored, scoredFact{fact: compactFactPromptContext(fact), score: score})
+		}
+	}
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		return scored[i].fact.ID > scored[j].fact.ID
+	})
+	selected := []factPromptContext{}
+	seenStatus := map[string]bool{}
+	for _, item := range scored {
+		if len(selected) >= limit {
+			break
+		}
+		selected = append(selected, item.fact)
+		seenStatus[item.fact.Status] = true
+	}
+	for _, fact := range facts {
+		if len(selected) >= limit {
+			break
+		}
+		if seenStatus[fact.Status] {
+			continue
+		}
+		selected = append(selected, compactFactPromptContext(fact))
+		seenStatus[fact.Status] = true
+	}
+	return selected
+}
+
+func selectFactsForMatches(matches []JobFactMatch, facts []factPromptContext) []factPromptContext {
+	ids := map[int64]bool{}
+	for _, match := range matches {
+		ids[match.FactID] = true
+	}
+	selected := []factPromptContext{}
+	for _, fact := range facts {
+		if ids[fact.ID] {
+			selected = append(selected, compactFactPromptContext(fact))
+		}
+	}
+	return selected
+}
+
+func compactFactPromptContext(fact factPromptContext) factPromptContext {
+	fact.FactText = compactPromptText(fact.FactText, 320)
+	fact.EvidenceQuote = compactPromptText(fact.EvidenceQuote, 360)
+	if len(fact.RiskFlags) > 5 {
+		fact.RiskFlags = fact.RiskFlags[:5]
+	}
+	if len(fact.Technologies) > 8 {
+		fact.Technologies = fact.Technologies[:8]
+	}
+	return fact
+}
+
+func compactPromptText(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if limit <= 0 || len(text) <= limit {
+		return text
+	}
+	return strings.TrimSpace(text[:limit]) + "..."
+}
+
+func factPromptStatusWeight(status string) int {
+	switch status {
+	case factStatusApproved:
+		return 3
+	case factStatusNeedsReview:
+		return 2
+	case factStatusRejected:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func factStatusForID(id int64, facts []factPromptContext) string {
+	for _, fact := range facts {
+		if fact.ID == id {
+			return fact.Status
+		}
+	}
+	return ""
+}
+
+func factStatusRank(status string) int {
+	switch status {
+	case factStatusApproved:
+		return 0
+	case factStatusNeedsReview:
+		return 1
+	case factStatusRejected:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func jobMatchTerms(text string, keywords []string) []string {
+	terms := []string{}
+	for _, keyword := range keywords {
+		terms = append(terms, strings.ToLower(strings.TrimSpace(keyword)))
+	}
+	for _, token := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '#'
+	}) {
+		if len(token) >= 3 && !isJobStopWord(token) {
+			terms = append(terms, token)
+		}
+	}
+	return normalizeStringList(terms)
+}
+
+func isJobStopWord(token string) bool {
+	switch token {
+	case "the", "and", "for", "with", "that", "this", "you", "your", "our", "are", "will", "have", "has", "from", "into", "work", "role", "team", "need", "needs", "required", "requirement", "requirements", "experience", "responsibilities", "ability":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) listFactPromptContext() ([]factPromptContext, error) {

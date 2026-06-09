@@ -492,29 +492,51 @@ func (s *Store) ExtractEvidenceFacts(ctx context.Context, input ExtractEvidenceF
 	if input.SourceID > 0 && section.SourceID != input.SourceID {
 		return nil, errors.New("section does not belong to source")
 	}
-	system := "You extract truthful resume source facts. Return strict JSON only. Every fact must quote exact supporting source text."
-	user := fmt.Sprintf(`Extract atomic evidence-backed facts from this candidate source section.
+	system := `You are JD Tailor's evidence extraction engine. Return strict JSON only.
+Your job is to convert messy resume/source text into small truthful evidence atoms that can be safely reused later.`
+	user := fmt.Sprintf(`# Task
+Extract atomic, evidence-backed candidate facts from one source section.
 
-Rules:
-- Return JSON shaped as {"facts":[{"fact_text":"","evidence_quote":"","technologies":[],"confidence":"high|medium|low","risk_flags":[]}]}
-- No markdown, no commentary.
-- evidence_quote must be an exact quote from the section.
-- fact_text must use compact key=value atoms, not resume bullets or sentences. Examples: "actions=added; artifact=load-test coverage; tools=Locust", "scope=login, project listing", "metric=25%%; outcome=reduced manual workload".
-- Return one fact per independently reusable claim. Split compound bullets into multiple facts for core work, scope, environment, and outcome/metrics.
-- Extract keywords, figures, tools, domains, artifacts, and outcomes from bullet/details lines, not from the heading, company line, role line, or dates alone.
-- Do not return a fact that simply restates the whole section or evidence quote.
-- Fill technologies with explicit tools/languages/frameworks/databases/cloud products from the evidence quote.
-- Use high confidence when the quote explicitly states the tool/action/outcome; medium for inferred wording; low for ambiguous ownership or vague claims.
-- Add risk_flags for unclear ownership, unclear metric, ambiguous technology, leadership implication, or production vs project ambiguity.
+# Output JSON schema
+{"facts":[{"fact_text":"","evidence_quote":"","technologies":[],"confidence":"high|medium|low","risk_flags":[]}]}
 
-Heading: %s
-Section type: %s
-Content:
-%s`, section.Heading, section.SectionType, section.Content)
+# Fact contract
+- `+"`evidence_quote`"+` must be an exact quote from <section_content>.
+- `+"`fact_text`"+` must be compact key=value atoms, not prose bullets.
+- Split compound bullets into independent facts: core work, scope, environment, tools, metrics, outcomes.
+- Prefer hard facts useful for future resume generation: actions, artifacts, tools, domains, scale, audience, metrics, outcomes.
+- Ignore headings, company/role/date-only lines, formatting artifacts, and claims not supported by the quote.
+- Fill `+"`technologies`"+` only with explicit tools/languages/frameworks/databases/cloud products in the quote.
+- Use confidence=high for explicit action/tool/metric/outcome; medium for light inference; low for ambiguous ownership or vague scope.
+- Add risk_flags from this controlled set when applicable: unclear_ownership, unclear_metric, ambiguous_technology, leadership_implication, production_vs_project_ambiguity.
+
+# Good fact_text examples
+- actions=added; artifact=load-test coverage; tools=Locust
+- scope=login, project listing, booking creation; tools=Locust
+- metric=25%%; outcome=reduced manual workload
+
+# Bad outputs
+- Full sentence resume bullets.
+- Fact text identical to evidence_quote.
+- Technologies inferred from the project title rather than the quote.
+
+<section heading="%s" type="%s">
+%s
+</section>`, section.Heading, section.SectionType, compactPromptText(section.Content, 12000))
 
 	text, err := s.GenerateLLMText(ctx, client, system, user, 1600)
 	if err != nil {
-		return nil, err
+		parsed := fallbackFactsFromSection(section)
+		if len(parsed) == 0 {
+			return nil, fmt.Errorf("LLM request failed and no local facts could be extracted: %w", err)
+		}
+		_ = s.LogEvent("warning", "fact extraction used local fallback after LLM request failure: "+err.Error())
+		inserted, insertErr := s.insertExtractedFacts(section, refineExtractedFacts(section, parsed))
+		if insertErr != nil {
+			return nil, insertErr
+		}
+		_ = s.LogEvent("info", "evidence facts extracted")
+		return inserted, nil
 	}
 	parsed, err := parseExtractedFacts(text)
 	if err != nil {

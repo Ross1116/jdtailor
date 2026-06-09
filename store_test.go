@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewStoreCreatesLocalPaths(t *testing.T) {
@@ -229,6 +230,46 @@ func TestLLMUsesOpenRouterChatCompletionsShape(t *testing.T) {
 	}
 	if result.Text != "JD Tailor LLM check" {
 		t.Fatalf("Text = %q", result.Text)
+	}
+}
+
+func TestGenerateLLMTextUsesJSONModeAndDetectsLength(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	t.Setenv("OPENROUTER_API_KEY", "sk-test")
+	if _, err := store.SaveSettings(SaveSettingsInput{Provider: "openrouter", Model: "deepseek/test"}); err != nil {
+		t.Fatalf("SaveSettings() error = %v", err)
+	}
+
+	call := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call++
+		var request chatCompletionRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.ResponseFormat == nil || request.ResponseFormat.Type != "json_object" {
+			t.Fatalf("response format = %+v, want json_object", request.ResponseFormat)
+		}
+		if call == 1 {
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"ok\":true}"},"finish_reason":"stop"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"ok\":"},"finish_reason":"length"}]}`))
+	}))
+	defer server.Close()
+	restoreURL := openRouterChatCompletionsURLForTest(server.URL)
+	defer restoreURL()
+
+	text, err := store.GenerateLLMText(t.Context(), server.Client(), "Return JSON.", "Return JSON.", 64)
+	if err != nil || text != `{"ok":true}` {
+		t.Fatalf("GenerateLLMText() = %q, %v", text, err)
+	}
+	if _, err := store.GenerateLLMText(t.Context(), server.Client(), "Return JSON.", "Return JSON.", 64); err == nil || !strings.Contains(err.Error(), "truncated") {
+		t.Fatalf("GenerateLLMText() truncation error = %v", err)
 	}
 }
 
@@ -846,6 +887,28 @@ func TestParseJobRequirementsValidation(t *testing.T) {
 	}
 }
 
+func TestParseJobRequirementsFiltersBoilerplate(t *testing.T) {
+	requirements, err := parseJobRequirements(`{"requirements":[
+		{"category":"must_have","requirement_text":"Slater and Gordon Lawyers logo","keywords":["Slater","Gordon","Lawyers","logo"],"priority":"high","source_quote":"Slater and Gordon Lawyers logo"},
+		{"category":"must_have","requirement_text":"Software Engineer","keywords":["Software","Engineer"],"priority":"high","source_quote":"Software Engineer"},
+		{"category":"responsibility","requirement_text":"Melbourne, Victoria, Australia · 55 minutes ago · 4 people clicked apply","keywords":["Melbourne","apply"],"priority":"high","source_quote":"Melbourne, Victoria, Australia · 55 minutes ago · 4 people clicked apply"},
+		{"category":"must_have","requirement_text":"Promoted by hirer · Responses managed off LinkedIn","keywords":["Promoted","LinkedIn"],"priority":"high","source_quote":"Promoted by hirer · Responses managed off LinkedIn"},
+		{"category":"must_have","requirement_text":"Your profile matches some required qualifications","keywords":["profile","matches"],"priority":"high","source_quote":"Your profile matches some required qualifications"},
+		{"category":"must_have","requirement_text":"Retry Premium for A$0","keywords":["Premium"],"priority":"medium","source_quote":"Retry Premium for A$0"},
+		{"category":"must_have","requirement_text":"About the job","keywords":["About"],"priority":"medium","source_quote":"About the job"},
+		{"category":"must_have","requirement_text":"What are we looking for?","keywords":["looking"],"priority":"medium","source_quote":"What are we looking for?"},
+		{"category":"seniority","requirement_text":"The role is a 12-month max term contract for a Software Engineer.","keywords":["12-month","Software Engineer"],"priority":"high","source_quote":"Software Engineer | 12 Month Max Term"},
+		{"category":"domain","requirement_text":"Role is within a leading personal injury and class actions law firm.","keywords":["class actions","law firm"],"priority":"medium","source_quote":"Slater and Gordon Lawyers are a leading personal injury and class actions law firm"},
+		{"category":"must_have","requirement_text":"Strong experience building scalable distributed cloud applications.","keywords":["cloud applications","distributed","scalable"],"priority":"high","source_quote":"Strong experience building and supporting scalable, distributed cloud applications."}
+	]}`)
+	if err != nil {
+		t.Fatalf("parseJobRequirements() error = %v", err)
+	}
+	if len(requirements) != 1 || !strings.Contains(requirements[0].RequirementText, "cloud") {
+		t.Fatalf("requirements = %+v", requirements)
+	}
+}
+
 func TestJobLLMWorkflowUsesAllFactStatusesAndDraftReview(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
@@ -878,12 +941,10 @@ func TestJobLLMWorkflowUsesAllFactStatusesAndDraftReview(t *testing.T) {
 		case 1:
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"requirements\":[{\"category\":\"must_have\",\"requirement_text\":\"FastAPI experience\",\"keywords\":[\"FastAPI\"],\"priority\":\"high\",\"source_quote\":\"FastAPI experience\"}]}"}}]}`))
 		case 2:
-			for _, fact := range facts {
-				if !strings.Contains(content, fact.Status) {
-					t.Fatalf("match prompt missing fact status %q: %s", fact.Status, content)
-				}
+			if !strings.Contains(content, facts[0].Status) || !strings.Contains(content, facts[0].FactText) {
+				t.Fatalf("match prompt missing relevant approved fact: %s", content)
 			}
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"matches\":[{\"requirement_id\":1,\"fact_id\":1,\"score\":0.9,\"rationale\":\"Direct evidence\",\"coverage_status\":\"strong\"},{\"requirement_id\":1,\"fact_id\":999,\"score\":1,\"rationale\":\"Invalid\",\"coverage_status\":\"strong\"}]}"}}]}`))
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"matches\":[{\"requirement_id\":1,\"fact_id\":1,\"score\":0.9,\"rationale\":\"Direct evidence\",\"coverage_status\":\"strong\"},{\"requirement_id\":1,\"fact_id\":1,\"score\":0,\"rationale\":\"No evidence\",\"coverage_status\":\"gap\"},{\"requirement_id\":1,\"fact_id\":999,\"score\":1,\"rationale\":\"Invalid\",\"coverage_status\":\"strong\"}]}"}}]}`))
 		case 3:
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"drafts\":[{\"requirement_id\":1,\"fact_ids\":[1,999],\"draft_text\":\"Built FastAPI APIs for planning workflows.\",\"rationale\":\"Direct evidence\",\"risk_flags\":[]}]}"}}]}`))
 		default:
@@ -924,6 +985,189 @@ func TestJobLLMWorkflowUsesAllFactStatusesAndDraftReview(t *testing.T) {
 	}
 	if updated.Status != "accepted" || !strings.Contains(updated.DraftText, "Acme") || len(updated.RiskFlags) != 1 {
 		t.Fatalf("updated draft = %+v", updated)
+	}
+}
+
+func TestCreateJobDescriptionInfersDetailsFromRawText(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		RawText: "Sitespace\nBackend Engineer\nResponsibilities\nBuild APIs and planning workflows.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	if job.Company != "Sitespace" || job.Title != "Backend Engineer" {
+		t.Fatalf("job details = %q/%q, want Sitespace/Backend Engineer", job.Company, job.Title)
+	}
+}
+
+func TestBuildJobMatchMapFallsBackOnEmptyLLMJSON(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "sk-test")
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Acme",
+		Title:   "Backend Engineer",
+		RawText: "Must have FastAPI experience.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	requirements, err := store.replaceJobRequirements(job, []parsedJobRequirement{{
+		Category:        "must_have",
+		RequirementText: "FastAPI experience",
+		Keywords:        []string{"FastAPI"},
+		Priority:        "high",
+		SourceQuote:     "FastAPI experience",
+	}})
+	if err != nil {
+		t.Fatalf("replaceJobRequirements() error = %v", err)
+	}
+	_, facts := createFactsForJobTests(t, store)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":""}}]}`))
+	}))
+	defer server.Close()
+	restoreURL := openRouterChatCompletionsURLForTest(server.URL)
+	defer restoreURL()
+
+	matches, err := store.BuildJobMatchMap(t.Context(), job.ID, server.Client())
+	if err != nil {
+		t.Fatalf("BuildJobMatchMap() error = %v", err)
+	}
+	foundApprovedFastAPI := false
+	for _, match := range matches {
+		if match.RequirementID == requirements[0].ID && match.FactID == facts[0].ID {
+			foundApprovedFastAPI = true
+		}
+	}
+	if !foundApprovedFastAPI {
+		t.Fatalf("matches = %+v", matches)
+	}
+	if !strings.Contains(matches[0].Rationale, "Local keyword overlap") {
+		t.Fatalf("match rationale = %q, want local fallback", matches[0].Rationale)
+	}
+}
+
+func TestParseJobDescriptionFallsBackOnEmptyLLMJSON(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "sk-test")
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Acme",
+		Title:   "Backend Engineer",
+		RawText: "Strong experience building scalable distributed cloud applications.\nThe role is a 12-month max term contract.\nHands-on experience with serverless and event-driven architectures.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":""}}]}`))
+	}))
+	defer server.Close()
+	restoreURL := openRouterChatCompletionsURLForTest(server.URL)
+	defer restoreURL()
+
+	requirements, err := store.ParseJobDescription(t.Context(), job.ID, server.Client())
+	if err != nil {
+		t.Fatalf("ParseJobDescription() error = %v", err)
+	}
+	combined := ""
+	for _, requirement := range requirements {
+		combined += requirement.RequirementText + "\n"
+	}
+	if !strings.Contains(combined, "cloud applications") || !strings.Contains(combined, "serverless") || strings.Contains(combined, "12-month") {
+		t.Fatalf("requirements = %+v", requirements)
+	}
+}
+
+func TestParseJobDescriptionFallsBackOnLLMTimeout(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "sk-test")
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Acme",
+		Title:   "Backend Engineer",
+		RawText: "Strong experience building scalable distributed cloud applications.\nHands-on experience with serverless and event-driven architectures.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{}"}}]}`))
+	}))
+	defer server.Close()
+	restoreURL := openRouterChatCompletionsURLForTest(server.URL)
+	defer restoreURL()
+
+	requirements, err := store.ParseJobDescription(t.Context(), job.ID, &http.Client{Timeout: time.Millisecond})
+	if err != nil {
+		t.Fatalf("ParseJobDescription() error = %v", err)
+	}
+	if len(requirements) == 0 {
+		t.Fatalf("requirements empty after timeout fallback")
+	}
+}
+
+func TestBuildJobMatchMapFallsBackOnLLMTimeout(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "sk-test")
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Acme",
+		Title:   "Backend Engineer",
+		RawText: "Must have FastAPI experience.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	if _, err := store.replaceJobRequirements(job, []parsedJobRequirement{{
+		Category:        "must_have",
+		RequirementText: "FastAPI experience",
+		Keywords:        []string{"FastAPI"},
+		Priority:        "high",
+		SourceQuote:     "FastAPI experience",
+	}}); err != nil {
+		t.Fatalf("replaceJobRequirements() error = %v", err)
+	}
+	_, facts := createFactsForJobTests(t, store)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{}"}}]}`))
+	}))
+	defer server.Close()
+	restoreURL := openRouterChatCompletionsURLForTest(server.URL)
+	defer restoreURL()
+
+	matches, err := store.BuildJobMatchMap(t.Context(), job.ID, &http.Client{Timeout: time.Millisecond})
+	if err != nil {
+		t.Fatalf("BuildJobMatchMap() error = %v", err)
+	}
+	if len(matches) == 0 || matches[0].FactID != facts[0].ID {
+		t.Fatalf("matches = %+v", matches)
 	}
 }
 

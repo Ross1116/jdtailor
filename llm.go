@@ -63,10 +63,15 @@ type openAIResponsesResponse struct {
 }
 
 type chatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
-	Temperature float64       `json:"temperature"`
+	Model          string              `json:"model"`
+	Messages       []chatMessage       `json:"messages"`
+	MaxTokens      int                 `json:"max_tokens,omitempty"`
+	Temperature    float64             `json:"temperature"`
+	ResponseFormat *chatResponseFormat `json:"response_format,omitempty"`
+}
+
+type chatResponseFormat struct {
+	Type string `json:"type"`
 }
 
 type chatMessage struct {
@@ -76,7 +81,8 @@ type chatMessage struct {
 
 type chatCompletionResponse struct {
 	Choices []struct {
-		Message chatMessage `json:"message"`
+		Message      chatMessage `json:"message"`
+		FinishReason string      `json:"finish_reason"`
 	} `json:"choices"`
 	Error *struct {
 		Message string `json:"message"`
@@ -237,8 +243,9 @@ func (s *Store) GenerateLLMText(ctx context.Context, client *http.Client, system
 				{Role: "system", Content: system},
 				{Role: "user", Content: user},
 			},
-			MaxTokens:   maxTokens,
-			Temperature: 0,
+			MaxTokens:      maxTokens,
+			Temperature:    0,
+			ResponseFormat: &chatResponseFormat{Type: "json_object"},
 		})
 		if err != nil {
 			return "", err
@@ -264,6 +271,9 @@ func (s *Store) GenerateLLMText(ctx context.Context, client *http.Client, system
 			if apiErr == "" {
 				apiErr = fmt.Sprintf("OpenRouter returned HTTP %d", resp.StatusCode)
 			}
+			return "", errors.New(apiErr)
+		}
+		if apiErr != "" {
 			return "", errors.New(apiErr)
 		}
 		return text, nil
@@ -424,6 +434,9 @@ func parseChatCompletionText(body []byte) (string, string) {
 	}
 	if len(parsed.Choices) == 0 {
 		return "", ""
+	}
+	if parsed.Choices[0].FinishReason == "length" {
+		return strings.TrimSpace(parsed.Choices[0].Message.Content), "LLM output was truncated before valid JSON completed"
 	}
 	return strings.TrimSpace(parsed.Choices[0].Message.Content), ""
 }

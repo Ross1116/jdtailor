@@ -539,10 +539,11 @@ export async function CreateJobDescription(input: {company: string; title: strin
     return WailsCreateJobDescription(input);
   }
   const timestamp = now();
+  const details = inferJobDetailsFromText(input.raw_text);
   const job: JobDescription = {
     id: Date.now(),
-    company: input.company.trim(),
-    title: input.title.trim() || 'Untitled job',
+    company: input.company.trim() || details.company,
+    title: input.title.trim() || details.title || 'Untitled job',
     url: input.url.trim(),
     raw_text: input.raw_text.trim(),
     created_at: timestamp,
@@ -558,10 +559,11 @@ export async function UpdateJobDescription(input: {id: number; company: string; 
     return WailsUpdateJobDescription(input);
   }
   const timestamp = now();
+  const details = inferJobDetailsFromText(input.raw_text);
   mockJobs = mockJobs.map((job) => job.id === input.id ? {
     ...job,
-    company: input.company.trim(),
-    title: input.title.trim() || 'Untitled job',
+    company: input.company.trim() || details.company,
+    title: input.title.trim() || details.title || 'Untitled job',
     url: input.url.trim(),
     raw_text: input.raw_text.trim(),
     updated_at: timestamp,
@@ -587,8 +589,11 @@ export async function ParseJobDescription(jobID: number) {
   const job = mockJobs.find((item) => item.id === jobID);
   if (!job) return [];
   const timestamp = now();
-  const lines = job.raw_text.split(/\n|\.|;/).map((line) => line.trim()).filter((line) => line.length > 10);
-  const reqs = lines.slice(0, 12).map((line, index): JobRequirement => ({
+  const lines = job.raw_text
+    .split(/\n|\.|;/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 10 && !isIrrelevantJobRequirementLine(line));
+  const reqs = lines.slice(0, 16).map((line, index): JobRequirement => ({
     id: Date.now() + index,
     job_id: jobID,
     category: mockRequirementCategory(line),
@@ -598,7 +603,7 @@ export async function ParseJobDescription(jobID: number) {
     source_quote: line,
     created_at: timestamp,
     updated_at: timestamp,
-  }));
+  })).filter((req) => extractKeywords(req.requirement_text).length > 0);
   mockRequirements = [...reqs, ...mockRequirements.filter((req) => req.job_id !== jobID)];
   mockMatches = mockMatches.filter((match) => match.job_id !== jobID);
   mockDrafts = mockDrafts.filter((draft) => draft.job_id !== jobID);
@@ -626,12 +631,14 @@ export async function BuildJobMatchMap(jobID: number) {
       const factText = `${fact.fact_text} ${fact.technologies.join(' ')}`.toLowerCase();
       const overlap = [...reqTerms].filter((term) => factText.includes(term));
       if (!overlap.length) continue;
+      const score = Math.min(1, 0.45 + overlap.length * 0.18);
+      if (score <= 0) continue;
       matches.push({
         id: Date.now() + matches.length,
         job_id: jobID,
         requirement_id: req.id,
         fact_id: fact.id,
-        score: Math.min(1, 0.45 + overlap.length * 0.18),
+        score,
         rationale: `Keyword overlap: ${overlap.join(', ')}`,
         coverage_status: overlap.length >= 2 ? 'strong' : 'partial',
         fact_status: fact.status,
@@ -1263,6 +1270,87 @@ function keyValueFact(...parts: string[]) {
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function inferJobDetailsFromText(rawText: string) {
+  const lines = rawText
+    .split('\n')
+    .map(cleanJobDetailLine)
+    .filter((line) => line && !line.toLowerCase().startsWith('http'))
+    .slice(0, 12);
+  let company = '';
+  let title = '';
+  for (const line of lines) {
+    const lower = line.toLowerCase();
+    for (const prefix of ['company:', 'employer:', 'organisation:', 'organization:']) {
+      if (lower.startsWith(prefix)) company = line.slice(prefix.length).trim();
+    }
+    for (const prefix of ['job title:', 'role:', 'title:', 'position:']) {
+      if (lower.startsWith(prefix)) title = line.slice(prefix.length).trim();
+    }
+  }
+  if (!title) {
+    title = lines.find(looksLikeRoleTitle) ?? '';
+  }
+  if (!company) {
+    company = lines.find((line) => {
+      const lower = line.toLowerCase();
+      return line !== title &&
+        !looksLikeRoleTitle(line) &&
+        !lower.includes('responsibilities') &&
+        !lower.includes('requirements') &&
+        !lower.includes('about the role') &&
+        line.split(/\s+/).length <= 5;
+    }) ?? '';
+  }
+  if (title.includes(' at ') && !company) {
+    const [role, org] = title.split(/\s+at\s+/, 2);
+    title = role.trim();
+    company = org.trim();
+  }
+  return {company, title};
+}
+
+function cleanJobDetailLine(line: string) {
+  return line.trim().replace(/^[-•]\s*/, '').replace(/^[#*_`]+|[#*_`]+$/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function looksLikeRoleTitle(line: string) {
+  if (line.split(/\s+/).length > 9) return false;
+  return /engineer|developer|manager|analyst|designer|architect|consultant|specialist|lead|intern|graduate|backend|frontend|full stack|software|data|devops|platform/i.test(line);
+}
+
+function isIrrelevantJobRequirementLine(line: string) {
+  const lower = line.toLowerCase();
+  const markers = [
+    '12-month', '12 month', 'contract', 'max term', 'fixed term', 'salary', 'compensation', 'benefit', 'leave', 'hybrid', 'remote', 'location', 'office',
+    'how to apply', 'application process', 'submit your application', 'recruit', 'hiring', 'interview', 'equal opportunity', 'diversity', 'background check', 'sponsorship',
+    'leading personal injury', 'class actions law firm', 'about us', 'about the company', 'company is', 'we are a', "we're a", 'our client',
+    'logo', 'linkedin', 'promoted by', 'responses managed', 'profile matches', 'is this information helpful', 'personalized tips', 'top applicant', 'retry premium', 'people you can reach out', 'school alumni', 'clicked apply',
+  ];
+  if (markers.some((marker) => lower.includes(marker))) return true;
+  if (isJobHeadingOrMetadata(line)) return true;
+  if (!hasTailorableRequirementSignal(line)) return true;
+  if (looksLikeRoleTitle(line) && !lower.includes('develop') && !lower.includes('build') && !lower.includes('experience')) return true;
+  return false;
+}
+
+function isJobHeadingOrMetadata(line: string) {
+  const cleaned = line.trim().toLowerCase().replace(/[.:?!]+$/g, '');
+  const exact = new Set(['about', 'about the job', 'what are we looking for', 'responsibilities', 'requirements', 'key responsibilities', 'software engineer', 'slater and gordon lawyers', 'slater and gordon lawyers logo']);
+  if (exact.has(cleaned)) return true;
+  if (cleaned.includes('·') || cleaned.includes(' clicked apply') || cleaned.endsWith(' logo')) return true;
+  return cleaned.split(/\s+/).length <= 4 && looksLikeRoleTitle(cleaned);
+}
+
+function hasTailorableRequirementSignal(line: string) {
+  const lower = line.toLowerCase();
+  return [
+    'experience', 'hands-on', 'strong', 'deep', 'knowledge', 'understanding', 'programming', 'skills', 'design', 'build', 'develop', 'deliver', 'modernis', 'test', 'support',
+    'architecture', 'cloud', 'serverless', 'event-driven', 'distributed', 'scalable', 'resilience', 'observability', 'security', 'networking', 'identity', 'database', 'nosql',
+    'devsecops', 'agile', 'solid', 'containers', 'messaging', 'queues', 'topics', 'stakeholder', 'mentor', 'engineering practices', 'technical excellence',
+    'fastapi', 'postgresql', 'react', 'typescript', 'javascript', 'python', 'golang', 'java', 'spring', 'mysql', 'node.js', 'node', 'azure', 'cosmos db', 'aws', 'gcp', 'docker', 'kubernetes', 'terraform', 'redis',
+  ].some((signal) => lower.includes(signal));
 }
 
 function mockRequirementCategory(line: string) {
