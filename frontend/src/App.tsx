@@ -16,6 +16,7 @@ import {
   RefreshCcw,
   Save,
   Settings as SettingsIcon,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Upload,
@@ -29,10 +30,15 @@ import {
   CandidateProfileRecord,
   CandidateSource,
   BuildJobMatchMap,
+  BlockedClaim,
   CreateCandidateSource,
+  CreateBlockedClaim,
   CreateJobDescription,
   DeleteCandidateSource,
+  DeleteAllCandidateClaims,
   DeleteAllEvidenceFacts,
+  DeleteBlockedClaim,
+  DeleteCandidateClaim,
   DeleteEvidenceFact,
   DeleteJobDescription,
   DeleteSourceSection,
@@ -41,6 +47,7 @@ import {
   DraftCandidateProfileFromSource,
   EvidenceFact,
   ExtractEvidenceFacts,
+  GenerateCandidateClaims,
   GenerateTailoredBulletDrafts,
   GenerateApplicationStrategy,
   GenerateFitAnalysis,
@@ -58,6 +65,8 @@ import {
   JobFitAnalysis,
   JobRequirement,
   ListCandidateSources,
+  ListBlockedClaims,
+  ListCandidateClaims,
   ListEvidenceFacts,
   ListJobDescriptions,
   ListJobFactMatches,
@@ -81,6 +90,9 @@ import {
   ParseJobDescription,
   PromptResearchSource,
   PromptRule,
+  CandidateClaim,
+  UpdateBlockedClaim,
+  UpdateCandidateClaimReview,
   UpdatePromptRule,
 } from './backend';
 
@@ -133,7 +145,7 @@ type AppEvent = {
 };
 
 type LoadState = 'loading' | 'ready' | 'error';
-type Tab = 'sources' | 'jobs' | 'profile' | 'sections' | 'facts' | 'settings';
+type Tab = 'sources' | 'jobs' | 'profile' | 'sections' | 'facts' | 'claims' | 'settings';
 type JobDraft = {company: string; title: string; url: string; raw_text: string};
 
 const emptyProfile: CandidateProfile = {
@@ -170,6 +182,8 @@ function App() {
   const [sources, setSources] = useState<CandidateSource[]>([]);
   const [sections, setSections] = useState<SourceSection[]>([]);
   const [facts, setFacts] = useState<EvidenceFact[]>([]);
+  const [claims, setClaims] = useState<CandidateClaim[]>([]);
+  const [blockedClaims, setBlockedClaims] = useState<BlockedClaim[]>([]);
   const [jobs, setJobs] = useState<JobDescription[]>([]);
   const [jobRequirements, setJobRequirements] = useState<JobRequirement[]>([]);
   const [jobMatches, setJobMatches] = useState<JobFactMatch[]>([]);
@@ -228,6 +242,8 @@ function App() {
         nextSources,
         nextSections,
         nextFacts,
+        nextClaims,
+        nextBlockedClaims,
         nextJobs,
       ] = await Promise.all([
         GetHealth(),
@@ -240,6 +256,8 @@ function App() {
         ListCandidateSources(),
         ListSourceSections(0),
         ListEvidenceFacts('all'),
+        ListCandidateClaims('all'),
+        ListBlockedClaims(),
         ListJobDescriptions(),
       ]);
       setHealth(nextHealth as Health);
@@ -252,6 +270,8 @@ function App() {
       setSources((nextSources ?? []) as CandidateSource[]);
       setSections((nextSections ?? []) as SourceSection[]);
       setFacts(normalizeFacts(nextFacts as EvidenceFact[] | null | undefined));
+      setClaims(normalizeClaims(nextClaims as CandidateClaim[] | null | undefined));
+      setBlockedClaims(normalizeBlockedClaims(nextBlockedClaims as BlockedClaim[] | null | undefined));
       setJobs((nextJobs ?? []) as JobDescription[]);
       const firstSource = (nextSources as CandidateSource[] | undefined)?.[0];
       if (!selectedSourceID && firstSource) {
@@ -510,6 +530,7 @@ function App() {
       await DeleteEvidenceFact({id: factID});
       const nextFacts = (await ListEvidenceFacts('all')) as EvidenceFact[];
       setFacts(normalizeFacts(nextFacts));
+      setClaims([]);
       await refreshEvents();
     });
   }
@@ -521,10 +542,96 @@ function App() {
     await runAction('delete-all-facts', async () => {
       await DeleteAllEvidenceFacts();
       setFacts([]);
+      setClaims([]);
       setJobMatches([]);
       setBulletDrafts([]);
       setFitAnalysis(null);
       setApplicationStrategy(null);
+      await refreshEvents();
+    });
+  }
+
+  async function generateClaims() {
+    await runAction('generate-claims', async () => {
+      const nextClaims = (await GenerateCandidateClaims()) as CandidateClaim[];
+      setClaims(normalizeClaims(nextClaims));
+      await refreshEvents();
+    });
+  }
+
+  async function updateClaim(claim: CandidateClaim, status = claim.status) {
+    await runAction(`update-claim-${claim.id}`, async () => {
+      const saved = (await UpdateCandidateClaimReview({
+        id: claim.id,
+        claim_text: claim.claim_text,
+        claim_type: claim.claim_type,
+        strength: claim.strength,
+        allowed_use: claim.allowed_use,
+        allowed_contexts: claim.allowed_contexts,
+        blocked_contexts: claim.blocked_contexts,
+        safe_phrasings: claim.safe_phrasings,
+        unsafe_phrasings: claim.unsafe_phrasings,
+        status,
+        risk_flags: claim.risk_flags,
+        review_note: claim.review_note,
+      })) as CandidateClaim;
+      setClaims((previous) => normalizeClaims(previous.map((item) => item.id === saved.id ? saved : item)));
+      await refreshEvents();
+    });
+  }
+
+  async function deleteClaim(claimID: number) {
+    await runAction(`delete-claim-${claimID}`, async () => {
+      await DeleteCandidateClaim({id: claimID});
+      setClaims((previous) => previous.filter((claim) => claim.id !== claimID));
+      await refreshEvents();
+    });
+  }
+
+  async function deleteAllClaims() {
+    if (!window.confirm('Delete all candidate claims?')) {
+      return;
+    }
+    await runAction('delete-all-claims', async () => {
+      await DeleteAllCandidateClaims();
+      setClaims([]);
+      await refreshEvents();
+    });
+  }
+
+  async function saveBlockedClaim(blocked: BlockedClaim) {
+    await runAction(`save-blocked-${blocked.id}`, async () => {
+      const saved = (await UpdateBlockedClaim({
+        id: blocked.id,
+        pattern: blocked.pattern,
+        reason: blocked.reason,
+        severity: blocked.severity,
+        source: blocked.source,
+        enabled: blocked.enabled,
+      })) as BlockedClaim;
+      setBlockedClaims((previous) => normalizeBlockedClaims(previous.map((item) => item.id === saved.id ? saved : item)));
+      await refreshEvents();
+    });
+  }
+
+  async function addBlockedClaim() {
+    await runAction('add-blocked-claim', async () => {
+      const saved = (await CreateBlockedClaim({
+        pattern: 'new blocked claim',
+        reason: 'Describe why this claim is unsafe.',
+        severity: 'medium',
+        source: 'manual',
+        enabled: true,
+      })) as BlockedClaim;
+      setBlockedClaims((previous) => normalizeBlockedClaims([saved, ...previous]));
+      await refreshEvents();
+    });
+  }
+
+  async function deleteBlockedClaim(id: number) {
+    await runAction(`delete-blocked-${id}`, async () => {
+      await DeleteBlockedClaim({id});
+      setBlockedClaims((previous) => previous.filter((item) => item.id !== id));
       await refreshEvents();
     });
   }
@@ -763,6 +870,7 @@ function App() {
           <TabButton active={activeTab === 'profile'} label="Profile" icon={<UserRound size={16} />} onClick={() => setActiveTab('profile')} />
           <TabButton active={activeTab === 'sections'} label="Sections" icon={<Layers3 size={16} />} onClick={() => setActiveTab('sections')} />
           <TabButton active={activeTab === 'facts'} label={`Fact Review${queuedFacts.length ? ` ${queuedFacts.length}` : ''}`} icon={<ListChecks size={16} />} onClick={() => setActiveTab('facts')} />
+          <TabButton active={activeTab === 'claims'} label={`Claims${claims.filter((claim) => claim.status === 'needs_review').length ? ` ${claims.filter((claim) => claim.status === 'needs_review').length}` : ''}`} icon={<ShieldCheck size={16} />} onClick={() => setActiveTab('claims')} />
           <TabButton active={activeTab === 'settings'} label="Settings" icon={<SettingsIcon size={16} />} onClick={() => setActiveTab('settings')} />
         </nav>
       </section>
@@ -860,6 +968,24 @@ function App() {
             onDelete={deleteFact}
             onDeleteAll={deleteAllFacts}
             onReview={reviewFact}
+          />
+        )}
+
+        {activeTab === 'claims' && (
+          <ClaimsView
+            blockedClaims={blockedClaims}
+            busyAction={busyAction}
+            claims={claims}
+            onAddBlocked={addBlockedClaim}
+            onBlockedChange={(blocked) => setBlockedClaims((previous) => normalizeBlockedClaims(previous.map((item) => item.id === blocked.id ? blocked : item)))}
+            onClaimChange={(claim) => setClaims((previous) => normalizeClaims(previous.map((item) => item.id === claim.id ? claim : item)))}
+            onDeleteAllClaims={deleteAllClaims}
+            onDeleteBlocked={deleteBlockedClaim}
+            onDeleteClaim={deleteClaim}
+            onGenerateClaims={generateClaims}
+            onSaveBlocked={saveBlockedClaim}
+            onSaveClaim={(claim) => updateClaim(claim)}
+            onSetClaimStatus={updateClaim}
           />
         )}
 
@@ -1569,6 +1695,199 @@ function FactsView({
   );
 }
 
+function ClaimsView({
+  blockedClaims,
+  busyAction,
+  claims,
+  onAddBlocked,
+  onBlockedChange,
+  onClaimChange,
+  onDeleteAllClaims,
+  onDeleteBlocked,
+  onDeleteClaim,
+  onGenerateClaims,
+  onSaveBlocked,
+  onSaveClaim,
+  onSetClaimStatus,
+}: {
+  blockedClaims: BlockedClaim[];
+  busyAction: string;
+  claims: CandidateClaim[];
+  onAddBlocked: () => void | Promise<void>;
+  onBlockedChange: (blocked: BlockedClaim) => void;
+  onClaimChange: (claim: CandidateClaim) => void;
+  onDeleteAllClaims: () => void | Promise<void>;
+  onDeleteBlocked: (id: number) => void | Promise<void>;
+  onDeleteClaim: (id: number) => void | Promise<void>;
+  onGenerateClaims: () => void | Promise<void>;
+  onSaveBlocked: (blocked: BlockedClaim) => void | Promise<void>;
+  onSaveClaim: (claim: CandidateClaim) => void | Promise<void>;
+  onSetClaimStatus: (claim: CandidateClaim, status: string) => void | Promise<void>;
+}) {
+  const [filter, setFilter] = useState('needs_review');
+  const counts = {
+    all: claims.length,
+    needs_review: claims.filter((claim) => claim.status === 'needs_review').length,
+    approved: claims.filter((claim) => claim.status === 'approved').length,
+    approved_restricted: claims.filter((claim) => claim.status === 'approved_restricted').length,
+    blocked: claims.filter((claim) => claim.status === 'blocked').length,
+  };
+  const visibleClaims = claims.filter((claim) => filter === 'all' || claim.status === filter).slice(0, 50);
+  const approveVisible = async () => {
+    for (const claim of visibleClaims.filter((item) => item.status === 'needs_review')) {
+      await onSetClaimStatus(claim, 'approved');
+    }
+  };
+
+  return (
+    <div className="grid gap-4 xl:grid-cols-[1fr_420px]">
+      <Panel icon={<ShieldCheck size={18} />} title="Claim ledger" subtitle="Approved claims become the permission layer for future resume generation.">
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+            <div className="flex flex-wrap gap-2">
+              {[
+                ['needs_review', `Needs review ${counts.needs_review}`],
+                ['approved', `Approved ${counts.approved}`],
+                ['approved_restricted', `Restricted ${counts.approved_restricted}`],
+                ['blocked', `Blocked ${counts.blocked}`],
+                ['all', `All ${counts.all}`],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setFilter(value)}
+                  className={`h-9 rounded-md border px-3 text-sm font-medium ${filter === value ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <IconButton label="Generate claims" onClick={onGenerateClaims} disabled={busyAction === 'generate-claims'}>
+                <Sparkles size={16} />
+              </IconButton>
+              <SecondaryButton label="Approve visible" onClick={approveVisible} />
+              <DangerButton label="Delete all" onClick={() => void onDeleteAllClaims()} />
+            </div>
+          </div>
+
+          {claims.length === 0 ? (
+            <EmptyState text="Generate claims after approving evidence facts." />
+          ) : visibleClaims.length === 0 ? (
+            <EmptyState text="Nothing in this claim queue." />
+          ) : (
+            visibleClaims.map((claim) => (
+              <div key={claim.id} className="rounded-md border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-3 flex items-start justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusBadge text={claim.status} />
+                    <StatusBadge text={claim.strength} />
+                    <StatusBadge text={claim.claim_type} />
+                    {asStringArray(claim.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
+                  </div>
+                  <IconOnlyButton label="Delete claim" onClick={() => onDeleteClaim(claim.id)}>
+                    <Trash2 size={16} />
+                  </IconOnlyButton>
+                </div>
+                <TextArea label="Claim" rows={3} value={claim.claim_text} onChange={(value) => onClaimChange({...claim, claim_text: value})} />
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <SelectInput
+                    label="Status"
+                    value={claim.status}
+                    onChange={(value) => onClaimChange({...claim, status: value})}
+                    options={[
+                      ['approved', 'Approved'],
+                      ['approved_restricted', 'Approved restricted'],
+                      ['needs_review', 'Needs review'],
+                      ['rejected', 'Rejected'],
+                      ['blocked', 'Blocked'],
+                    ]}
+                  />
+                  <SelectInput
+                    label="Strength"
+                    value={claim.strength}
+                    onChange={(value) => onClaimChange({...claim, strength: value})}
+                    options={[
+                      ['strong', 'Strong'],
+                      ['moderate', 'Moderate'],
+                      ['weak', 'Weak'],
+                    ]}
+                  />
+                  <TextInput label="Technologies" value={asStringArray(claim.technologies).join(', ')} onChange={() => undefined} disabled />
+                </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <TextInput label="Allowed use" value={asStringArray(claim.allowed_use).join(', ')} onChange={(value) => onClaimChange({...claim, allowed_use: splitList(value)})} />
+                  <TextInput label="Allowed contexts" value={asStringArray(claim.allowed_contexts).join(', ')} onChange={(value) => onClaimChange({...claim, allowed_contexts: splitList(value)})} />
+                  <TextInput label="Blocked contexts" value={asStringArray(claim.blocked_contexts).join(', ')} onChange={(value) => onClaimChange({...claim, blocked_contexts: splitList(value)})} />
+                  <TextInput label="Risk flags" value={asStringArray(claim.risk_flags).join(', ')} onChange={(value) => onClaimChange({...claim, risk_flags: splitList(value)})} />
+                </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <TextArea label="Evidence quotes" rows={2} value={asStringArray(claim.evidence_quotes).join('\n')} onChange={() => undefined} disabled />
+                  <TextArea label="Safe phrasings" rows={2} value={asStringArray(claim.safe_phrasings).join('\n')} onChange={(value) => onClaimChange({...claim, safe_phrasings: splitList(value.replace(/\n/g, ','))})} />
+                  <TextArea label="Unsafe phrasings" rows={2} value={asStringArray(claim.unsafe_phrasings).join('\n')} onChange={(value) => onClaimChange({...claim, unsafe_phrasings: splitList(value.replace(/\n/g, ','))})} />
+                  <TextArea label="Review note" rows={2} value={claim.review_note} onChange={(value) => onClaimChange({...claim, review_note: value})} />
+                </div>
+                <div className="mt-3 grid gap-3 md:grid-cols-5">
+                  <IconButton label="Save" onClick={() => onSaveClaim(claim)} disabled={busyAction === `update-claim-${claim.id}`}>
+                    <Save size={16} />
+                  </IconButton>
+                  <SecondaryButton label="Approve" onClick={() => onSetClaimStatus(claim, 'approved')} />
+                  <SecondaryButton label="Restricted" onClick={() => onSetClaimStatus(claim, 'approved_restricted')} />
+                  <SecondaryButton label="Needs review" onClick={() => onSetClaimStatus(claim, 'needs_review')} />
+                  <DangerButton label="Block" onClick={() => onSetClaimStatus(claim, 'blocked')} />
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </Panel>
+
+      <Panel icon={<AlertCircle size={18} />} title="Blocked claims" subtitle="Negative profile guardrails enforced during claim validation.">
+        <div className="space-y-3">
+          <IconButton label="Add blocked claim" onClick={onAddBlocked} disabled={busyAction === 'add-blocked-claim'}>
+            <ShieldCheck size={16} />
+          </IconButton>
+          {blockedClaims.map((blocked) => (
+            <div key={blocked.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <StatusBadge text={blocked.severity} />
+                  {blocked.enabled && <StatusBadge text="enabled" />}
+                </div>
+                <IconOnlyButton label="Delete blocked claim" onClick={() => onDeleteBlocked(blocked.id)}>
+                  <Trash2 size={16} />
+                </IconOnlyButton>
+              </div>
+              <TextInput label="Pattern" value={blocked.pattern} onChange={(value) => onBlockedChange({...blocked, pattern: value})} />
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <SelectInput
+                  label="Severity"
+                  value={blocked.severity}
+                  onChange={(value) => onBlockedChange({...blocked, severity: value})}
+                  options={[
+                    ['high', 'High'],
+                    ['medium', 'Medium'],
+                    ['low', 'Low'],
+                  ]}
+                />
+                <CheckInput checked={blocked.enabled} label="Enabled" onChange={(checked) => onBlockedChange({...blocked, enabled: checked})} />
+              </div>
+              <div className="mt-3">
+                <TextArea label="Reason" rows={2} value={blocked.reason} onChange={(value) => onBlockedChange({...blocked, reason: value})} />
+              </div>
+              <div className="mt-3">
+                <IconButton label="Save blocked claim" onClick={() => onSaveBlocked(blocked)} disabled={busyAction === `save-blocked-${blocked.id}`}>
+                  <Save size={16} />
+                </IconButton>
+              </div>
+            </div>
+          ))}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
 function SettingsView({
   apiConfigured,
   apiKey,
@@ -2186,6 +2505,28 @@ function normalizeDrafts(value?: TailoredBulletDraft[] | null) {
     ...draft,
     fact_ids: asArray(draft.fact_ids),
     risk_flags: asStringArray(draft.risk_flags),
+  }));
+}
+
+function normalizeClaims(value?: CandidateClaim[] | null) {
+  return asArray(value).map((claim) => ({
+    ...claim,
+    source_fact_ids: asArray(claim.source_fact_ids),
+    evidence_quotes: asStringArray(claim.evidence_quotes),
+    technologies: asStringArray(claim.technologies),
+    allowed_use: asStringArray(claim.allowed_use),
+    allowed_contexts: asStringArray(claim.allowed_contexts),
+    blocked_contexts: asStringArray(claim.blocked_contexts),
+    safe_phrasings: asStringArray(claim.safe_phrasings),
+    unsafe_phrasings: asStringArray(claim.unsafe_phrasings),
+    risk_flags: asStringArray(claim.risk_flags),
+  }));
+}
+
+function normalizeBlockedClaims(value?: BlockedClaim[] | null) {
+  return asArray(value).map((blocked) => ({
+    ...blocked,
+    enabled: Boolean(blocked.enabled),
   }));
 }
 

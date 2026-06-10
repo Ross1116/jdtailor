@@ -519,6 +519,43 @@ func (s *Store) migrate(ctx context.Context) error {
 				WHERE origin_heading = '' OR origin_type = '';
 			`,
 		},
+		{
+			version: 8,
+			sql: `
+				CREATE TABLE IF NOT EXISTS candidate_claims (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					claim_text TEXT NOT NULL,
+					claim_type TEXT NOT NULL DEFAULT 'experience',
+					source_fact_ids_json TEXT NOT NULL DEFAULT '[]',
+					evidence_quotes_json TEXT NOT NULL DEFAULT '[]',
+					technologies_json TEXT NOT NULL DEFAULT '[]',
+					strength TEXT NOT NULL DEFAULT 'moderate',
+					allowed_use_json TEXT NOT NULL DEFAULT '[]',
+					allowed_contexts_json TEXT NOT NULL DEFAULT '[]',
+					blocked_contexts_json TEXT NOT NULL DEFAULT '[]',
+					safe_phrasings_json TEXT NOT NULL DEFAULT '[]',
+					unsafe_phrasings_json TEXT NOT NULL DEFAULT '[]',
+					origin_heading TEXT NOT NULL DEFAULT '',
+					origin_type TEXT NOT NULL DEFAULT '',
+					status TEXT NOT NULL DEFAULT 'needs_review',
+					risk_flags_json TEXT NOT NULL DEFAULT '[]',
+					review_note TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS blocked_claims (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					pattern TEXT NOT NULL UNIQUE,
+					reason TEXT NOT NULL DEFAULT '',
+					severity TEXT NOT NULL DEFAULT 'medium',
+					source TEXT NOT NULL DEFAULT '',
+					enabled INTEGER NOT NULL DEFAULT 1,
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+			`,
+		},
 	}
 
 	for _, migration := range migrations {
@@ -556,6 +593,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.seedPromptDefaults(ctx); err != nil {
+		return err
+	}
+	if err := s.seedBlockedClaimDefaults(ctx); err != nil {
 		return err
 	}
 

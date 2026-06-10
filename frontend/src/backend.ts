@@ -2,9 +2,13 @@ import {
   AnalyzeJobDescription as WailsAnalyzeJobDescription,
   BuildJobMatchMap as WailsBuildJobMatchMap,
   CreateCandidateSource as WailsCreateCandidateSource,
+  CreateBlockedClaim as WailsCreateBlockedClaim,
   CreateJobDescription as WailsCreateJobDescription,
   DeleteCandidateSource as WailsDeleteCandidateSource,
+  DeleteAllCandidateClaims as WailsDeleteAllCandidateClaims,
   DeleteAllEvidenceFacts as WailsDeleteAllEvidenceFacts,
+  DeleteBlockedClaim as WailsDeleteBlockedClaim,
+  DeleteCandidateClaim as WailsDeleteCandidateClaim,
   DeleteEvidenceFact as WailsDeleteEvidenceFact,
   DeleteJobDescription as WailsDeleteJobDescription,
   DeleteSourceSection as WailsDeleteSourceSection,
@@ -12,6 +16,7 @@ import {
   DetectSourceSections as WailsDetectSourceSections,
   DraftCandidateProfileFromSource as WailsDraftCandidateProfileFromSource,
   ExtractEvidenceFacts as WailsExtractEvidenceFacts,
+  GenerateCandidateClaims as WailsGenerateCandidateClaims,
   GenerateTailoredBulletDrafts as WailsGenerateTailoredBulletDrafts,
   GenerateApplicationStrategy as WailsGenerateApplicationStrategy,
   GenerateFitAnalysis as WailsGenerateFitAnalysis,
@@ -30,6 +35,8 @@ import {
   ListJobRequirements as WailsListJobRequirements,
   ListPromptResearchSources as WailsListPromptResearchSources,
   ListPromptRules as WailsListPromptRules,
+  ListBlockedClaims as WailsListBlockedClaims,
+  ListCandidateClaims as WailsListCandidateClaims,
   ListCandidateSources as WailsListCandidateSources,
   ListEvidenceFacts as WailsListEvidenceFacts,
   ListSourceSections as WailsListSourceSections,
@@ -41,6 +48,8 @@ import {
   SaveSettings as WailsSaveSettings,
   TestLLM as WailsTestLLM,
   UpdateEvidenceFactReview as WailsUpdateEvidenceFactReview,
+  UpdateBlockedClaim as WailsUpdateBlockedClaim,
+  UpdateCandidateClaimReview as WailsUpdateCandidateClaimReview,
   UpdateJobDescription as WailsUpdateJobDescription,
   UpdatePromptRule as WailsUpdatePromptRule,
   UpdateSourceSection as WailsUpdateSourceSection,
@@ -172,6 +181,39 @@ export type TailoredBulletDraft = {
   updated_at: string;
 };
 
+export type CandidateClaim = {
+  id: number;
+  claim_text: string;
+  claim_type: string;
+  source_fact_ids: number[];
+  evidence_quotes: string[];
+  technologies: string[];
+  strength: string;
+  allowed_use: string[];
+  allowed_contexts: string[];
+  blocked_contexts: string[];
+  safe_phrasings: string[];
+  unsafe_phrasings: string[];
+  origin_heading: string;
+  origin_type: string;
+  status: string;
+  risk_flags: string[];
+  review_note: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BlockedClaim = {
+  id: number;
+  pattern: string;
+  reason: string;
+  severity: string;
+  source: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
 export type JobAnalysis = {
   job_id: number;
   company: string;
@@ -288,6 +330,8 @@ let mockJobs: JobDescription[] = [];
 let mockRequirements: JobRequirement[] = [];
 let mockMatches: JobFactMatch[] = [];
 let mockDrafts: TailoredBulletDraft[] = [];
+let mockClaims: CandidateClaim[] = [];
+let mockBlockedClaims: BlockedClaim[] = defaultMockBlockedClaims();
 let mockAnalyses: JobAnalysis[] = [];
 let mockFitAnalyses: JobFitAnalysis[] = [];
 let mockStrategies: ApplicationStrategy[] = [];
@@ -477,6 +521,7 @@ export async function DeleteCandidateSource(input: {id: number}) {
   mockSources = mockSources.filter((source) => source.id !== input.id);
   mockSections = mockSections.filter((section) => section.source_id !== input.id);
   mockFacts = mockFacts.filter((fact) => fact.source_id !== input.id);
+  mockClaims = [];
   mockEvents.unshift(mockEvent('info', 'mock source deleted'));
 }
 
@@ -544,6 +589,7 @@ export async function DetectSourceSections(sourceID: number) {
     };
   });
   mockSections = [...sections, ...mockSections];
+  mockClaims = [];
   mockEvents.unshift(mockEvent('info', 'mock sections detected'));
   return sections;
 }
@@ -554,6 +600,7 @@ export async function UpdateSourceSection(input: {id: number; heading: string; s
   }
   const timestamp = now();
   mockSections = mockSections.map((section) => section.id === input.id ? {...section, ...input, updated_at: timestamp} : section);
+  mockClaims = [];
   return mockSections.find((section) => section.id === input.id);
 }
 
@@ -563,6 +610,7 @@ export async function DeleteSourceSection(input: {id: number}) {
   }
   mockSections = mockSections.filter((section) => section.id !== input.id);
   mockFacts = mockFacts.filter((fact) => fact.section_id !== input.id);
+  mockClaims = [];
   mockEvents.unshift(mockEvent('info', 'mock section deleted'));
 }
 
@@ -594,6 +642,7 @@ export async function ExtractEvidenceFacts(input: {source_id: number; section_id
     updated_at: timestamp,
   }));
   mockFacts = [...facts, ...mockFacts];
+  mockClaims = [];
   mockEvents.unshift(mockEvent('info', 'mock evidence facts extracted'));
   return facts;
 }
@@ -620,6 +669,7 @@ export async function UpdateEvidenceFactReview(input: {
   }
   const timestamp = now();
   mockFacts = mockFacts.map((fact) => fact.id === input.id ? {...fact, ...input, auto_approved: false, updated_at: timestamp} : fact);
+  mockClaims = [];
   return mockFacts.find((fact) => fact.id === input.id);
 }
 
@@ -628,6 +678,7 @@ export async function DeleteEvidenceFact(input: {id: number}) {
     return WailsDeleteEvidenceFact(input);
   }
   mockFacts = mockFacts.filter((fact) => fact.id !== input.id);
+  mockClaims = [];
   mockEvents.unshift(mockEvent('info', 'mock fact deleted'));
 }
 
@@ -638,6 +689,7 @@ export async function DeleteAllEvidenceFacts() {
   mockFacts = [];
   mockMatches = [];
   mockDrafts = [];
+  mockClaims = [];
   mockFitAnalyses = [];
   mockStrategies = [];
   mockEvents.unshift(mockEvent('info', 'mock all evidence facts deleted'));
@@ -832,6 +884,122 @@ export async function DeleteTailoredBulletDraft(input: {id: number}) {
   }
   mockDrafts = mockDrafts.filter((draft) => draft.id !== input.id);
   mockEvents.unshift(mockEvent('info', 'mock bullet draft deleted'));
+}
+
+export async function GenerateCandidateClaims() {
+  if (hasWailsBackend()) {
+    return WailsGenerateCandidateClaims();
+  }
+  const timestamp = now();
+  const claims = mockFacts
+    .filter((fact) => fact.status !== 'rejected')
+    .map((fact, index): CandidateClaim => {
+      const claimText = claimTextFromFact(fact);
+      const riskFlags = [...new Set([...fact.risk_flags, ...claimRiskFlags(claimText, fact), ...styleRiskFlags(claimText)])].filter(Boolean);
+      return {
+        id: Date.now() + index,
+        claim_text: claimText,
+        claim_type: fact.origin_type || 'experience',
+        source_fact_ids: [fact.id],
+        evidence_quotes: [fact.evidence_quote],
+        technologies: fact.technologies,
+        strength: fact.origin_type === 'experience' && fact.status === 'approved' && fact.confidence === 'high' ? 'strong' : fact.origin_type === 'project' ? 'moderate' : 'weak',
+        allowed_use: fact.origin_type === 'skills' ? ['skills', 'summary'] : ['experience_bullet', 'summary', 'skills'],
+        allowed_contexts: claimContextsFromFact(fact),
+        blocked_contexts: defaultClaimBlockedContexts(claimText),
+        safe_phrasings: [claimText],
+        unsafe_phrasings: riskFlags.includes('blocked_context') || riskFlags.includes('blocked_claim') ? ['inflated seniority, ownership, or unsupported specialization'] : [],
+        origin_heading: fact.origin_heading,
+        origin_type: fact.origin_type,
+        status: claimStatusForFact(fact, riskFlags),
+        risk_flags: riskFlags,
+        review_note: '',
+        created_at: timestamp,
+        updated_at: timestamp,
+      };
+    })
+    .filter((claim) => claim.claim_text.trim() !== '');
+  mockClaims = claims;
+  mockEvents.unshift(mockEvent('info', 'mock candidate claims generated'));
+  return claims;
+}
+
+export async function ListCandidateClaims(status: string) {
+  if (hasWailsBackend()) {
+    return WailsListCandidateClaims(status);
+  }
+  return status && status !== 'all' ? mockClaims.filter((claim) => claim.status === status) : mockClaims;
+}
+
+export async function UpdateCandidateClaimReview(input: {
+  id: number;
+  claim_text: string;
+  claim_type: string;
+  strength: string;
+  allowed_use: string[];
+  allowed_contexts: string[];
+  blocked_contexts: string[];
+  safe_phrasings: string[];
+  unsafe_phrasings: string[];
+  status: string;
+  risk_flags: string[];
+  review_note: string;
+}) {
+  if (hasWailsBackend()) {
+    return WailsUpdateCandidateClaimReview(input);
+  }
+  const timestamp = now();
+  mockClaims = mockClaims.map((claim) => claim.id === input.id ? {...claim, ...input, updated_at: timestamp} : claim);
+  return mockClaims.find((claim) => claim.id === input.id);
+}
+
+export async function DeleteCandidateClaim(input: {id: number}) {
+  if (hasWailsBackend()) {
+    return WailsDeleteCandidateClaim(input);
+  }
+  mockClaims = mockClaims.filter((claim) => claim.id !== input.id);
+  mockEvents.unshift(mockEvent('info', 'mock claim deleted'));
+}
+
+export async function DeleteAllCandidateClaims() {
+  if (hasWailsBackend()) {
+    return WailsDeleteAllCandidateClaims();
+  }
+  mockClaims = [];
+  mockEvents.unshift(mockEvent('info', 'mock all candidate claims deleted'));
+}
+
+export async function ListBlockedClaims() {
+  if (hasWailsBackend()) {
+    return WailsListBlockedClaims();
+  }
+  return mockBlockedClaims;
+}
+
+export async function CreateBlockedClaim(input: {pattern: string; reason: string; severity: string; source: string; enabled: boolean}) {
+  if (hasWailsBackend()) {
+    return WailsCreateBlockedClaim(input);
+  }
+  const timestamp = now();
+  const blocked: BlockedClaim = {...input, id: Date.now(), created_at: timestamp, updated_at: timestamp};
+  mockBlockedClaims = [blocked, ...mockBlockedClaims];
+  return blocked;
+}
+
+export async function UpdateBlockedClaim(input: {id: number; pattern: string; reason: string; severity: string; source: string; enabled: boolean}) {
+  if (hasWailsBackend()) {
+    return WailsUpdateBlockedClaim(input);
+  }
+  const timestamp = now();
+  mockBlockedClaims = mockBlockedClaims.map((item) => item.id === input.id ? {...item, ...input, updated_at: timestamp} : item);
+  return mockBlockedClaims.find((item) => item.id === input.id);
+}
+
+export async function DeleteBlockedClaim(input: {id: number}) {
+  if (hasWailsBackend()) {
+    return WailsDeleteBlockedClaim(input);
+  }
+  mockBlockedClaims = mockBlockedClaims.filter((item) => item.id !== input.id);
 }
 
 export async function ListPromptRules() {
@@ -1714,6 +1882,98 @@ function styleRiskFlags(text: string) {
   return [...new Set(flags)];
 }
 
+function claimTextFromFact(fact: EvidenceFact) {
+  const parts = parseFactAtoms(fact.fact_text);
+  const action = (parts.actions || parts.action || '').split(',')[0].trim();
+  const artifact = parts.artifact || parts.scope || parts.evidence || fact.fact_text;
+  const tools = parts.tools || fact.technologies.join(', ');
+  const outcome = parts.outcome || '';
+  const segments: string[] = [];
+  if (action && artifact) {
+    segments.push(`${titleWord(action)} ${artifact}`);
+  } else {
+    segments.push(artifact);
+  }
+  if (tools) segments.push(`using ${tools}`);
+  if (outcome) segments.push(`with ${outcome}`);
+  return `${segments.join(' ').replace(/\s+/g, ' ').replace(/\.$/, '').trim()}.`;
+}
+
+function parseFactAtoms(value: string) {
+  const result: Record<string, string> = {};
+  for (const part of value.split(';')) {
+    const [key, ...rest] = part.split('=');
+    if (!key || rest.length === 0) continue;
+    result[key.trim().toLowerCase()] = rest.join('=').trim();
+  }
+  return result;
+}
+
+function titleWord(value: string) {
+  return value ? `${value[0].toUpperCase()}${value.slice(1)}` : value;
+}
+
+function claimRiskFlags(claimText: string, fact: EvidenceFact) {
+  const lower = claimText.toLowerCase();
+  const evidence = `${fact.fact_text} ${fact.evidence_quote} ${fact.technologies.join(' ')} ${fact.context.join(' ')}`.toLowerCase();
+  const flags: string[] = [];
+  if (/\d+[%x]?/.test(lower) && !/\d+[%x]?/.test(evidence)) flags.push('unsupported_metric');
+  for (const blocked of mockBlockedClaims.filter((item) => item.enabled)) {
+    if (blockedClaimHits(lower, blocked.pattern)) {
+      flags.push('blocked_claim');
+      break;
+    }
+  }
+  for (const pattern of ['senior', 'staff', 'lead', 'managed', 'mentored', 'led a team', 'team leadership', 'kubernetes', 'cloud infrastructure', 'model training', 'ml research']) {
+    if (lower.includes(pattern) && !evidence.includes(pattern)) {
+      flags.push('blocked_context');
+      break;
+    }
+  }
+  if (fact.status !== 'approved') flags.push(`uses_${fact.status}_fact`);
+  return [...new Set(flags)];
+}
+
+function blockedClaimHits(lowerText: string, pattern: string) {
+  const lowerPattern = pattern.toLowerCase();
+  if (lowerPattern === 'senior/staff/lead title') return lowerText.includes('senior') || lowerText.includes('staff') || lowerText.includes('lead ');
+  if (lowerPattern === 'invented metrics') return false;
+  return lowerPattern.split(/[\/,]/).map((part) => part.trim()).filter((part) => part.length > 3).some((part) => lowerText.includes(part));
+}
+
+function claimContextsFromFact(fact: EvidenceFact) {
+  const text = `${fact.fact_text} ${fact.evidence_quote} ${fact.technologies.join(' ')}`.toLowerCase();
+  const contexts = ['backend engineering', 'api design', 'product engineering', 'testing', 'data systems', 'ai workflow', 'frontend engineering', 'database design']
+    .filter((context) => text.includes(context.split(' ')[0]) || fact.origin_heading.toLowerCase().includes(context.split(' ')[0]));
+  return contexts.length ? contexts : [fact.origin_type || 'experience'];
+}
+
+function defaultClaimBlockedContexts(claimText: string) {
+  const lower = claimText.toLowerCase();
+  const contexts: string[] = [];
+  const pairs: Array<[string, string]> = [
+    ['machine learning', 'ML engineering unless evidenced'],
+    ['model training', 'model training unless evidenced'],
+    ['kubernetes', 'Kubernetes ownership unless evidenced'],
+    ['cloud infrastructure', 'cloud infrastructure ownership unless evidenced'],
+    ['senior', 'senior/staff/lead title unless evidenced'],
+    ['staff', 'senior/staff/lead title unless evidenced'],
+    ['team leadership', 'team leadership unless evidenced'],
+    ['managed', 'team leadership unless evidenced'],
+    ['led a team', 'team leadership unless evidenced'],
+  ];
+  for (const [needle, context] of pairs) {
+    if (lower.includes(needle)) contexts.push(context);
+  }
+  return [...new Set(contexts)];
+}
+
+function claimStatusForFact(fact: EvidenceFact, riskFlags: string[]) {
+  if (riskFlags.some((flag) => ['blocked_claim', 'blocked_context', 'unsupported_metric', 'unsupported_tool'].includes(flag))) return 'blocked';
+  if (fact.status !== 'approved') return 'needs_review';
+  return riskFlags.length ? 'approved_restricted' : 'approved';
+}
+
 function isJobBoilerplateLine(line: string) {
   const cleaned = line.trim();
   const lower = cleaned.toLowerCase();
@@ -1805,4 +2065,29 @@ function defaultMockPromptSources(): PromptResearchSource[] {
       created_at: timestamp,
     },
   ];
+}
+
+function defaultMockBlockedClaims(): BlockedClaim[] {
+  const timestamp = now();
+  return [
+    ['senior/staff/lead title', 'Unsupported seniority framing unless title evidence proves it.'],
+    ['ML Engineer positioning', 'Do not position as ML Engineer unless evidence supports ML engineering work.'],
+    ['Data Engineer positioning', 'Do not position as Data Engineer unless evidence supports data engineering ownership.'],
+    ['DevOps/SRE ownership', 'Do not imply DevOps or SRE ownership unless evidenced.'],
+    ['Kubernetes ownership', 'Do not claim Kubernetes ownership unless evidenced.'],
+    ['cloud infrastructure ownership', 'Do not claim cloud infrastructure ownership unless evidenced.'],
+    ['invented metrics', 'Metrics must be copied from source evidence.'],
+    ['team leadership', 'Do not imply team leadership unless evidenced.'],
+    ['project work as employment', 'Do not represent project work as employment.'],
+    ['model training or ML research', 'Do not claim model training or ML research unless evidenced.'],
+  ].map(([pattern, reason], index) => ({
+    id: index + 1,
+    pattern,
+    reason,
+    severity: 'high',
+    source: 'plans/JOB_COPILOT_FULL_PLAN.md',
+    enabled: true,
+    created_at: timestamp,
+    updated_at: timestamp,
+  }));
 }

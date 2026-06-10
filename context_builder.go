@@ -383,6 +383,7 @@ func (s *Store) DeleteCandidateSource(input DeleteInput) error {
 	if err != nil {
 		return err
 	}
+	_, _ = s.db.ExecContext(context.Background(), `DELETE FROM candidate_claims`)
 	_ = s.LogEvent("info", "candidate source deleted")
 	return nil
 }
@@ -440,6 +441,7 @@ func (s *Store) DetectSourceSections(sourceID int64) ([]SourceSection, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	_, _ = s.db.ExecContext(context.Background(), `DELETE FROM candidate_claims`)
 	_ = s.LogEvent("info", "source sections detected")
 	return s.ListSourceSections(sourceID)
 }
@@ -470,6 +472,7 @@ func (s *Store) UpdateSourceSection(input UpdateSourceSectionInput) (SourceSecti
 	if err != nil {
 		return SourceSection{}, err
 	}
+	_, _ = s.db.ExecContext(context.Background(), `DELETE FROM candidate_claims`)
 	return s.getSourceSection(input.ID)
 }
 
@@ -481,6 +484,7 @@ func (s *Store) DeleteSourceSection(input DeleteInput) error {
 	if err != nil {
 		return err
 	}
+	_, _ = s.db.ExecContext(context.Background(), `DELETE FROM candidate_claims`)
 	_ = s.LogEvent("info", "source section deleted")
 	return nil
 }
@@ -618,6 +622,7 @@ func (s *Store) UpdateEvidenceFactReview(input UpdateEvidenceFactReviewInput) (E
 	if err != nil {
 		return EvidenceFact{}, err
 	}
+	_, _ = s.db.ExecContext(context.Background(), `DELETE FROM candidate_claims`)
 	return s.getEvidenceFact(input.ID)
 }
 
@@ -629,6 +634,7 @@ func (s *Store) DeleteEvidenceFact(input DeleteInput) error {
 	if err != nil {
 		return err
 	}
+	_, _ = s.db.ExecContext(context.Background(), `DELETE FROM candidate_claims`)
 	_ = s.LogEvent("info", "evidence fact deleted")
 	return nil
 }
@@ -645,6 +651,7 @@ func (s *Store) DeleteAllEvidenceFacts() error {
 		`DELETE FROM job_fact_matches`,
 		`DELETE FROM job_fit_analyses`,
 		`DELETE FROM application_strategies`,
+		`DELETE FROM candidate_claims`,
 		`DELETE FROM evidence_facts`,
 	} {
 		if _, err := tx.ExecContext(context.Background(), statement); err != nil {
@@ -675,6 +682,9 @@ func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFac
 		return nil, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.ExecContext(context.Background(), `DELETE FROM candidate_claims`); err != nil {
+		return nil, err
+	}
 
 	ids := make([]int64, 0, len(facts))
 	for _, fact := range facts {

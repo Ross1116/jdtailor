@@ -325,6 +325,69 @@ func (a *App) DeleteTailoredBulletDraft(input DeleteInput) error {
 	return a.store.DeleteTailoredBulletDraft(input)
 }
 
+func (a *App) GenerateCandidateClaims() ([]CandidateClaim, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.GenerateCandidateClaims(a.ctx, nil)
+}
+
+func (a *App) ListCandidateClaims(status string) ([]CandidateClaim, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListCandidateClaims(status)
+}
+
+func (a *App) UpdateCandidateClaimReview(input UpdateCandidateClaimReviewInput) (CandidateClaim, error) {
+	if err := a.ensureStore(); err != nil {
+		return CandidateClaim{}, err
+	}
+	return a.store.UpdateCandidateClaimReview(input)
+}
+
+func (a *App) DeleteCandidateClaim(input DeleteInput) error {
+	if err := a.ensureStore(); err != nil {
+		return err
+	}
+	return a.store.DeleteCandidateClaim(input)
+}
+
+func (a *App) DeleteAllCandidateClaims() error {
+	if err := a.ensureStore(); err != nil {
+		return err
+	}
+	return a.store.DeleteAllCandidateClaims()
+}
+
+func (a *App) ListBlockedClaims() ([]BlockedClaim, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListBlockedClaims()
+}
+
+func (a *App) CreateBlockedClaim(input CreateBlockedClaimInput) (BlockedClaim, error) {
+	if err := a.ensureStore(); err != nil {
+		return BlockedClaim{}, err
+	}
+	return a.store.CreateBlockedClaim(input)
+}
+
+func (a *App) UpdateBlockedClaim(input UpdateBlockedClaimInput) (BlockedClaim, error) {
+	if err := a.ensureStore(); err != nil {
+		return BlockedClaim{}, err
+	}
+	return a.store.UpdateBlockedClaim(input)
+}
+
+func (a *App) DeleteBlockedClaim(input DeleteInput) error {
+	if err := a.ensureStore(); err != nil {
+		return err
+	}
+	return a.store.DeleteBlockedClaim(input)
+}
+
 func (a *App) ListPromptRules() ([]PromptRule, error) {
 	if err := a.ensureStore(); err != nil {
 		return nil, err

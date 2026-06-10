@@ -6,11 +6,19 @@ export function AnalyzeJobDescription(arg1:number):Promise<main.JobAnalysis>;
 
 export function BuildJobMatchMap(arg1:number):Promise<Array<main.JobFactMatch>>;
 
+export function CreateBlockedClaim(arg1:main.CreateBlockedClaimInput):Promise<main.BlockedClaim>;
+
 export function CreateCandidateSource(arg1:main.CreateCandidateSourceInput):Promise<main.CandidateSource>;
 
 export function CreateJobDescription(arg1:main.CreateJobDescriptionInput):Promise<main.JobDescription>;
 
+export function DeleteAllCandidateClaims():Promise<void>;
+
 export function DeleteAllEvidenceFacts():Promise<void>;
+
+export function DeleteBlockedClaim(arg1:main.DeleteInput):Promise<void>;
+
+export function DeleteCandidateClaim(arg1:main.DeleteInput):Promise<void>;
 
 export function DeleteCandidateSource(arg1:main.DeleteInput):Promise<void>;
 
@@ -29,6 +37,8 @@ export function DraftCandidateProfileFromSource(arg1:number):Promise<main.Candid
 export function ExtractEvidenceFacts(arg1:main.ExtractEvidenceFactsInput):Promise<Array<main.EvidenceFact>>;
 
 export function GenerateApplicationStrategy(arg1:number):Promise<main.ApplicationStrategy>;
+
+export function GenerateCandidateClaims():Promise<Array<main.CandidateClaim>>;
 
 export function GenerateFitAnalysis(arg1:number):Promise<main.JobFitAnalysis>;
 
@@ -53,6 +63,10 @@ export function GetToolStatus():Promise<main.ToolStatus>;
 export function ImportCandidateSourceFile(arg1:main.ImportCandidateSourceFileInput):Promise<main.CandidateSource>;
 
 export function InstallTectonic():Promise<main.InstallTectonicResult>;
+
+export function ListBlockedClaims():Promise<Array<main.BlockedClaim>>;
+
+export function ListCandidateClaims(arg1:string):Promise<Array<main.CandidateClaim>>;
 
 export function ListCandidateSources():Promise<Array<main.CandidateSource>>;
 
@@ -83,6 +97,10 @@ export function SaveCandidateProfile(arg1:main.CandidateProfile):Promise<main.Ca
 export function SaveSettings(arg1:main.SaveSettingsInput):Promise<main.Settings>;
 
 export function TestLLM():Promise<main.LLMTestResult>;
+
+export function UpdateBlockedClaim(arg1:main.UpdateBlockedClaimInput):Promise<main.BlockedClaim>;
+
+export function UpdateCandidateClaimReview(arg1:main.UpdateCandidateClaimReviewInput):Promise<main.CandidateClaim>;
 
 export function UpdateEvidenceFactReview(arg1:main.UpdateEvidenceFactReviewInput):Promise<main.EvidenceFact>;
 

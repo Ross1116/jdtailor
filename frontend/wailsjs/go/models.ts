@@ -52,6 +52,80 @@ export namespace main {
 	        this.updated_at = source["updated_at"];
 	    }
 	}
+	export class BlockedClaim {
+	    id: number;
+	    pattern: string;
+	    reason: string;
+	    severity: string;
+	    source: string;
+	    enabled: boolean;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BlockedClaim(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.pattern = source["pattern"];
+	        this.reason = source["reason"];
+	        this.severity = source["severity"];
+	        this.source = source["source"];
+	        this.enabled = source["enabled"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
+	export class CandidateClaim {
+	    id: number;
+	    claim_text: string;
+	    claim_type: string;
+	    source_fact_ids: number[];
+	    evidence_quotes: string[];
+	    technologies: string[];
+	    strength: string;
+	    allowed_use: string[];
+	    allowed_contexts: string[];
+	    blocked_contexts: string[];
+	    safe_phrasings: string[];
+	    unsafe_phrasings: string[];
+	    origin_heading: string;
+	    origin_type: string;
+	    status: string;
+	    risk_flags: string[];
+	    review_note: string;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CandidateClaim(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.claim_text = source["claim_text"];
+	        this.claim_type = source["claim_type"];
+	        this.source_fact_ids = source["source_fact_ids"];
+	        this.evidence_quotes = source["evidence_quotes"];
+	        this.technologies = source["technologies"];
+	        this.strength = source["strength"];
+	        this.allowed_use = source["allowed_use"];
+	        this.allowed_contexts = source["allowed_contexts"];
+	        this.blocked_contexts = source["blocked_contexts"];
+	        this.safe_phrasings = source["safe_phrasings"];
+	        this.unsafe_phrasings = source["unsafe_phrasings"];
+	        this.origin_heading = source["origin_heading"];
+	        this.origin_type = source["origin_type"];
+	        this.status = source["status"];
+	        this.risk_flags = source["risk_flags"];
+	        this.review_note = source["review_note"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
 	export class CandidateContact {
 	    full_name: string;
 	    email: string;
@@ -169,6 +243,26 @@ export namespace main {
 	        this.file_path = source["file_path"];
 	        this.imported_at = source["imported_at"];
 	        this.updated_at = source["updated_at"];
+	    }
+	}
+	export class CreateBlockedClaimInput {
+	    pattern: string;
+	    reason: string;
+	    severity: string;
+	    source: string;
+	    enabled: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new CreateBlockedClaimInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.pattern = source["pattern"];
+	        this.reason = source["reason"];
+	        this.severity = source["severity"];
+	        this.source = source["source"];
+	        this.enabled = source["enabled"];
 	    }
 	}
 	export class CreateCandidateSourceInput {
@@ -757,6 +851,62 @@ export namespace main {
 	        this.tectonic_status = source["tectonic_status"];
 	        this.tectonic_path = source["tectonic_path"];
 	        this.generated_path = source["generated_path"];
+	    }
+	}
+	export class UpdateBlockedClaimInput {
+	    id: number;
+	    pattern: string;
+	    reason: string;
+	    severity: string;
+	    source: string;
+	    enabled: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateBlockedClaimInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.pattern = source["pattern"];
+	        this.reason = source["reason"];
+	        this.severity = source["severity"];
+	        this.source = source["source"];
+	        this.enabled = source["enabled"];
+	    }
+	}
+	export class UpdateCandidateClaimReviewInput {
+	    id: number;
+	    claim_text: string;
+	    claim_type: string;
+	    strength: string;
+	    allowed_use: string[];
+	    allowed_contexts: string[];
+	    blocked_contexts: string[];
+	    safe_phrasings: string[];
+	    unsafe_phrasings: string[];
+	    status: string;
+	    risk_flags: string[];
+	    review_note: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new UpdateCandidateClaimReviewInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.claim_text = source["claim_text"];
+	        this.claim_type = source["claim_type"];
+	        this.strength = source["strength"];
+	        this.allowed_use = source["allowed_use"];
+	        this.allowed_contexts = source["allowed_contexts"];
+	        this.blocked_contexts = source["blocked_contexts"];
+	        this.safe_phrasings = source["safe_phrasings"];
+	        this.unsafe_phrasings = source["unsafe_phrasings"];
+	        this.status = source["status"];
+	        this.risk_flags = source["risk_flags"];
+	        this.review_note = source["review_note"];
 	    }
 	}
 	export class UpdateEvidenceFactReviewInput {

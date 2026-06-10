@@ -10,6 +10,10 @@ export function BuildJobMatchMap(arg1) {
   return window['go']['main']['App']['BuildJobMatchMap'](arg1);
 }
 
+export function CreateBlockedClaim(arg1) {
+  return window['go']['main']['App']['CreateBlockedClaim'](arg1);
+}
+
 export function CreateCandidateSource(arg1) {
   return window['go']['main']['App']['CreateCandidateSource'](arg1);
 }
@@ -18,8 +22,20 @@ export function CreateJobDescription(arg1) {
   return window['go']['main']['App']['CreateJobDescription'](arg1);
 }
 
+export function DeleteAllCandidateClaims() {
+  return window['go']['main']['App']['DeleteAllCandidateClaims']();
+}
+
 export function DeleteAllEvidenceFacts() {
   return window['go']['main']['App']['DeleteAllEvidenceFacts']();
+}
+
+export function DeleteBlockedClaim(arg1) {
+  return window['go']['main']['App']['DeleteBlockedClaim'](arg1);
+}
+
+export function DeleteCandidateClaim(arg1) {
+  return window['go']['main']['App']['DeleteCandidateClaim'](arg1);
 }
 
 export function DeleteCandidateSource(arg1) {
@@ -56,6 +72,10 @@ export function ExtractEvidenceFacts(arg1) {
 
 export function GenerateApplicationStrategy(arg1) {
   return window['go']['main']['App']['GenerateApplicationStrategy'](arg1);
+}
+
+export function GenerateCandidateClaims() {
+  return window['go']['main']['App']['GenerateCandidateClaims']();
 }
 
 export function GenerateFitAnalysis(arg1) {
@@ -104,6 +124,14 @@ export function ImportCandidateSourceFile(arg1) {
 
 export function InstallTectonic() {
   return window['go']['main']['App']['InstallTectonic']();
+}
+
+export function ListBlockedClaims() {
+  return window['go']['main']['App']['ListBlockedClaims']();
+}
+
+export function ListCandidateClaims(arg1) {
+  return window['go']['main']['App']['ListCandidateClaims'](arg1);
 }
 
 export function ListCandidateSources() {
@@ -164,6 +192,14 @@ export function SaveSettings(arg1) {
 
 export function TestLLM() {
   return window['go']['main']['App']['TestLLM']();
+}
+
+export function UpdateBlockedClaim(arg1) {
+  return window['go']['main']['App']['UpdateBlockedClaim'](arg1);
+}
+
+export function UpdateCandidateClaimReview(arg1) {
+  return window['go']['main']['App']['UpdateCandidateClaimReview'](arg1);
 }
 
 export function UpdateEvidenceFactReview(arg1) {

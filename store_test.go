@@ -1196,6 +1196,100 @@ func TestBulletDraftsAddHumanStyleRiskFlags(t *testing.T) {
 	}
 }
 
+func TestCandidateClaimLedgerWorkflow(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	blocked, err := store.ListBlockedClaims()
+	if err != nil {
+		t.Fatalf("ListBlockedClaims() error = %v", err)
+	}
+	if len(blocked) == 0 {
+		t.Fatal("default blocked claims not seeded")
+	}
+
+	_, facts := createFactsForJobTests(t, store)
+	claims, err := store.replaceCandidateClaims([]parsedCandidateClaim{
+		{
+			ClaimText:     "Built FastAPI APIs for planning workflows across booking and asset scheduling modules.",
+			ClaimType:     "experience",
+			SourceFactIDs: []int64{facts[0].ID},
+			Strength:      "strong",
+		},
+		{
+			ClaimText:     "Claim with missing fact should be discarded.",
+			SourceFactIDs: []int64{999999},
+		},
+	}, []factPromptContext{
+		{ID: facts[0].ID, Status: facts[0].Status, Confidence: facts[0].Confidence, FactText: facts[0].FactText, EvidenceQuote: facts[0].EvidenceQuote, Technologies: facts[0].Technologies, SectionHeading: "Sitespace", SectionType: "experience"},
+	})
+	if err != nil {
+		t.Fatalf("replaceCandidateClaims() error = %v", err)
+	}
+	if len(claims) != 1 || claims[0].Status != claimStatusApproved || len(claims[0].SourceFactIDs) != 1 {
+		t.Fatalf("claims = %+v", claims)
+	}
+
+	updated, err := store.UpdateCandidateClaimReview(UpdateCandidateClaimReviewInput{
+		ID:              claims[0].ID,
+		ClaimText:       claims[0].ClaimText,
+		ClaimType:       claims[0].ClaimType,
+		Strength:        claims[0].Strength,
+		AllowedUse:      claims[0].AllowedUse,
+		AllowedContexts: claims[0].AllowedContexts,
+		BlockedContexts: claims[0].BlockedContexts,
+		SafePhrasings:   claims[0].SafePhrasings,
+		UnsafePhrasings: claims[0].UnsafePhrasings,
+		Status:          claimStatusApprovedRestricted,
+		RiskFlags:       []string{"manual_limit"},
+		ReviewNote:      "Keep narrow.",
+	})
+	if err != nil {
+		t.Fatalf("UpdateCandidateClaimReview() error = %v", err)
+	}
+	if updated.Status != claimStatusApprovedRestricted || !listContains(updated.RiskFlags, "manual_limit") {
+		t.Fatalf("updated = %+v", updated)
+	}
+}
+
+func TestCandidateClaimsBlockUnsupportedScope(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	_, facts := createFactsForJobTests(t, store)
+	claims, err := store.replaceCandidateClaims([]parsedCandidateClaim{{
+		ClaimText:     "Led a senior Kubernetes team and improved latency by 45%.",
+		SourceFactIDs: []int64{facts[0].ID},
+	}}, []factPromptContext{{
+		ID: factIDOrPanic(t, facts), Status: facts[0].Status, Confidence: facts[0].Confidence, FactText: facts[0].FactText, EvidenceQuote: facts[0].EvidenceQuote, Technologies: facts[0].Technologies, SectionHeading: "Sitespace", SectionType: "experience",
+	}})
+	if err != nil {
+		t.Fatalf("replaceCandidateClaims() error = %v", err)
+	}
+	if len(claims) != 1 || claims[0].Status != claimStatusBlocked {
+		t.Fatalf("claims = %+v, want blocked", claims)
+	}
+	flags := strings.Join(claims[0].RiskFlags, " ")
+	for _, want := range []string{"blocked_context", "unsupported_metric"} {
+		if !strings.Contains(flags, want) {
+			t.Fatalf("flags = %+v, missing %s", claims[0].RiskFlags, want)
+		}
+	}
+}
+
+func factIDOrPanic(t *testing.T, facts []EvidenceFact) int64 {
+	t.Helper()
+	if len(facts) == 0 {
+		t.Fatal("no facts")
+	}
+	return facts[0].ID
+}
+
 func TestCreateJobDescriptionInfersDetailsFromRawText(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
