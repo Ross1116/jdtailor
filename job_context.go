@@ -1282,7 +1282,7 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 		}
 
 		draft.RiskFlags = normalizeStringList(append(
-			draft.RiskFlags,
+			filterLLMRiskFlags(draft.RiskFlags),
 			styleRiskFlags(draft.DraftText)...,
 		))
 
@@ -1353,6 +1353,9 @@ func lowResumeValueDraft(draft parsedBulletDraft, claimIDs []int64, claimsByID m
 	}
 
 	text := strings.ToLower(strings.TrimSpace(draft.DraftText))
+	if invalidBulletText(text) {
+		return true
+	}
 
 	// Reject bullets that are just generic statements.
 	genericPhrases := []string{
@@ -2962,4 +2965,68 @@ func clampScore(score float64) float64 {
 		return 1
 	}
 	return score
+}
+
+func filterLLMRiskFlags(flags []string) []string {
+	allowed := map[string]bool{
+		"weak_evidence":         true,
+		"ambiguous_metric":      true,
+		"ambiguous_scope":       true,
+		"ambiguous_technology":  true,
+		"inferred_tailoring":    true,
+		"approved_restricted":   true,
+		"unsupported_metric":    true,
+		"unsupported_tool":      true,
+		"unsupported_seniority": true,
+		"unsupported_ownership": true,
+	}
+
+	filtered := []string{}
+	for _, flag := range flags {
+		normalized := strings.TrimSpace(strings.ToLower(flag))
+		if allowed[normalized] {
+			filtered = append(filtered, normalized)
+		}
+	}
+
+	return normalizeStringList(filtered)
+}
+
+func invalidBulletText(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return true
+	}
+
+	badPhrases := []string{
+		"api development across",
+		"built api development",
+		"using machine learning audio feature extraction and live ranking", // optional: too vague if unsupported by exact facts
+		"worked on",
+		"helped with",
+		"used various",
+		"contributed to team",
+		"collaborated with",
+		"supported development",
+		"participated in",
+		"business outcomes",
+	}
+
+	for _, phrase := range badPhrases {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+
+	// Catches junk fragments like "2:3, 3:2".
+	if strings.Contains(lower, "2:3") || strings.Contains(lower, "3:2") {
+		return true
+	}
+
+	// Catches malformed claim text like "a and control surface".
+	if strings.Contains(lower, " a and ") {
+		return true
+	}
+
+	return false
 }
