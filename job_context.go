@@ -125,12 +125,18 @@ type parsedBulletDraftsResponse struct {
 }
 
 type parsedBulletDraft struct {
-	RequirementID int64    `json:"requirement_id"`
-	FactIDs       []int64  `json:"fact_ids"`
-	ClaimIDs      []int64  `json:"claim_ids"`
-	DraftText     string   `json:"draft_text"`
-	Rationale     string   `json:"rationale"`
-	RiskFlags     []string `json:"risk_flags"`
+	OriginHeading string `json:"origin_heading"`
+	OriginType    string `json:"origin_type"`
+
+	RequirementID  int64   `json:"requirement_id"`
+	RequirementIDs []int64 `json:"requirement_ids,omitempty"`
+
+	FactIDs  []int64 `json:"fact_ids"`
+	ClaimIDs []int64 `json:"claim_ids"`
+
+	DraftText string   `json:"draft_text"`
+	Rationale string   `json:"rationale"`
+	RiskFlags []string `json:"risk_flags"`
 }
 
 type claimPromptContext struct {
@@ -170,6 +176,16 @@ type factPromptContext struct {
 	SectionHeading string   `json:"section_heading"`
 	SectionType    string   `json:"section_type"`
 	Context        []string `json:"context"`
+}
+
+type bulletOriginGroup struct {
+	OriginHeading string
+	OriginType    string
+
+	Requirements []JobRequirement
+	Matches      []JobFactMatch
+	Facts        []factPromptContext
+	Claims       []CandidateClaim
 }
 
 func (s *Store) ListJobDescriptions() ([]JobDescription, error) {
@@ -434,14 +450,20 @@ func (s *Store) GenerateTailoredBulletDrafts(ctx context.Context, jobID int64, c
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	job, err := s.getJobDescription(jobID)
 	if err != nil {
 		return nil, err
 	}
+
 	requirements, err := s.ListJobRequirements(jobID)
 	if err != nil {
 		return nil, err
 	}
+	if len(requirements) == 0 {
+		return nil, errors.New("parse job requirements before generating bullet drafts")
+	}
+
 	matches, err := s.ListJobFactMatches(jobID)
 	if err != nil {
 		return nil, err
@@ -449,10 +471,15 @@ func (s *Store) GenerateTailoredBulletDrafts(ctx context.Context, jobID int64, c
 	if len(matches) == 0 {
 		return nil, errors.New("build match map before generating bullet drafts")
 	}
+
 	facts, err := s.listFactPromptContext()
 	if err != nil {
 		return nil, err
 	}
+	if len(facts) == 0 {
+		return nil, errors.New("extract evidence facts before generating bullet drafts")
+	}
+
 	claims, err := s.listApprovedClaimsForDrafts()
 	if err != nil {
 		return nil, err
@@ -460,45 +487,252 @@ func (s *Store) GenerateTailoredBulletDrafts(ctx context.Context, jobID int64, c
 	if len(claims) == 0 {
 		return nil, errors.New("approve profile-bank claims before generating bullet drafts")
 	}
-	reqJSON, _ := json.Marshal(requirements)
-	matchJSON, _ := json.Marshal(matches)
-	promptFacts := selectFactsForMatches(matches, facts)
-	factJSON, _ := json.Marshal(promptFacts)
-	promptClaims := selectClaimsForMatches(matches, claims)
-	claimJSON, _ := json.Marshal(promptClaims)
+
 	styleRules := s.promptRuleDigest("resume", "validation")
-	system := `You are JD Tailor's resume bullet drafter. Return strict JSON only.
-Write tailored bullet suggestions from approved profile-bank atoms only; never invent source truth.`
+
+	groups := buildBulletOriginGroups(requirements, matches, facts, claims)
+	if len(groups) == 0 {
+		return nil, errors.New("no same-origin evidence groups available for bullet drafting")
+	}
+
+	parsedAll := []parsedBulletDraft{}
+
+	for _, group := range groups {
+		if len(group.Requirements) == 0 || len(group.Facts) == 0 || len(group.Claims) == 0 {
+			continue
+		}
+
+		parsed, err := s.generateBulletDraftsForOrigin(ctx, client, job, group, styleRules)
+		if err != nil {
+			parsed = fallbackBulletDraftsForOrigin(group)
+			if len(parsed) == 0 {
+				_ = s.LogEvent("warning", "origin bullet drafting failed for "+group.OriginHeading+": "+err.Error())
+				continue
+			}
+			_ = s.LogEvent("warning", "origin bullet drafts used local fallback for "+group.OriginHeading+": "+err.Error())
+		}
+
+		parsedAll = append(parsedAll, parsed...)
+	}
+
+	if len(parsedAll) == 0 {
+		return nil, errors.New("no usable same-origin bullet drafts generated")
+	}
+
+	return s.replaceBulletDrafts(jobID, parsedAll, requirements, facts, claims)
+}
+
+func originCanHaveResumeBullet(originType string) bool {
+	switch strings.TrimSpace(strings.ToLower(originType)) {
+	case "experience", "project":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildBulletOriginGroups(requirements []JobRequirement, matches []JobFactMatch, facts []factPromptContext, claims []CandidateClaim) []bulletOriginGroup {
+	reqsByID := map[int64]JobRequirement{}
+	for _, req := range requirements {
+		reqsByID[req.ID] = req
+	}
+
+	factsByID := map[int64]factPromptContext{}
+	for _, fact := range facts {
+		factsByID[fact.ID] = fact
+	}
+
+	claimsByFactID := map[int64][]CandidateClaim{}
+	for _, claim := range claims {
+		if !claimAllowedForDrafts(claim) {
+			continue
+		}
+		for _, factID := range claim.SourceFactIDs {
+			claimsByFactID[factID] = append(claimsByFactID[factID], claim)
+		}
+	}
+
+	groupsByOrigin := map[string]*bulletOriginGroup{}
+
+	for _, match := range matches {
+		req, ok := reqsByID[match.RequirementID]
+		if !ok {
+			continue
+		}
+
+		if !requirementCanDriveBullet(req) {
+			continue
+		}
+
+		if !matchCanDriveBullet(match) {
+			continue
+		}
+
+		fact, ok := factsByID[match.FactID]
+		if !ok {
+			continue
+		}
+
+		originHeading := strings.TrimSpace(fact.SectionHeading)
+		originType := strings.TrimSpace(fact.SectionType)
+		if originHeading == "" || originType == "" {
+			continue
+		}
+
+		if !originCanHaveResumeBullet(originType) {
+			continue
+		}
+
+		key := originKey(originHeading, originType)
+
+		group := groupsByOrigin[key]
+		if group == nil {
+			group = &bulletOriginGroup{
+				OriginHeading: originHeading,
+				OriginType:    originType,
+			}
+			groupsByOrigin[key] = group
+		}
+
+		group.Requirements = appendUniqueRequirement(group.Requirements, req)
+		group.Matches = append(group.Matches, match)
+		group.Facts = appendUniqueFact(group.Facts, fact)
+
+		for _, claim := range claimsByFactID[match.FactID] {
+			if !claimAllowedForOriginDraft(claim, originHeading, originType, factsByID) {
+				continue
+			}
+
+			group.Claims = appendUniqueClaim(group.Claims, claim)
+
+			for _, sourceFactID := range claim.SourceFactIDs {
+				sourceFact, ok := factsByID[sourceFactID]
+				if !ok {
+					continue
+				}
+
+				if !sameOrigin(sourceFact.SectionHeading, sourceFact.SectionType, originHeading, originType) {
+					continue
+				}
+
+				group.Facts = appendUniqueFact(group.Facts, sourceFact)
+			}
+		}
+	}
+
+	groups := []bulletOriginGroup{}
+	for _, group := range groupsByOrigin {
+		if len(group.Requirements) == 0 || len(group.Facts) == 0 || len(group.Claims) == 0 {
+			continue
+		}
+		groups = append(groups, *group)
+	}
+
+	sort.Slice(groups, func(i, j int) bool {
+		leftBudget := bulletBudgetForSectionType(groups[i].OriginType)
+		rightBudget := bulletBudgetForSectionType(groups[j].OriginType)
+		if leftBudget != rightBudget {
+			return leftBudget > rightBudget
+		}
+		return groups[i].OriginHeading < groups[j].OriginHeading
+	})
+
+	return groups
+}
+
+func matchCanDriveBullet(match JobFactMatch) bool {
+	status := strings.ToLower(strings.TrimSpace(match.CoverageStatus))
+
+	if status == "weak" {
+		return false
+	}
+
+	if match.Score < 0.72 {
+		return false
+	}
+
+	return status == "strong" || status == "partial"
+}
+
+func (s *Store) generateBulletDraftsForOrigin(ctx context.Context, client *http.Client, job JobDescription, group bulletOriginGroup, styleRules string) ([]parsedBulletDraft, error) {
+	reqJSON, _ := json.Marshal(group.Requirements)
+	matchJSON, _ := json.Marshal(group.Matches)
+
+	factJSON, _ := json.Marshal(group.Facts)
+
+	promptClaims := []claimPromptContext{}
+	for _, claim := range group.Claims {
+		promptClaims = append(promptClaims, claimPromptContextFromCandidate(claim))
+	}
+	claimJSON, _ := json.Marshal(promptClaims)
+
+	system := `You are JD Tailor's section-scoped resume bullet drafter. Return strict JSON only.
+Write bullet suggestions for one resume origin only. Never use facts from another origin.`
+
 	user := fmt.Sprintf(`# Task
-Generate saved resume bullet suggestions for this job from the matched evidence.
+Generate the strongest resume-worthy bullet suggestions for this origin only.
+
+The JD requirements are prioritization context, not a one-to-one checklist.
+Do not create a bullet just because a requirement has keyword overlap.
+Only write bullets that would be valuable on a real software engineering resume.
+
+# Locked origin
+origin_heading: %s
+origin_type: %s
 
 # Output JSON schema
-{"drafts":[{"requirement_id":0,"claim_ids":[0],"fact_ids":[0],"draft_text":"","rationale":"","risk_flags":[]}]}
+{"drafts":[{"origin_heading":"","origin_type":"","requirement_id":0,"requirement_ids":[0],"claim_ids":[0],"fact_ids":[0],"draft_text":"","rationale":"","risk_flags":[]}]}
+
+# Section-scope rules
+- Every draft must use origin_heading="%s" and origin_type="%s".
+- Every claim_id must exist in <candidate_claims_json>.
+- Every fact_id must exist in <candidate_facts_json>.
+- Do not use any claim or fact from another origin.
+- Do not combine this origin with other roles, employers, projects, education, or skills-only claims.
+- Cross-origin evidence may influence resume-level positioning later, but not this origin's bullet text.
+- JD language may influence wording only; it must not add unsupported tools, metrics, ownership, scale, domain, production scope, or responsibilities.
+- If the JD asks for a tool, domain, production scope, or responsibility not supported by this origin, omit it or phrase the match conservatively.
+
+# Resume-value rules
+- Prefer bullets that show concrete engineering output, technical ownership, system design, production reliability, security, observability, or measurable scope.
+- Prefer real artifacts over generic skills: APIs, backend services, data models, ingestion pipelines, auth systems, tracing, background jobs, schedulers, distributed systems, UI surfaces, packaging systems.
+- Prefer supported outcomes: improved debugging, reduced manual work, reliability, validation, auditability, recovery, processing quality, or delivery breadth.
+- Prefer bullets with clear action + artifact + technical detail + supported outcome/scope.
+- Do not write low-value bullets only to cover missing JD terms.
+- Do not force bullets for soft skills, degree requirements, team culture, collaboration, generic ownership, or domain language unless same-origin evidence directly supports it.
+- If a JD requirement is only weakly supported, do not write a bullet for it unless the underlying evidence is still strong and resume-worthy.
+
+# Requirement usage
+- requirement_id should identify the main JD requirement this bullet best supports.
+- requirement_ids may include secondary requirements.
+- A bullet does not need to perfectly satisfy a high-priority requirement if it is still one of the strongest same-origin resume bullets.
+- Do not create one bullet per requirement. Create only the strongest bullets for this origin.
 
 # Bullet style
 - Start each draft_text with a strong past-tense action verb, no leading hyphen.
-- Make the bullet specific to the JD language when supported by facts.
-- Combine compatible facts only when they share a believable project/context.
-- Prefer concrete artifacts, technologies, scale, users/teams, metrics, and outcomes.
 - Keep each bullet 22 to 34 words.
-- Write like a practical engineer, not a marketing page. Use plain language and avoid inflated resume cliches.
-- Do not use markdown, hashtags, rhetorical questions, generic setup phrases, or fake business impact.
-- Every claim includes atom fields plus origin_heading and origin_type. Treat those as the bullet origin.
-- Do not blend claims from different origins unless the draft remains truthful and natural.
-- Mention the origin in rationale so reviewers know where the bullet belongs.
+- Use concrete artifacts, technologies, scope, and outcomes only when present in the facts.
+- Write like a practical engineer, not a marketing page.
+- Avoid inflated resume cliches.
+- Avoid generic tool-list bullets.
+- Avoid vague phrases like "worked on", "contributed to", "helped with", "various", "business outcomes", or "leveraged".
+- Mention the origin in the rationale so reviewers know where the bullet belongs.
 - Respect a one-page resume budget: max 5 bullets per experience origin, max 2 bullets per project origin, max 1 per education/certification origin.
 
 # Evidence rules
 - Every claim_id must exist in <candidate_claims_json>.
 - Every fact_id must exist in <candidate_facts_json> and support the listed claim_id.
-- Do not introduce unsupported metrics, tools, cloud platforms, leadership, security, production scope, or business impact.
+- Do not introduce unsupported metrics, tools, cloud platforms, leadership, security, production scope, domain experience, or business impact.
 - If evidence is weak/partial, phrase conservatively; do not overclaim the exact JD requirement.
 - Include risk_flags for approved-restricted claims, weak evidence, ambiguous metric/scope, or inferred tailoring.
+- Do not include style risk flags such as style_too_long or style_buzzword; those are computed by code.
 - Drafts are suggestions only and must not mutate locked profile/source truth.
 
-# Rationale
-- Explain which requirement is targeted and why the facts support the wording.
-- Mention any missing JD detail that prevented stronger tailoring.
+# Rationale format
+Each rationale must use this exact structure:
+Resume value: explain why this is worth a resume bullet.
+JD relevance: explain which JD requirement(s) it supports and how.
+Missing/unsupported: mention any important JD detail that was not supported and therefore omitted.
 
 # Human style rules
 %s
@@ -515,25 +749,97 @@ Generate saved resume bullet suggestions for this job from the matched evidence.
 </candidate_claims_json>
 <candidate_facts_json>
 %s
-</candidate_facts_json>`, firstNonEmpty(styleRules, "Use plain, specific, evidence-backed resume language."), job.Company, job.Title, string(reqJSON), string(matchJSON), string(claimJSON), string(factJSON))
-	text, err := s.GenerateLLMText(ctx, client, system, user, 1600)
+</candidate_facts_json>`,
+		group.OriginHeading,
+		group.OriginType,
+		group.OriginHeading,
+		group.OriginType,
+		firstNonEmpty(styleRules, "Use plain, specific, evidence-backed resume language."),
+		job.Company,
+		job.Title,
+		string(reqJSON),
+		string(matchJSON),
+		string(claimJSON),
+		string(factJSON),
+	)
+
+	text, err := s.GenerateLLMText(ctx, client, system, user, 1200)
 	if err != nil {
-		parsed := fallbackBulletDraftsFromClaims(requirements, matches, claims)
-		if len(parsed) == 0 {
-			return nil, err
-		}
-		_ = s.LogEvent("warning", "bullet drafts used local atom-bank fallback after LLM request failure: "+err.Error())
-		return s.replaceBulletDrafts(jobID, parsed, requirements, facts, claims)
+		return nil, err
 	}
-	parsed, err := parseBulletDrafts(text)
-	if err != nil {
-		parsed = fallbackBulletDraftsFromClaims(requirements, matches, claims)
-		if len(parsed) == 0 {
-			return nil, err
+
+	return parseBulletDrafts(text)
+}
+
+func appendUniqueRequirement(list []JobRequirement, req JobRequirement) []JobRequirement {
+	for _, existing := range list {
+		if existing.ID == req.ID {
+			return list
 		}
-		_ = s.LogEvent("warning", "bullet drafts used local atom-bank fallback: "+err.Error())
 	}
-	return s.replaceBulletDrafts(jobID, parsed, requirements, facts, claims)
+	return append(list, req)
+}
+
+func appendUniqueFact(list []factPromptContext, fact factPromptContext) []factPromptContext {
+	for _, existing := range list {
+		if existing.ID == fact.ID {
+			return list
+		}
+	}
+	return append(list, fact)
+}
+
+func appendUniqueClaim(list []CandidateClaim, claim CandidateClaim) []CandidateClaim {
+	for _, existing := range list {
+		if existing.ID == claim.ID {
+			return list
+		}
+	}
+	return append(list, claim)
+}
+
+func requirementCanDriveBullet(req JobRequirement) bool {
+	text := strings.ToLower(strings.Join([]string{
+		req.Category,
+		req.RequirementText,
+		strings.Join(req.Keywords, " "),
+	}, " "))
+
+	// Education/credential checks belong in fit analysis, not bullet drafting.
+	if strings.Contains(text, "degree") ||
+		strings.Contains(text, "computer science") ||
+		strings.Contains(text, "equivalent practical experience") {
+		return false
+	}
+
+	// Pure soft-skill/team-culture requirements should not create technical bullets.
+	softOnlyMarkers := []string{
+		"collaborate with cross-functional",
+		"shared outcomes",
+		"communication skills",
+		"team-first",
+		"team first",
+		"high-performing team culture",
+		"proactive collaboration",
+		"prioritise high-impact",
+		"seek clarity",
+		"ownership mentality",
+		"seeing work through to completion",
+	}
+
+	for _, marker := range softOnlyMarkers {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+
+	// Domain requirements should only drive bullets if the candidate has direct domain evidence.
+	// For now, do not create bullets from these directly.
+	if strings.EqualFold(req.Category, "domain") {
+		return false
+	}
+
+	return true
 }
 
 func (s *Store) ListJobRequirements(jobID int64) ([]JobRequirement, error) {
@@ -566,6 +872,65 @@ func (s *Store) ListJobFactMatches(jobID int64) ([]JobFactMatch, error) {
 	}
 	defer rows.Close()
 	return scanJobFactMatches(rows)
+}
+
+func claimResumeValueScore(claim CandidateClaim) float64 {
+	score := 0.0
+
+	for _, action := range claim.Actions {
+		switch strings.ToLower(strings.TrimSpace(action)) {
+		case "built", "shipped", "designed", "implemented", "refactored", "modeled", "developed":
+			score += 0.12
+		case "maintained", "supported", "integrated":
+			score += 0.07
+		}
+	}
+
+	if len(claim.Artifacts) > 0 || len(claim.Objects) > 0 || len(claim.Capabilities) > 0 {
+		score += 0.15
+	}
+
+	if len(claim.Technologies) > 0 {
+		score += 0.08
+	}
+
+	if len(claim.Scope) > 0 {
+		score += 0.10
+	}
+
+	if len(claim.Metrics) > 0 {
+		score += 0.16
+	}
+
+	if len(claim.Outcomes) > 0 {
+		score += 0.18
+	}
+
+	switch claim.Strength {
+	case "strong":
+		score += 0.16
+	case "moderate":
+		score += 0.09
+	case "project-level":
+		score += 0.04
+	}
+
+	if claim.EvidenceStrength == "direct" {
+		score += 0.10
+	}
+
+	if claim.Status == claimStatusApprovedRestricted {
+		score -= 0.10
+	}
+
+	for _, flag := range claim.RiskFlags {
+		switch flag {
+		case "ambiguous technology", "ambiguous_technology", "weak_evidence", "inferred_tailoring":
+			score -= 0.08
+		}
+	}
+
+	return clampScore(score)
 }
 
 func (s *Store) ListTailoredBulletDrafts(jobID int64) ([]TailoredBulletDraft, error) {
@@ -640,14 +1005,21 @@ func (s *Store) AutoSelectResumeBullets(jobID int64) ([]TailoredBulletDraft, err
 		if draft.Status == "rejected" || draftHasUnsupportedRisk(draft.RiskFlags) {
 			continue
 		}
+
+		if strings.TrimSpace(draft.OriginHeading) == "" || strings.TrimSpace(draft.OriginType) == "" {
+			continue
+		}
+
 		originKey := strings.TrimSpace(draft.OriginType) + "|" + strings.TrimSpace(draft.OriginHeading)
 		budget := bulletBudgetForSectionType(draft.OriginType)
 		if budget <= 0 {
 			budget = 2
 		}
+
 		if originCounts[originKey] >= budget {
 			continue
 		}
+
 		selectedIDs[draft.ID] = true
 		originCounts[originKey]++
 	}
@@ -801,91 +1173,139 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 		reqIDs[req.ID] = true
 		reqsByID[req.ID] = req
 	}
-	factIDs := map[int64]bool{}
+
 	factsByID := map[int64]factPromptContext{}
 	for _, fact := range facts {
-		factIDs[fact.ID] = true
 		factsByID[fact.ID] = fact
 	}
+
 	claimsByID := map[int64]CandidateClaim{}
-	claimsByFactID := map[int64][]CandidateClaim{}
 	for _, claim := range claims {
 		if !claimAllowedForDrafts(claim) {
 			continue
 		}
 		claimsByID[claim.ID] = claim
-		for _, factID := range claim.SourceFactIDs {
-			claimsByFactID[factID] = append(claimsByFactID[factID], claim)
-		}
 	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
+
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+
 	if _, err := tx.ExecContext(context.Background(), `DELETE FROM tailored_bullet_drafts WHERE job_id = ?`, jobID); err != nil {
 		return nil, err
 	}
+
 	count := 0
 	originCounts := map[string]int{}
+
 	for _, draft := range drafts {
 		draft.DraftText = strings.TrimSpace(draft.DraftText)
-		if draft.DraftText == "" || !reqIDs[draft.RequirementID] {
+
+		if draft.RequirementID == 0 && len(draft.RequirementIDs) > 0 {
+			draft.RequirementID = draft.RequirementIDs[0]
+		}
+
+		originHeading := strings.TrimSpace(draft.OriginHeading)
+		originType := strings.TrimSpace(draft.OriginType)
+
+		if draft.DraftText == "" || !reqIDs[draft.RequirementID] || originHeading == "" || originType == "" {
 			continue
 		}
+
 		validClaimIDs := []int64{}
 		for _, claimID := range draft.ClaimIDs {
-			if _, ok := claimsByID[claimID]; ok {
-				validClaimIDs = append(validClaimIDs, claimID)
+			claim, ok := claimsByID[claimID]
+			if !ok {
+				continue
 			}
-		}
-		if len(validClaimIDs) == 0 {
-			for _, factID := range draft.FactIDs {
-				for _, claim := range claimsByFactID[factID] {
-					validClaimIDs = append(validClaimIDs, claim.ID)
-				}
+
+			if !claimAllowedForOriginDraft(claim, originHeading, originType, factsByID) {
+				continue
 			}
+
+			validClaimIDs = append(validClaimIDs, claimID)
 		}
 		validClaimIDs = uniqueInt64s(validClaimIDs)
+
 		if len(validClaimIDs) == 0 {
 			continue
 		}
-		validFactIDs := []int64{}
+
+		claimSourceFactIDs := map[int64]bool{}
 		for _, claimID := range validClaimIDs {
-			validFactIDs = append(validFactIDs, claimsByID[claimID].SourceFactIDs...)
-		}
-		for _, factID := range draft.FactIDs {
-			if factIDs[factID] {
-				validFactIDs = append(validFactIDs, factID)
+			claim := claimsByID[claimID]
+			for _, factID := range claim.SourceFactIDs {
+				claimSourceFactIDs[factID] = true
 			}
 		}
+
+		validFactIDs := []int64{}
+		for _, factID := range draft.FactIDs {
+			fact, ok := factsByID[factID]
+			if !ok {
+				continue
+			}
+
+			if !claimSourceFactIDs[factID] {
+				continue
+			}
+
+			if !sameOrigin(fact.SectionHeading, fact.SectionType, originHeading, originType) {
+				continue
+			}
+
+			validFactIDs = append(validFactIDs, factID)
+		}
 		validFactIDs = uniqueInt64s(validFactIDs)
+
 		if len(validFactIDs) == 0 {
 			continue
 		}
-		originKey, originBudget := draftOriginBudget(validFactIDs, factsByID)
+
+		originKey, originBudget := draftOriginBudgetFromOrigin(originHeading, originType)
 		if originBudget > 0 && originCounts[originKey] >= originBudget {
 			continue
 		}
+
 		factIDsJSON, err := encodeInt64List(validFactIDs)
 		if err != nil {
 			return nil, err
 		}
+
 		claimIDsJSON, err := encodeInt64List(validClaimIDs)
 		if err != nil {
 			return nil, err
 		}
-		originHeading, originType := draftOriginFromClaims(validClaimIDs, claimsByID, validFactIDs, factsByID)
-		draft.RiskFlags = normalizeStringList(append(draft.RiskFlags, styleRiskFlags(draft.DraftText)...))
+
+		draft.RiskFlags = normalizeStringList(append(
+			draft.RiskFlags,
+			styleRiskFlags(draft.DraftText)...,
+		))
+
+		draft.RiskFlags = normalizeStringList(append(
+			draft.RiskFlags,
+			sectionScopeRiskFlags(draft, validClaimIDs, claimsByID, validFactIDs, factsByID)...,
+		))
+
 		if draftHasUnsupportedRisk(draft.RiskFlags) {
 			continue
 		}
+
 		riskJSON, err := encodeStringList(draft.RiskFlags)
 		if err != nil {
 			return nil, err
 		}
+
+		if lowResumeValueDraft(draft, validClaimIDs, claimsByID) {
+			continue
+		}
+
 		selectionScore := draftSelectionScore(draft, reqsByID[draft.RequirementID], validClaimIDs, claimsByID)
+
 		if _, err := tx.ExecContext(
 			context.Background(),
 			`INSERT INTO tailored_bullet_drafts
@@ -907,19 +1327,60 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 		); err != nil {
 			return nil, err
 		}
+
 		count++
+
 		if originBudget > 0 {
 			originCounts[originKey]++
 		}
 	}
+
 	if count == 0 {
-		return nil, errors.New("LLM returned no usable bullet drafts")
+		return nil, errors.New("LLM returned no usable same-origin bullet drafts")
 	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+
 	_ = s.LogEvent("info", "tailored bullet drafts generated")
 	return s.ListTailoredBulletDrafts(jobID)
+}
+
+func lowResumeValueDraft(draft parsedBulletDraft, claimIDs []int64, claimsByID map[int64]CandidateClaim) bool {
+	if draftHasUnsupportedRisk(draft.RiskFlags) {
+		return true
+	}
+
+	text := strings.ToLower(strings.TrimSpace(draft.DraftText))
+
+	// Reject bullets that are just generic statements.
+	genericPhrases := []string{
+		"worked on",
+		"helped with",
+		"used various",
+		"contributed to team",
+		"collaborated with",
+		"supported development",
+		"participated in",
+	}
+
+	for _, phrase := range genericPhrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+
+	valueScore := 0.0
+	for _, claimID := range claimIDs {
+		valueScore += claimResumeValueScore(claimsByID[claimID])
+	}
+
+	if len(claimIDs) > 0 {
+		valueScore = valueScore / float64(len(claimIDs))
+	}
+
+	return valueScore < 0.35
 }
 
 func parseJobRequirements(text string) ([]parsedJobRequirement, error) {
@@ -951,20 +1412,106 @@ func parseJobRequirements(text string) ([]parsedJobRequirement, error) {
 	return filtered, nil
 }
 
-func draftOriginBudget(factIDs []int64, factsByID map[int64]factPromptContext) (string, int) {
+func draftOriginBudgetFromOrigin(originHeading string, originType string) (string, int) {
+	if strings.TrimSpace(originHeading) == "" {
+		originHeading = "unknown"
+	}
+
+	if strings.TrimSpace(originType) == "" {
+		originType = "unknown"
+	}
+
+	key := originKey(originHeading, originType)
+	return key, bulletBudgetForSectionType(originType)
+}
+
+func sameOrigin(aHeading, aType, bHeading, bType string) bool {
+	return normalizeOriginPart(aHeading) == normalizeOriginPart(bHeading) &&
+		normalizeOriginPart(aType) == normalizeOriginPart(bType)
+}
+
+func normalizeOriginPart(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func originKey(heading string, typ string) string {
+	return normalizeOriginPart(typ) + "|" + normalizeOriginPart(heading)
+}
+
+func claimAllowedForOriginDraft(claim CandidateClaim, originHeading string, originType string, factsByID map[int64]factPromptContext) bool {
+	if !claimAllowedForDrafts(claim) {
+		return false
+	}
+
+	claimOriginHeading := strings.TrimSpace(claim.OriginHeading)
+	claimOriginType := strings.TrimSpace(claim.OriginType)
+
+	if claimOriginHeading != "" || claimOriginType != "" {
+		if !sameOrigin(claimOriginHeading, claimOriginType, originHeading, originType) {
+			return false
+		}
+	}
+
+	for _, factID := range claim.SourceFactIDs {
+		fact, ok := factsByID[factID]
+		if !ok {
+			return false
+		}
+
+		if !sameOrigin(fact.SectionHeading, fact.SectionType, originHeading, originType) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func sectionScopeRiskFlags(
+	draft parsedBulletDraft,
+	claimIDs []int64,
+	claimsByID map[int64]CandidateClaim,
+	factIDs []int64,
+	factsByID map[int64]factPromptContext,
+) []string {
+	flags := []string{}
+
+	originHeading := strings.TrimSpace(draft.OriginHeading)
+	originType := strings.TrimSpace(draft.OriginType)
+
+	if originHeading == "" || originType == "" {
+		return []string{"missing_origin"}
+	}
+
+	for _, claimID := range claimIDs {
+		claim, ok := claimsByID[claimID]
+		if !ok {
+			flags = append(flags, "unknown_claim")
+			continue
+		}
+
+		claimOriginHeading := strings.TrimSpace(claim.OriginHeading)
+		claimOriginType := strings.TrimSpace(claim.OriginType)
+
+		if claimOriginHeading != "" || claimOriginType != "" {
+			if !sameOrigin(claimOriginHeading, claimOriginType, originHeading, originType) {
+				flags = append(flags, "cross_origin_claim")
+			}
+		}
+	}
+
 	for _, factID := range factIDs {
 		fact, ok := factsByID[factID]
 		if !ok {
+			flags = append(flags, "unknown_fact")
 			continue
 		}
-		sectionType := strings.TrimSpace(fact.SectionType)
-		heading := strings.TrimSpace(fact.SectionHeading)
-		if heading == "" {
-			heading = "unknown"
+
+		if !sameOrigin(fact.SectionHeading, fact.SectionType, originHeading, originType) {
+			flags = append(flags, "cross_origin_fact")
 		}
-		return sectionType + "|" + heading, bulletBudgetForSectionType(sectionType)
 	}
-	return "unknown|unknown", 2
+
+	return normalizeStringList(flags)
 }
 
 func draftOriginFromClaims(claimIDs []int64, claimsByID map[int64]CandidateClaim, factIDs []int64, factsByID map[int64]factPromptContext) (string, string) {
@@ -989,38 +1536,106 @@ func draftOriginFromClaims(claimIDs []int64, claimsByID map[int64]CandidateClaim
 func draftHasUnsupportedRisk(flags []string) bool {
 	for _, flag := range flags {
 		switch flag {
-		case "blocked_claim", "blocked_context", "unsupported_metric", "unsupported_tool", "unsupported_seniority", "unsupported_ownership":
+		case "blocked_claim",
+			"blocked_context",
+			"unsupported_metric",
+			"unsupported_tool",
+			"unsupported_seniority",
+			"unsupported_ownership",
+			"cross_origin_claim",
+			"cross_origin_fact",
+			"missing_origin",
+			"unknown_claim",
+			"unknown_fact",
+			"summary_only_claim_used_as_bullet",
+			"project_claim_used_as_experience":
 			return true
 		}
 	}
+
 	return false
 }
 
 func draftSelectionScore(draft parsedBulletDraft, req JobRequirement, claimIDs []int64, claimsByID map[int64]CandidateClaim) float64 {
-	score := 0.45
-	switch req.Priority {
-	case "high":
-		score += 0.2
-	case "medium":
-		score += 0.1
-	}
+	score := 0.25
+
+	// 1. Resume value is primary.
+	valueTotal := 0.0
 	for _, claimID := range claimIDs {
 		claim := claimsByID[claimID]
-		switch claim.Strength {
-		case "strong":
-			score += 0.12
-		case "moderate":
-			score += 0.07
-		}
-		if claim.EvidenceStrength == "direct" {
-			score += 0.06
-		}
-		if claim.Status == claimStatusApprovedRestricted {
+		valueTotal += claimResumeValueScore(claim)
+	}
+	if len(claimIDs) > 0 {
+		score += (valueTotal / float64(len(claimIDs))) * 0.45
+	}
+
+	// 2. JD relevance is secondary.
+	switch req.Priority {
+	case "high":
+		score += 0.12
+	case "medium":
+		score += 0.07
+	case "low":
+		score += 0.02
+	}
+
+	// 3. Prefer real work experience over projects when the JD asks for production.
+	reqText := strings.ToLower(req.RequirementText)
+	if draft.OriginType == "experience" {
+		score += 0.08
+	}
+
+	if draft.OriginType == "project" && strings.Contains(reqText, "production") {
+		score -= 0.12
+	}
+
+	// 4. Penalize weak or inferred tailoring.
+	for _, flag := range draft.RiskFlags {
+		switch flag {
+		case "weak_evidence":
+			score -= 0.10
+		case "inferred_tailoring":
 			score -= 0.08
+		case "ambiguous technology", "ambiguous_technology":
+			score -= 0.06
+		default:
+			score -= 0.03
 		}
 	}
-	score -= float64(len(draft.RiskFlags)) * 0.03
+
+	if looksLikeToolListBullet(draft.DraftText) {
+		score -= 0.12
+	}
+
 	return clampScore(score)
+}
+
+func looksLikeToolListBullet(text string) bool {
+	lower := strings.ToLower(text)
+
+	toolCount := 0
+	for _, tool := range []string{
+		"fastapi", "postgresql", "sql", "typescript", "react", "node.js", "node",
+		"java", "spring boot", "go", "python", "docker", "aws", "sqlite",
+	} {
+		if strings.Contains(lower, tool) {
+			toolCount++
+		}
+	}
+
+	hasOutcomeVerb := false
+	for _, word := range []string{
+		"improving", "reducing", "accelerating", "supporting", "enabling",
+		"reliable", "reliability", "observability", "debugging", "validation",
+		"recovery", "audit", "scheduling", "processing",
+	} {
+		if strings.Contains(lower, word) {
+			hasOutcomeVerb = true
+			break
+		}
+	}
+
+	return toolCount >= 4 && !hasOutcomeVerb
 }
 
 func bulletBudgetForSectionType(sectionType string) int {
@@ -1094,17 +1709,25 @@ func parseJobMatches(text string) ([]parsedJobMatch, error) {
 
 func parseBulletDrafts(text string) ([]parsedBulletDraft, error) {
 	var parsed parsedBulletDraftsResponse
+
 	if err := parseJSONObject(text, &parsed); err != nil {
 		return nil, err
 	}
+
 	if len(parsed.Drafts) == 0 {
 		return nil, errors.New("LLM returned no drafts")
 	}
+
 	for _, draft := range parsed.Drafts {
-		if strings.TrimSpace(draft.DraftText) == "" || len(draft.ClaimIDs) == 0 || len(draft.FactIDs) == 0 {
-			return nil, errors.New("every draft must include draft_text, claim_ids, and fact_ids")
+		if strings.TrimSpace(draft.OriginHeading) == "" ||
+			strings.TrimSpace(draft.OriginType) == "" ||
+			strings.TrimSpace(draft.DraftText) == "" ||
+			len(draft.ClaimIDs) == 0 ||
+			len(draft.FactIDs) == 0 {
+			return nil, errors.New("every draft must include origin_heading, origin_type, draft_text, claim_ids, and fact_ids")
 		}
 	}
+
 	return parsed.Drafts, nil
 }
 
@@ -1236,6 +1859,60 @@ func hasConcreteRequirementVerb(line string) bool {
 		}
 	}
 	return false
+}
+
+func fallbackBulletDraftsForOrigin(group bulletOriginGroup) []parsedBulletDraft {
+	reqsByID := map[int64]JobRequirement{}
+	for _, req := range group.Requirements {
+		reqsByID[req.ID] = req
+	}
+
+	claimsByFactID := map[int64][]CandidateClaim{}
+	for _, claim := range group.Claims {
+		if !claimAllowedForDrafts(claim) {
+			continue
+		}
+
+		for _, factID := range claim.SourceFactIDs {
+			claimsByFactID[factID] = append(claimsByFactID[factID], claim)
+		}
+	}
+
+	drafts := []parsedBulletDraft{}
+	seen := map[string]bool{}
+
+	for _, match := range group.Matches {
+		req, ok := reqsByID[match.RequirementID]
+		if !ok {
+			continue
+		}
+
+		for _, claim := range claimsByFactID[match.FactID] {
+			text := fallbackBulletTextFromClaim(claim, req)
+			if text == "" {
+				continue
+			}
+
+			key := fmt.Sprintf("%d|%d|%s", req.ID, claim.ID, strings.ToLower(text))
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			drafts = append(drafts, parsedBulletDraft{
+				OriginHeading: group.OriginHeading,
+				OriginType:    group.OriginType,
+				RequirementID: req.ID,
+				ClaimIDs:      []int64{claim.ID},
+				FactIDs:       []int64{match.FactID},
+				DraftText:     text,
+				Rationale:     "Local same-origin atom-bank draft for " + req.RequirementText + " from " + group.OriginHeading,
+				RiskFlags:     claim.RiskFlags,
+			})
+		}
+	}
+
+	return drafts
 }
 
 func fallbackJobRequirements(raw string) []parsedJobRequirement {
@@ -1754,11 +2431,19 @@ func claimAllowedForDrafts(claim CandidateClaim) bool {
 	if claim.Status != claimStatusApproved && claim.Status != claimStatusApprovedRestricted {
 		return false
 	}
+
 	for _, flag := range claim.RiskFlags {
-		if flag == "blocked_claim" || flag == "blocked_context" || flag == "unsupported_metric" || flag == "unsupported_tool" {
+		switch flag {
+		case "blocked_claim",
+			"blocked_context",
+			"unsupported_metric",
+			"unsupported_tool",
+			"cross_origin_summary_only",
+			"summary_only_claim":
 			return false
 		}
 	}
+
 	return len(claim.SourceFactIDs) > 0
 }
 
@@ -2036,7 +2721,11 @@ func jobMatchTerms(text string, keywords []string) []string {
 
 func isJobStopWord(token string) bool {
 	switch token {
-	case "the", "and", "for", "with", "that", "this", "you", "your", "our", "are", "will", "have", "has", "from", "into", "work", "role", "team", "need", "needs", "required", "requirement", "requirements", "experience", "responsibilities", "ability":
+	case "the", "and", "for", "with", "that", "this", "you", "your", "our", "are",
+		"will", "have", "has", "from", "into", "work", "role", "need", "needs", "required", "requirement",
+		"requirements", "experience", "responsibilities", "ability", "it", "development", "tools", "platform",
+		"build", "built", "deliver", "design", "own", "ownership", "support", "across", "shared", "outcomes",
+		"health", "health-tech", "team", "collaborate", "cross", "group", "completion", "workflow", "workflows":
 		return true
 	default:
 		return false
