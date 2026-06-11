@@ -556,6 +556,41 @@ func (s *Store) migrate(ctx context.Context) error {
 				);
 			`,
 		},
+		{
+			version: 9,
+			sql: `
+				ALTER TABLE candidate_claims ADD COLUMN actions_json TEXT NOT NULL DEFAULT '[]';
+				ALTER TABLE candidate_claims ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]';
+				ALTER TABLE candidate_claims ADD COLUMN objects_json TEXT NOT NULL DEFAULT '[]';
+				ALTER TABLE candidate_claims ADD COLUMN domains_json TEXT NOT NULL DEFAULT '[]';
+				ALTER TABLE candidate_claims ADD COLUMN artifacts_json TEXT NOT NULL DEFAULT '[]';
+				ALTER TABLE candidate_claims ADD COLUMN scope_json TEXT NOT NULL DEFAULT '[]';
+				ALTER TABLE candidate_claims ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '[]';
+				ALTER TABLE candidate_claims ADD COLUMN outcomes_json TEXT NOT NULL DEFAULT '[]';
+				ALTER TABLE candidate_claims ADD COLUMN profile_context_json TEXT NOT NULL DEFAULT '[]';
+				ALTER TABLE candidate_claims ADD COLUMN evidence_strength TEXT NOT NULL DEFAULT 'direct';
+
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN claim_ids_json TEXT NOT NULL DEFAULT '[]';
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN origin_heading TEXT NOT NULL DEFAULT '';
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN origin_type TEXT NOT NULL DEFAULT '';
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN selection_score REAL NOT NULL DEFAULT 0;
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN selected_for_resume INTEGER NOT NULL DEFAULT 0;
+			`,
+		},
+		{
+			version: 10,
+			sql: `
+				ALTER TABLE candidate_sources ADD COLUMN trust_tier TEXT NOT NULL DEFAULT 'unverified_ai';
+
+				ALTER TABLE evidence_facts ADD COLUMN similarity_key TEXT NOT NULL DEFAULT '';
+				ALTER TABLE evidence_facts ADD COLUMN similarity_score REAL NOT NULL DEFAULT 1;
+				ALTER TABLE evidence_facts ADD COLUMN duplicate_of_id INTEGER NOT NULL DEFAULT 0;
+
+				ALTER TABLE candidate_claims ADD COLUMN similarity_key TEXT NOT NULL DEFAULT '';
+				ALTER TABLE candidate_claims ADD COLUMN similarity_score REAL NOT NULL DEFAULT 1;
+				ALTER TABLE candidate_claims ADD COLUMN duplicate_of_id INTEGER NOT NULL DEFAULT 0;
+			`,
+		},
 	}
 
 	for _, migration := range migrations {

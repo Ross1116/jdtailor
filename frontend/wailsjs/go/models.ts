@@ -85,6 +85,16 @@ export namespace main {
 	    source_fact_ids: number[];
 	    evidence_quotes: string[];
 	    technologies: string[];
+	    actions: string[];
+	    capabilities: string[];
+	    objects: string[];
+	    domains: string[];
+	    artifacts: string[];
+	    scope: string[];
+	    metrics: string[];
+	    outcomes: string[];
+	    profile_context: string[];
+	    evidence_strength: string;
 	    strength: string;
 	    allowed_use: string[];
 	    allowed_contexts: string[];
@@ -95,6 +105,9 @@ export namespace main {
 	    origin_type: string;
 	    status: string;
 	    risk_flags: string[];
+	    similarity_key: string;
+	    similarity_score: number;
+	    duplicate_of_id: number;
 	    review_note: string;
 	    created_at: string;
 	    updated_at: string;
@@ -111,6 +124,16 @@ export namespace main {
 	        this.source_fact_ids = source["source_fact_ids"];
 	        this.evidence_quotes = source["evidence_quotes"];
 	        this.technologies = source["technologies"];
+	        this.actions = source["actions"];
+	        this.capabilities = source["capabilities"];
+	        this.objects = source["objects"];
+	        this.domains = source["domains"];
+	        this.artifacts = source["artifacts"];
+	        this.scope = source["scope"];
+	        this.metrics = source["metrics"];
+	        this.outcomes = source["outcomes"];
+	        this.profile_context = source["profile_context"];
+	        this.evidence_strength = source["evidence_strength"];
 	        this.strength = source["strength"];
 	        this.allowed_use = source["allowed_use"];
 	        this.allowed_contexts = source["allowed_contexts"];
@@ -121,6 +144,9 @@ export namespace main {
 	        this.origin_type = source["origin_type"];
 	        this.status = source["status"];
 	        this.risk_flags = source["risk_flags"];
+	        this.similarity_key = source["similarity_key"];
+	        this.similarity_score = source["similarity_score"];
+	        this.duplicate_of_id = source["duplicate_of_id"];
 	        this.review_note = source["review_note"];
 	        this.created_at = source["created_at"];
 	        this.updated_at = source["updated_at"];
@@ -224,6 +250,7 @@ export namespace main {
 	export class CandidateSource {
 	    id: number;
 	    source_type: string;
+	    trust_tier: string;
 	    title: string;
 	    raw_text: string;
 	    file_path: string;
@@ -238,6 +265,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.source_type = source["source_type"];
+	        this.trust_tier = source["trust_tier"];
 	        this.title = source["title"];
 	        this.raw_text = source["raw_text"];
 	        this.file_path = source["file_path"];
@@ -267,6 +295,7 @@ export namespace main {
 	}
 	export class CreateCandidateSourceInput {
 	    source_type: string;
+	    trust_tier: string;
 	    title: string;
 	    raw_text: string;
 	
@@ -277,6 +306,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.source_type = source["source_type"];
+	        this.trust_tier = source["trust_tier"];
 	        this.title = source["title"];
 	        this.raw_text = source["raw_text"];
 	    }
@@ -325,6 +355,9 @@ export namespace main {
 	    context: string[];
 	    status: string;
 	    auto_approved: boolean;
+	    similarity_key: string;
+	    similarity_score: number;
+	    duplicate_of_id: number;
 	    review_note: string;
 	    created_at: string;
 	    updated_at: string;
@@ -348,6 +381,9 @@ export namespace main {
 	        this.context = source["context"];
 	        this.status = source["status"];
 	        this.auto_approved = source["auto_approved"];
+	        this.similarity_key = source["similarity_key"];
+	        this.similarity_score = source["similarity_score"];
+	        this.duplicate_of_id = source["duplicate_of_id"];
 	        this.review_note = source["review_note"];
 	        this.created_at = source["created_at"];
 	        this.updated_at = source["updated_at"];
@@ -416,6 +452,7 @@ export namespace main {
 	export class ImportCandidateSourceFileInput {
 	    path: string;
 	    source_type: string;
+	    trust_tier: string;
 	    title: string;
 	
 	    static createFrom(source: any = {}) {
@@ -426,6 +463,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.path = source["path"];
 	        this.source_type = source["source_type"];
+	        this.trust_tier = source["trust_tier"];
 	        this.title = source["title"];
 	    }
 	}
@@ -755,6 +793,20 @@ export namespace main {
 	        this.model = source["model"];
 	    }
 	}
+	export class SelectTailoredBulletDraftInput {
+	    id: number;
+	    selected: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SelectTailoredBulletDraftInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.selected = source["selected"];
+	    }
+	}
 	export class Settings {
 	    provider: string;
 	    model: string;
@@ -806,10 +858,15 @@ export namespace main {
 	    job_id: number;
 	    requirement_id: number;
 	    fact_ids: number[];
+	    claim_ids: number[];
+	    origin_heading: string;
+	    origin_type: string;
 	    draft_text: string;
 	    rationale: string;
 	    status: string;
 	    risk_flags: string[];
+	    selection_score: number;
+	    selected_for_resume: boolean;
 	    created_at: string;
 	    updated_at: string;
 	
@@ -823,10 +880,15 @@ export namespace main {
 	        this.job_id = source["job_id"];
 	        this.requirement_id = source["requirement_id"];
 	        this.fact_ids = source["fact_ids"];
+	        this.claim_ids = source["claim_ids"];
+	        this.origin_heading = source["origin_heading"];
+	        this.origin_type = source["origin_type"];
 	        this.draft_text = source["draft_text"];
 	        this.rationale = source["rationale"];
 	        this.status = source["status"];
 	        this.risk_flags = source["risk_flags"];
+	        this.selection_score = source["selection_score"];
+	        this.selected_for_resume = source["selected_for_resume"];
 	        this.created_at = source["created_at"];
 	        this.updated_at = source["updated_at"];
 	    }
@@ -879,6 +941,17 @@ export namespace main {
 	    id: number;
 	    claim_text: string;
 	    claim_type: string;
+	    actions: string[];
+	    capabilities: string[];
+	    objects: string[];
+	    technologies: string[];
+	    domains: string[];
+	    artifacts: string[];
+	    scope: string[];
+	    metrics: string[];
+	    outcomes: string[];
+	    profile_context: string[];
+	    evidence_strength: string;
 	    strength: string;
 	    allowed_use: string[];
 	    allowed_contexts: string[];
@@ -898,6 +971,17 @@ export namespace main {
 	        this.id = source["id"];
 	        this.claim_text = source["claim_text"];
 	        this.claim_type = source["claim_type"];
+	        this.actions = source["actions"];
+	        this.capabilities = source["capabilities"];
+	        this.objects = source["objects"];
+	        this.technologies = source["technologies"];
+	        this.domains = source["domains"];
+	        this.artifacts = source["artifacts"];
+	        this.scope = source["scope"];
+	        this.metrics = source["metrics"];
+	        this.outcomes = source["outcomes"];
+	        this.profile_context = source["profile_context"];
+	        this.evidence_strength = source["evidence_strength"];
 	        this.strength = source["strength"];
 	        this.allowed_use = source["allowed_use"];
 	        this.allowed_contexts = source["allowed_contexts"];

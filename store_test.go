@@ -57,6 +57,40 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	}
 }
 
+func TestMigrationAddsAtomBankAndDraftSelectionColumns(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	for _, column := range []string{"actions_json", "capabilities_json", "objects_json", "domains_json", "artifacts_json", "scope_json", "metrics_json", "outcomes_json", "profile_context_json", "evidence_strength"} {
+		if !tableHasColumn(t, store, "candidate_claims", column) {
+			t.Fatalf("candidate_claims missing %s", column)
+		}
+	}
+	for _, column := range []string{"trust_tier"} {
+		if !tableHasColumn(t, store, "candidate_sources", column) {
+			t.Fatalf("candidate_sources missing %s", column)
+		}
+	}
+	for _, column := range []string{"similarity_key", "similarity_score", "duplicate_of_id"} {
+		if !tableHasColumn(t, store, "evidence_facts", column) {
+			t.Fatalf("evidence_facts missing %s", column)
+		}
+	}
+	for _, column := range []string{"similarity_key", "similarity_score", "duplicate_of_id"} {
+		if !tableHasColumn(t, store, "candidate_claims", column) {
+			t.Fatalf("candidate_claims missing %s", column)
+		}
+	}
+	for _, column := range []string{"claim_ids_json", "origin_heading", "origin_type", "selection_score", "selected_for_resume"} {
+		if !tableHasColumn(t, store, "tailored_bullet_drafts", column) {
+			t.Fatalf("tailored_bullet_drafts missing %s", column)
+		}
+	}
+}
+
 func TestSettingsSaveLoad(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
@@ -648,6 +682,31 @@ func TestDeleteAllEvidenceFactsClearsDependentJobOutputs(t *testing.T) {
 		t.Fatalf("replaceJobRequirements() error = %v", err)
 	}
 	_, facts := createFactsForJobTests(t, store)
+	_, err = store.replaceCandidateClaims([]parsedCandidateClaim{{
+		Label:            "FastAPI backend APIs",
+		ClaimType:        "experience",
+		SourceFactIDs:    []int64{facts[0].ID},
+		Actions:          []string{"built"},
+		Capabilities:     []string{"API development"},
+		Technologies:     []string{"FastAPI"},
+		Scope:            []string{"planning workflows"},
+		EvidenceStrength: "direct",
+		Strength:         "strong",
+		AllowedUse:       []string{"experience_bullet"},
+		AllowedContexts:  []string{"backend engineering"},
+	}}, []factPromptContext{{
+		ID:             facts[0].ID,
+		Status:         factStatusApproved,
+		Confidence:     "high",
+		FactText:       facts[0].FactText,
+		EvidenceQuote:  facts[0].EvidenceQuote,
+		Technologies:   facts[0].Technologies,
+		SectionHeading: facts[0].OriginHeading,
+		SectionType:    facts[0].OriginType,
+	}})
+	if err != nil {
+		t.Fatalf("replaceCandidateClaims() error = %v", err)
+	}
 	if _, err := store.replaceJobMatches(job.ID, []parsedJobMatch{{
 		RequirementID:  requirements[0].ID,
 		FactID:         facts[0].ID,
@@ -656,11 +715,13 @@ func TestDeleteAllEvidenceFactsClearsDependentJobOutputs(t *testing.T) {
 	}}, requirements, []factPromptContext{{ID: facts[0].ID, Status: facts[0].Status}}); err != nil {
 		t.Fatalf("replaceJobMatches() error = %v", err)
 	}
+	testClaims := testClaimsForFacts(facts)
 	if _, err := store.replaceBulletDrafts(job.ID, []parsedBulletDraft{{
 		RequirementID: requirements[0].ID,
+		ClaimIDs:      []int64{testClaims[0].ID},
 		FactIDs:       []int64{facts[0].ID},
 		DraftText:     "Built API workflows with reliable backend delivery.",
-	}}, requirements, []factPromptContext{{ID: facts[0].ID, SectionHeading: "Sitespace", SectionType: "experience"}}); err != nil {
+	}}, requirements, []factPromptContext{{ID: facts[0].ID, SectionHeading: "Sitespace", SectionType: "experience"}}, testClaims); err != nil {
 		t.Fatalf("replaceBulletDrafts() error = %v", err)
 	}
 	if _, err := store.GenerateFitAnalysis(job.ID); err != nil {
@@ -869,6 +930,44 @@ func TestInsertExtractedFactsReviewPolicy(t *testing.T) {
 	}
 }
 
+func TestTrustedExtendedResumeAutoApprovesAndSkipsDuplicateFacts(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	source, err := store.CreateCandidateSource(CreateCandidateSourceInput{
+		SourceType: "extended_resume",
+		TrustTier:  "trusted_ai_summary",
+		Title:      "Extended resume",
+		RawText:    "PROJECTS\nBuilt FastAPI APIs.\nBuilt FastAPI APIs.",
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidateSource() error = %v", err)
+	}
+	sections, err := store.DetectSourceSections(source.ID)
+	if err != nil {
+		t.Fatalf("DetectSourceSections() error = %v", err)
+	}
+	inserted, err := store.insertExtractedFacts(sections[0], []extractedFact{
+		{FactText: "actions=built; artifact=FastAPI APIs; tools=FastAPI", EvidenceQuote: "Built FastAPI APIs.", Technologies: []string{"FastAPI"}, Confidence: "medium"},
+		{FactText: "actions=implemented; artifact=FastAPI APIs; tools=FastAPI", EvidenceQuote: "Built FastAPI APIs.", Technologies: []string{"FastAPI"}, Confidence: "medium"},
+	})
+	if err != nil {
+		t.Fatalf("insertExtractedFacts() error = %v", err)
+	}
+	if len(inserted) != 2 {
+		t.Fatalf("inserted len = %d", len(inserted))
+	}
+	if inserted[0].Status != factStatusApproved || !inserted[0].AutoApproved {
+		t.Fatalf("first fact = %+v, want auto-approved", inserted[0])
+	}
+	if inserted[1].Status != factStatusRejected || inserted[1].DuplicateOfID != inserted[0].ID || !listContains(inserted[1].RiskFlags, "duplicate_fact") {
+		t.Fatalf("duplicate fact = %+v, want rejected duplicate of %d", inserted[1], inserted[0].ID)
+	}
+}
+
 func TestJobContextMigrationCreatesTables(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
@@ -946,12 +1045,14 @@ func TestJobDescriptionCascadeWorkflow(t *testing.T) {
 	if matches[0].FactStatus != facts[0].Status {
 		t.Fatalf("match fact status = %q, want %q", matches[0].FactStatus, facts[0].Status)
 	}
+	testClaims := testClaimsForFacts(facts)
 	if _, err := store.replaceBulletDrafts(updated.ID, []parsedBulletDraft{{
 		RequirementID: requirements[0].ID,
+		ClaimIDs:      []int64{testClaims[0].ID},
 		FactIDs:       []int64{facts[0].ID},
 		DraftText:     "Built FastAPI APIs for production planning workflows.",
 		Rationale:     "Uses exact FastAPI evidence.",
-	}}, requirements, []factPromptContext{{ID: facts[0].ID}}); err != nil {
+	}}, requirements, []factPromptContext{{ID: facts[0].ID}}, testClaims); err != nil {
 		t.Fatalf("replaceBulletDrafts() error = %v", err)
 	}
 
@@ -1051,6 +1152,31 @@ func TestJobLLMWorkflowUsesAllFactStatusesAndDraftReview(t *testing.T) {
 		t.Fatalf("CreateJobDescription() error = %v", err)
 	}
 	_, facts := createFactsForJobTests(t, store)
+	claims, err := store.replaceCandidateClaims([]parsedCandidateClaim{{
+		Label:            "FastAPI backend APIs",
+		ClaimType:        "experience",
+		SourceFactIDs:    []int64{facts[0].ID},
+		Actions:          []string{"built"},
+		Capabilities:     []string{"API development"},
+		Technologies:     []string{"FastAPI"},
+		Scope:            []string{"planning workflows"},
+		EvidenceStrength: "direct",
+		Strength:         "strong",
+		AllowedUse:       []string{"experience_bullet"},
+		AllowedContexts:  []string{"backend engineering"},
+	}}, []factPromptContext{{
+		ID:             facts[0].ID,
+		Status:         factStatusApproved,
+		Confidence:     "high",
+		FactText:       facts[0].FactText,
+		EvidenceQuote:  facts[0].EvidenceQuote,
+		Technologies:   facts[0].Technologies,
+		SectionHeading: facts[0].OriginHeading,
+		SectionType:    facts[0].OriginType,
+	}})
+	if err != nil {
+		t.Fatalf("replaceCandidateClaims() error = %v", err)
+	}
 
 	call := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1069,7 +1195,7 @@ func TestJobLLMWorkflowUsesAllFactStatusesAndDraftReview(t *testing.T) {
 			}
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"matches\":[{\"requirement_id\":1,\"fact_id\":1,\"score\":0.9,\"rationale\":\"Direct evidence\",\"coverage_status\":\"strong\"},{\"requirement_id\":1,\"fact_id\":1,\"score\":0,\"rationale\":\"No evidence\",\"coverage_status\":\"gap\"},{\"requirement_id\":1,\"fact_id\":999,\"score\":1,\"rationale\":\"Invalid\",\"coverage_status\":\"strong\"}]}"}}]}`))
 		case 3:
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"drafts\":[{\"requirement_id\":1,\"fact_ids\":[1,999],\"draft_text\":\"Built FastAPI APIs for planning workflows.\",\"rationale\":\"Direct evidence\",\"risk_flags\":[]}]}"}}]}`))
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"choices":[{"message":{"role":"assistant","content":"{\"drafts\":[{\"requirement_id\":1,\"claim_ids\":[%d],\"fact_ids\":[1,999],\"draft_text\":\"Built FastAPI APIs for planning workflows.\",\"rationale\":\"Direct evidence\",\"risk_flags\":[]}]}"}}]}`, claims[0].ID)))
 		default:
 			t.Fatalf("unexpected LLM call %d", call)
 		}
@@ -1140,19 +1266,32 @@ func TestBulletDraftsRespectOriginBudgets(t *testing.T) {
 	for i := 1; i <= 6; i++ {
 		id := int64(i)
 		facts = append(facts, factPromptContext{ID: id, Status: "approved", SectionHeading: "Acme | Backend Engineer", SectionType: "experience"})
-		drafts = append(drafts, parsedBulletDraft{RequirementID: requirements[0].ID, FactIDs: []int64{id}, DraftText: fmt.Sprintf("Built backend API workflow %d with reliable integration behavior.", i)})
+		drafts = append(drafts, parsedBulletDraft{RequirementID: requirements[0].ID, ClaimIDs: []int64{id}, FactIDs: []int64{id}, DraftText: fmt.Sprintf("Built backend API workflow %d with reliable integration behavior.", i)})
 	}
 	for i := 7; i <= 9; i++ {
 		id := int64(i)
 		facts = append(facts, factPromptContext{ID: id, Status: "approved", SectionHeading: "CueMate", SectionType: "project"})
-		drafts = append(drafts, parsedBulletDraft{RequirementID: requirements[0].ID, FactIDs: []int64{id}, DraftText: fmt.Sprintf("Built project API workflow %d with reliable integration behavior.", i)})
+		drafts = append(drafts, parsedBulletDraft{RequirementID: requirements[0].ID, ClaimIDs: []int64{id}, FactIDs: []int64{id}, DraftText: fmt.Sprintf("Built project API workflow %d with reliable integration behavior.", i)})
 	}
-	inserted, err := store.replaceBulletDrafts(job.ID, drafts, requirements, facts)
+	inserted, err := store.replaceBulletDrafts(job.ID, drafts, requirements, facts, testClaimsForPromptFacts(facts))
 	if err != nil {
 		t.Fatalf("replaceBulletDrafts() error = %v", err)
 	}
 	if len(inserted) != 7 {
 		t.Fatalf("drafts len = %d, want 7: %+v", len(inserted), inserted)
+	}
+	selected, err := store.AutoSelectResumeBullets(job.ID)
+	if err != nil {
+		t.Fatalf("AutoSelectResumeBullets() error = %v", err)
+	}
+	selectedCount := 0
+	for _, draft := range selected {
+		if draft.SelectedForResume {
+			selectedCount++
+		}
+	}
+	if selectedCount != 7 {
+		t.Fatalf("selected drafts = %d, want 7: %+v", selectedCount, selected)
 	}
 }
 
@@ -1180,11 +1319,13 @@ func TestBulletDraftsAddHumanStyleRiskFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replaceJobRequirements() error = %v", err)
 	}
+	testClaims := testClaimsForPromptFacts([]factPromptContext{{ID: 1, Status: "approved", SectionHeading: "Acme", SectionType: "experience"}})
 	inserted, err := store.replaceBulletDrafts(job.ID, []parsedBulletDraft{{
 		RequirementID: requirements[0].ID,
+		ClaimIDs:      []int64{1},
 		FactIDs:       []int64{1},
 		DraftText:     "- Leveraged cutting-edge APIs to enhance efficiency and drive growth across business outcomes with seamless dynamic execution for stakeholder value.",
-	}}, requirements, []factPromptContext{{ID: 1, Status: "approved", SectionHeading: "Acme", SectionType: "experience"}})
+	}}, requirements, []factPromptContext{{ID: 1, Status: "approved", SectionHeading: "Acme", SectionType: "experience"}}, testClaims)
 	if err != nil {
 		t.Fatalf("replaceBulletDrafts() error = %v", err)
 	}
@@ -1232,20 +1373,37 @@ func TestCandidateClaimLedgerWorkflow(t *testing.T) {
 	if len(claims) != 1 || claims[0].Status != claimStatusApproved || len(claims[0].SourceFactIDs) != 1 {
 		t.Fatalf("claims = %+v", claims)
 	}
+	if strings.HasSuffix(claims[0].ClaimText, ".") || len(strings.Fields(claims[0].ClaimText)) > 10 {
+		t.Fatalf("claim label is sentence-shaped: %q", claims[0].ClaimText)
+	}
+	if len(claims[0].Actions) == 0 || len(claims[0].Capabilities) == 0 {
+		t.Fatalf("claim atoms missing: %+v", claims[0])
+	}
 
 	updated, err := store.UpdateCandidateClaimReview(UpdateCandidateClaimReviewInput{
-		ID:              claims[0].ID,
-		ClaimText:       claims[0].ClaimText,
-		ClaimType:       claims[0].ClaimType,
-		Strength:        claims[0].Strength,
-		AllowedUse:      claims[0].AllowedUse,
-		AllowedContexts: claims[0].AllowedContexts,
-		BlockedContexts: claims[0].BlockedContexts,
-		SafePhrasings:   claims[0].SafePhrasings,
-		UnsafePhrasings: claims[0].UnsafePhrasings,
-		Status:          claimStatusApprovedRestricted,
-		RiskFlags:       []string{"manual_limit"},
-		ReviewNote:      "Keep narrow.",
+		ID:               claims[0].ID,
+		ClaimText:        claims[0].ClaimText,
+		ClaimType:        claims[0].ClaimType,
+		Actions:          claims[0].Actions,
+		Capabilities:     claims[0].Capabilities,
+		Objects:          claims[0].Objects,
+		Technologies:     claims[0].Technologies,
+		Domains:          claims[0].Domains,
+		Artifacts:        claims[0].Artifacts,
+		Scope:            claims[0].Scope,
+		Metrics:          claims[0].Metrics,
+		Outcomes:         claims[0].Outcomes,
+		ProfileContext:   claims[0].ProfileContext,
+		EvidenceStrength: claims[0].EvidenceStrength,
+		Strength:         claims[0].Strength,
+		AllowedUse:       claims[0].AllowedUse,
+		AllowedContexts:  claims[0].AllowedContexts,
+		BlockedContexts:  claims[0].BlockedContexts,
+		SafePhrasings:    claims[0].SafePhrasings,
+		UnsafePhrasings:  claims[0].UnsafePhrasings,
+		Status:           claimStatusApprovedRestricted,
+		RiskFlags:        []string{"manual_limit"},
+		ReviewNote:       "Keep narrow.",
 	})
 	if err != nil {
 		t.Fatalf("UpdateCandidateClaimReview() error = %v", err)
@@ -1279,6 +1437,47 @@ func TestCandidateClaimsBlockUnsupportedScope(t *testing.T) {
 		if !strings.Contains(flags, want) {
 			t.Fatalf("flags = %+v, missing %s", claims[0].RiskFlags, want)
 		}
+	}
+}
+
+func TestCandidateClaimsMergeSimilarAtomRecords(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	claims, err := store.replaceCandidateClaims([]parsedCandidateClaim{
+		{
+			Label:         "FastAPI booking APIs",
+			ClaimType:     "experience",
+			SourceFactIDs: []int64{101},
+			Actions:       []string{"built"},
+			Capabilities:  []string{"API development"},
+			Technologies:  []string{"FastAPI"},
+			Scope:         []string{"booking workflows"},
+		},
+		{
+			Label:         "FastAPI booking endpoints",
+			ClaimType:     "experience",
+			SourceFactIDs: []int64{102},
+			Actions:       []string{"implemented"},
+			Capabilities:  []string{"API development"},
+			Technologies:  []string{"FastAPI"},
+			Scope:         []string{"booking workflows"},
+		},
+	}, []factPromptContext{
+		{ID: 101, Status: factStatusApproved, Confidence: "high", FactText: "actions=built; artifact=booking APIs; tools=FastAPI", EvidenceQuote: "Built FastAPI booking APIs.", Technologies: []string{"FastAPI"}, SectionHeading: "Sitespace", SectionType: "experience"},
+		{ID: 102, Status: factStatusApproved, Confidence: "high", FactText: "actions=implemented; artifact=booking APIs; tools=FastAPI", EvidenceQuote: "Implemented FastAPI booking endpoints.", Technologies: []string{"FastAPI"}, SectionHeading: "Sitespace", SectionType: "experience"},
+	})
+	if err != nil {
+		t.Fatalf("replaceCandidateClaims() error = %v", err)
+	}
+	if len(claims) != 1 || len(claims[0].SourceFactIDs) != 2 {
+		t.Fatalf("claims = %+v, want one merged claim with two facts", claims)
+	}
+	if claims[0].SimilarityKey == "" || claims[0].SimilarityScore != 1 {
+		t.Fatalf("similarity metadata missing: %+v", claims[0])
 	}
 }
 
@@ -1686,6 +1885,79 @@ func createFactsForJobTests(t *testing.T, store *Store) (SourceSection, []Eviden
 	}
 	facts[1] = rejected
 	return sections[0], facts
+}
+
+func testClaimsForFacts(facts []EvidenceFact) []CandidateClaim {
+	claims := []CandidateClaim{}
+	for index, fact := range facts {
+		claims = append(claims, CandidateClaim{
+			ID:               int64(index + 1),
+			ClaimText:        "FastAPI backend APIs",
+			ClaimType:        firstNonEmpty(fact.OriginType, "experience"),
+			SourceFactIDs:    []int64{fact.ID},
+			Technologies:     fact.Technologies,
+			Actions:          []string{"built"},
+			Capabilities:     []string{"API development"},
+			Scope:            []string{"planning workflows"},
+			EvidenceStrength: "direct",
+			Strength:         "strong",
+			AllowedUse:       []string{"experience_bullet"},
+			AllowedContexts:  []string{"backend engineering"},
+			OriginHeading:    fact.OriginHeading,
+			OriginType:       firstNonEmpty(fact.OriginType, "experience"),
+			Status:           claimStatusApproved,
+		})
+	}
+	return claims
+}
+
+func testClaimsForPromptFacts(facts []factPromptContext) []CandidateClaim {
+	claims := []CandidateClaim{}
+	for _, fact := range facts {
+		claims = append(claims, CandidateClaim{
+			ID:               fact.ID,
+			ClaimText:        "API workflow",
+			ClaimType:        firstNonEmpty(fact.SectionType, "experience"),
+			SourceFactIDs:    []int64{fact.ID},
+			Actions:          []string{"built"},
+			Capabilities:     []string{"API development"},
+			Scope:            []string{"workflow"},
+			EvidenceStrength: "direct",
+			Strength:         "strong",
+			AllowedUse:       []string{"experience_bullet"},
+			AllowedContexts:  []string{"backend engineering"},
+			OriginHeading:    fact.SectionHeading,
+			OriginType:       firstNonEmpty(fact.SectionType, "experience"),
+			Status:           claimStatusApproved,
+		})
+	}
+	return claims
+}
+
+func tableHasColumn(t *testing.T, store *Store, table string, column string) bool {
+	t.Helper()
+	rows, err := store.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		t.Fatalf("table_info %s: %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table_info %s: %v", table, err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info rows %s: %v", table, err)
+	}
+	return false
 }
 
 func TestHelperProcess(t *testing.T) {

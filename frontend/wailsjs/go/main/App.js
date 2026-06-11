@@ -6,6 +6,10 @@ export function AnalyzeJobDescription(arg1) {
   return window['go']['main']['App']['AnalyzeJobDescription'](arg1);
 }
 
+export function AutoSelectResumeBullets(arg1) {
+  return window['go']['main']['App']['AutoSelectResumeBullets'](arg1);
+}
+
 export function BuildJobMatchMap(arg1) {
   return window['go']['main']['App']['BuildJobMatchMap'](arg1);
 }
@@ -188,6 +192,10 @@ export function SaveCandidateProfile(arg1) {
 
 export function SaveSettings(arg1) {
   return window['go']['main']['App']['SaveSettings'](arg1);
+}
+
+export function SelectTailoredBulletDraft(arg1) {
+  return window['go']['main']['App']['SelectTailoredBulletDraft'](arg1);
 }
 
 export function TestLLM() {

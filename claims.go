@@ -21,40 +21,64 @@ const (
 )
 
 type CandidateClaim struct {
-	ID              int64    `json:"id"`
-	ClaimText       string   `json:"claim_text"`
-	ClaimType       string   `json:"claim_type"`
-	SourceFactIDs   []int64  `json:"source_fact_ids"`
-	EvidenceQuotes  []string `json:"evidence_quotes"`
-	Technologies    []string `json:"technologies"`
-	Strength        string   `json:"strength"`
-	AllowedUse      []string `json:"allowed_use"`
-	AllowedContexts []string `json:"allowed_contexts"`
-	BlockedContexts []string `json:"blocked_contexts"`
-	SafePhrasings   []string `json:"safe_phrasings"`
-	UnsafePhrasings []string `json:"unsafe_phrasings"`
-	OriginHeading   string   `json:"origin_heading"`
-	OriginType      string   `json:"origin_type"`
-	Status          string   `json:"status"`
-	RiskFlags       []string `json:"risk_flags"`
-	ReviewNote      string   `json:"review_note"`
-	CreatedAt       string   `json:"created_at"`
-	UpdatedAt       string   `json:"updated_at"`
+	ID               int64    `json:"id"`
+	ClaimText        string   `json:"claim_text"`
+	ClaimType        string   `json:"claim_type"`
+	SourceFactIDs    []int64  `json:"source_fact_ids"`
+	EvidenceQuotes   []string `json:"evidence_quotes"`
+	Technologies     []string `json:"technologies"`
+	Actions          []string `json:"actions"`
+	Capabilities     []string `json:"capabilities"`
+	Objects          []string `json:"objects"`
+	Domains          []string `json:"domains"`
+	Artifacts        []string `json:"artifacts"`
+	Scope            []string `json:"scope"`
+	Metrics          []string `json:"metrics"`
+	Outcomes         []string `json:"outcomes"`
+	ProfileContext   []string `json:"profile_context"`
+	EvidenceStrength string   `json:"evidence_strength"`
+	Strength         string   `json:"strength"`
+	AllowedUse       []string `json:"allowed_use"`
+	AllowedContexts  []string `json:"allowed_contexts"`
+	BlockedContexts  []string `json:"blocked_contexts"`
+	SafePhrasings    []string `json:"safe_phrasings"`
+	UnsafePhrasings  []string `json:"unsafe_phrasings"`
+	OriginHeading    string   `json:"origin_heading"`
+	OriginType       string   `json:"origin_type"`
+	Status           string   `json:"status"`
+	RiskFlags        []string `json:"risk_flags"`
+	SimilarityKey    string   `json:"similarity_key"`
+	SimilarityScore  float64  `json:"similarity_score"`
+	DuplicateOfID    int64    `json:"duplicate_of_id"`
+	ReviewNote       string   `json:"review_note"`
+	CreatedAt        string   `json:"created_at"`
+	UpdatedAt        string   `json:"updated_at"`
 }
 
 type UpdateCandidateClaimReviewInput struct {
-	ID              int64    `json:"id"`
-	ClaimText       string   `json:"claim_text"`
-	ClaimType       string   `json:"claim_type"`
-	Strength        string   `json:"strength"`
-	AllowedUse      []string `json:"allowed_use"`
-	AllowedContexts []string `json:"allowed_contexts"`
-	BlockedContexts []string `json:"blocked_contexts"`
-	SafePhrasings   []string `json:"safe_phrasings"`
-	UnsafePhrasings []string `json:"unsafe_phrasings"`
-	Status          string   `json:"status"`
-	RiskFlags       []string `json:"risk_flags"`
-	ReviewNote      string   `json:"review_note"`
+	ID               int64    `json:"id"`
+	ClaimText        string   `json:"claim_text"`
+	ClaimType        string   `json:"claim_type"`
+	Actions          []string `json:"actions"`
+	Capabilities     []string `json:"capabilities"`
+	Objects          []string `json:"objects"`
+	Technologies     []string `json:"technologies"`
+	Domains          []string `json:"domains"`
+	Artifacts        []string `json:"artifacts"`
+	Scope            []string `json:"scope"`
+	Metrics          []string `json:"metrics"`
+	Outcomes         []string `json:"outcomes"`
+	ProfileContext   []string `json:"profile_context"`
+	EvidenceStrength string   `json:"evidence_strength"`
+	Strength         string   `json:"strength"`
+	AllowedUse       []string `json:"allowed_use"`
+	AllowedContexts  []string `json:"allowed_contexts"`
+	BlockedContexts  []string `json:"blocked_contexts"`
+	SafePhrasings    []string `json:"safe_phrasings"`
+	UnsafePhrasings  []string `json:"unsafe_phrasings"`
+	Status           string   `json:"status"`
+	RiskFlags        []string `json:"risk_flags"`
+	ReviewNote       string   `json:"review_note"`
 }
 
 type BlockedClaim struct {
@@ -90,16 +114,28 @@ type parsedClaimsResponse struct {
 }
 
 type parsedCandidateClaim struct {
-	ClaimText       string   `json:"claim_text"`
-	ClaimType       string   `json:"claim_type"`
-	SourceFactIDs   []int64  `json:"source_fact_ids"`
-	Strength        string   `json:"strength"`
-	AllowedUse      []string `json:"allowed_use"`
-	AllowedContexts []string `json:"allowed_contexts"`
-	BlockedContexts []string `json:"blocked_contexts"`
-	SafePhrasings   []string `json:"safe_phrasings"`
-	UnsafePhrasings []string `json:"unsafe_phrasings"`
-	RiskFlags       []string `json:"risk_flags"`
+	ClaimText        string   `json:"claim_text"`
+	Label            string   `json:"label"`
+	ClaimType        string   `json:"claim_type"`
+	SourceFactIDs    []int64  `json:"source_fact_ids"`
+	Actions          []string `json:"actions"`
+	Capabilities     []string `json:"capabilities"`
+	Objects          []string `json:"objects"`
+	Technologies     []string `json:"technologies"`
+	Domains          []string `json:"domains"`
+	Artifacts        []string `json:"artifacts"`
+	Scope            []string `json:"scope"`
+	Metrics          []string `json:"metrics"`
+	Outcomes         []string `json:"outcomes"`
+	ProfileContext   []string `json:"profile_context"`
+	EvidenceStrength string   `json:"evidence_strength"`
+	Strength         string   `json:"strength"`
+	AllowedUse       []string `json:"allowed_use"`
+	AllowedContexts  []string `json:"allowed_contexts"`
+	BlockedContexts  []string `json:"blocked_contexts"`
+	SafePhrasings    []string `json:"safe_phrasings"`
+	UnsafePhrasings  []string `json:"unsafe_phrasings"`
+	RiskFlags        []string `json:"risk_flags"`
 }
 
 func (s *Store) GenerateCandidateClaims(ctx context.Context, client *http.Client) ([]CandidateClaim, error) {
@@ -117,21 +153,23 @@ func (s *Store) GenerateCandidateClaims(ctx context.Context, client *http.Client
 	factJSON, _ := json.Marshal(promptFacts)
 	rules := s.promptRuleDigest("resume", "validation")
 	system := `You are JD Tailor's claim-ledger builder. Return strict JSON only.
-Convert evidence facts into reusable resume claims without inventing unsupported scope.`
+Convert evidence facts into compact profile-bank atoms without inventing unsupported scope.`
 	user := fmt.Sprintf(`# Task
-Generate candidate claims from evidence facts.
+Generate atom-first candidate profile records from evidence facts.
 
 # Output JSON schema
-{"claims":[{"claim_text":"","claim_type":"experience|project|skills|education","source_fact_ids":[0],"strength":"strong|moderate|weak","allowed_use":[],"allowed_contexts":[],"blocked_contexts":[],"safe_phrasings":[],"unsafe_phrasings":[],"risk_flags":[]}]}
+{"claims":[{"label":"","claim_type":"experience|project|skills|education","source_fact_ids":[0],"actions":[],"capabilities":[],"objects":[],"technologies":[],"domains":[],"artifacts":[],"scope":[],"metrics":[],"outcomes":[],"profile_context":[],"evidence_strength":"direct|inferred|weak","strength":"strong|moderate|weak","allowed_use":[],"allowed_contexts":[],"blocked_contexts":[],"safe_phrasings":[],"unsafe_phrasings":[],"risk_flags":[]}]}
 
 # Rules
 - Use only IDs from <evidence_facts_json>.
-- Claim text must be traceable to the source facts.
+- label must be a short searchable label, not a resume bullet and not a full sentence.
+- Store reusable keywords/phrases in atom arrays. Keep each atom short.
+- Do not output polished resume bullets, marketing phrasing, or complete achievement sentences.
 - Do not add tools, metrics, leadership, seniority, cloud ownership, ML research, Kubernetes ownership, production scope, or domain claims unless facts prove them.
-- Prefer claims that can later become resume bullets, summary lines, or skills entries.
+- Prefer records that can later support resume bullets, summary lines, or skills entries.
 - Set blocked_contexts and unsafe_phrasings for likely overclaims.
 - Mark project evidence as project unless the fact origin is employment.
-- Keep claims plain and technical.
+- Keep labels and atoms plain, technical, and compact.
 
 # Style and validation rules
 %s
@@ -170,7 +208,9 @@ func (s *Store) listFactsForClaims() ([]factPromptContext, error) {
 func (s *Store) ListCandidateClaims(status string) ([]CandidateClaim, error) {
 	query := `SELECT id, claim_text, claim_type, source_fact_ids_json, evidence_quotes_json, technologies_json,
 		strength, allowed_use_json, allowed_contexts_json, blocked_contexts_json, safe_phrasings_json,
-		unsafe_phrasings_json, origin_heading, origin_type, status, risk_flags_json, review_note, created_at, updated_at
+		unsafe_phrasings_json, origin_heading, origin_type, status, risk_flags_json, review_note, created_at, updated_at,
+		actions_json, capabilities_json, objects_json, domains_json, artifacts_json, scope_json, metrics_json,
+		outcomes_json, profile_context_json, evidence_strength, similarity_key, similarity_score, duplicate_of_id
 		FROM candidate_claims`
 	args := []any{}
 	if strings.TrimSpace(status) != "" && status != "all" {
@@ -194,22 +234,57 @@ func (s *Store) UpdateCandidateClaimReview(input UpdateCandidateClaimReviewInput
 	if claimText == "" {
 		return CandidateClaim{}, errors.New("claim text is required")
 	}
+	techJSON, _ := encodeStringList(input.Technologies)
+	actionsJSON, _ := encodeStringList(input.Actions)
+	capabilitiesJSON, _ := encodeStringList(input.Capabilities)
+	objectsJSON, _ := encodeStringList(input.Objects)
+	domainsJSON, _ := encodeStringList(input.Domains)
+	artifactsJSON, _ := encodeStringList(input.Artifacts)
+	scopeJSON, _ := encodeStringList(input.Scope)
+	metricsJSON, _ := encodeStringList(input.Metrics)
+	outcomesJSON, _ := encodeStringList(input.Outcomes)
+	profileContextJSON, _ := encodeStringList(input.ProfileContext)
+	similarityKey := normalizedSimilarityKey(strings.Join([]string{
+		claimText,
+		strings.Join(input.Actions, " "),
+		strings.Join(input.Capabilities, " "),
+		strings.Join(input.Objects, " "),
+		strings.Join(input.Domains, " "),
+		strings.Join(input.Artifacts, " "),
+		strings.Join(input.Scope, " "),
+		strings.Join(input.Metrics, " "),
+		strings.Join(input.Outcomes, " "),
+	}, " "), input.Technologies, input.ProfileContext)
 	allowedUseJSON, _ := encodeStringList(input.AllowedUse)
 	allowedContextsJSON, _ := encodeStringList(input.AllowedContexts)
 	blockedContextsJSON, _ := encodeStringList(input.BlockedContexts)
 	safeJSON, _ := encodeStringList(input.SafePhrasings)
 	unsafeJSON, _ := encodeStringList(input.UnsafePhrasings)
-	riskFlags := normalizeStringList(append(input.RiskFlags, styleRiskFlags(claimText)...))
+	riskFlags := normalizeStringList(append(input.RiskFlags, styleRiskFlags(strings.Join([]string{claimText, strings.Join(input.Actions, " "), strings.Join(input.Capabilities, " ")}, " "))...))
 	riskJSON, _ := encodeStringList(riskFlags)
 	_, err := s.db.ExecContext(
 		context.Background(),
 		`UPDATE candidate_claims
-		SET claim_text = ?, claim_type = ?, strength = ?, allowed_use_json = ?, allowed_contexts_json = ?,
-			blocked_contexts_json = ?, safe_phrasings_json = ?, unsafe_phrasings_json = ?, status = ?,
-			risk_flags_json = ?, review_note = ?, updated_at = ?
+		SET claim_text = ?, claim_type = ?, technologies_json = ?, actions_json = ?, capabilities_json = ?,
+			objects_json = ?, domains_json = ?, artifacts_json = ?, scope_json = ?, metrics_json = ?,
+			outcomes_json = ?, profile_context_json = ?, evidence_strength = ?, strength = ?,
+			allowed_use_json = ?, allowed_contexts_json = ?, blocked_contexts_json = ?, safe_phrasings_json = ?,
+			unsafe_phrasings_json = ?, status = ?, risk_flags_json = ?, review_note = ?, updated_at = ?
+			, similarity_key = ?, similarity_score = 1, duplicate_of_id = 0
 		WHERE id = ?`,
 		claimText,
 		normalizeClaimType(input.ClaimType),
+		techJSON,
+		actionsJSON,
+		capabilitiesJSON,
+		objectsJSON,
+		domainsJSON,
+		artifactsJSON,
+		scopeJSON,
+		metricsJSON,
+		outcomesJSON,
+		profileContextJSON,
+		normalizeEvidenceStrength(input.EvidenceStrength),
 		normalizeClaimStrength(input.Strength),
 		allowedUseJSON,
 		allowedContextsJSON,
@@ -220,6 +295,7 @@ func (s *Store) UpdateCandidateClaimReview(input UpdateCandidateClaimReviewInput
 		riskJSON,
 		strings.TrimSpace(input.ReviewNote),
 		time.Now().UTC().Format(time.RFC3339),
+		similarityKey,
 		input.ID,
 	)
 	if err != nil {
@@ -360,6 +436,7 @@ func (s *Store) replaceCandidateClaims(parsed []parsedCandidateClaim, facts []fa
 	for _, fact := range facts {
 		factsByID[fact.ID] = fact
 	}
+	parsed = mergeSimilarParsedClaims(parsed, factsByID)
 	blocked, err := s.ListBlockedClaims()
 	if err != nil {
 		return nil, err
@@ -376,7 +453,7 @@ func (s *Store) replaceCandidateClaims(parsed []parsedCandidateClaim, facts []fa
 	ids := []int64{}
 	seen := map[string]bool{}
 	for _, claim := range parsed {
-		claim.ClaimText = strings.TrimSpace(claim.ClaimText)
+		claim.ClaimText = normalizeClaimLabel(claim)
 		if claim.ClaimText == "" {
 			continue
 		}
@@ -384,7 +461,8 @@ func (s *Store) replaceCandidateClaims(parsed []parsedCandidateClaim, facts []fa
 		if len(validFactIDs) == 0 {
 			continue
 		}
-		key := strings.ToLower(claim.ClaimText)
+		claim = enrichClaimAtoms(claim, sourceFacts)
+		key := strings.ToLower(strings.Join(append([]string{claim.ClaimText}, claim.SourceFactIDsKey()...), "|"))
 		if seen[key] {
 			continue
 		}
@@ -396,8 +474,18 @@ func (s *Store) replaceCandidateClaims(parsed []parsedCandidateClaim, facts []fa
 			claim.BlockedContexts = normalizeStringList(append(claim.BlockedContexts, "blocked_by_negative_profile"))
 		}
 		sourceFactJSON, _ := encodeInt64List(validFactIDs)
+		similarityKey := claimSimilarityKey(claim, sourceFacts)
 		evidenceJSON, _ := encodeStringList(evidenceQuotes)
-		techJSON, _ := encodeStringList(firstNonEmptyList(claim.Technologies(), tech))
+		techJSON, _ := encodeStringList(firstNonEmptyList(claimTechnologies(claim), tech))
+		actionsJSON, _ := encodeStringList(claim.Actions)
+		capabilitiesJSON, _ := encodeStringList(claim.Capabilities)
+		objectsJSON, _ := encodeStringList(claim.Objects)
+		domainsJSON, _ := encodeStringList(claim.Domains)
+		artifactsJSON, _ := encodeStringList(claim.Artifacts)
+		scopeJSON, _ := encodeStringList(claim.Scope)
+		metricsJSON, _ := encodeStringList(claim.Metrics)
+		outcomesJSON, _ := encodeStringList(claim.Outcomes)
+		profileContextJSON, _ := encodeStringList(claim.ProfileContext)
 		allowedUseJSON, _ := encodeStringList(defaultAllowedUse(claim.AllowedUse, originType))
 		allowedContextsJSON, _ := encodeStringList(defaultAllowedContexts(claim.AllowedContexts, sourceFacts))
 		blockedContextsJSON, _ := encodeStringList(defaultBlockedContexts(claim.BlockedContexts, claim.ClaimText))
@@ -409,8 +497,10 @@ func (s *Store) replaceCandidateClaims(parsed []parsedCandidateClaim, facts []fa
 			`INSERT INTO candidate_claims
 				(claim_text, claim_type, source_fact_ids_json, evidence_quotes_json, technologies_json, strength,
 				allowed_use_json, allowed_contexts_json, blocked_contexts_json, safe_phrasings_json, unsafe_phrasings_json,
-				origin_heading, origin_type, status, risk_flags_json, review_note, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
+				origin_heading, origin_type, status, risk_flags_json, review_note, created_at, updated_at,
+				actions_json, capabilities_json, objects_json, domains_json, artifacts_json, scope_json, metrics_json,
+				outcomes_json, profile_context_json, evidence_strength, similarity_key, similarity_score, duplicate_of_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
 			claim.ClaimText,
 			normalizeClaimType(firstNonEmpty(claim.ClaimType, originType)),
 			sourceFactJSON,
@@ -428,6 +518,18 @@ func (s *Store) replaceCandidateClaims(parsed []parsedCandidateClaim, facts []fa
 			riskJSON,
 			now,
 			now,
+			actionsJSON,
+			capabilitiesJSON,
+			objectsJSON,
+			domainsJSON,
+			artifactsJSON,
+			scopeJSON,
+			metricsJSON,
+			outcomesJSON,
+			profileContextJSON,
+			normalizeEvidenceStrength(claim.EvidenceStrength),
+			similarityKey,
+			1.0,
 		)
 		if err != nil {
 			return nil, err
@@ -459,27 +561,104 @@ func parseCandidateClaims(text string) ([]parsedCandidateClaim, error) {
 	return parsed.Claims, nil
 }
 
+func mergeSimilarParsedClaims(parsed []parsedCandidateClaim, factsByID map[int64]factPromptContext) []parsedCandidateClaim {
+	merged := []parsedCandidateClaim{}
+	indexByKey := map[string]int{}
+	for _, claim := range parsed {
+		validIDs, sourceFacts := validClaimFacts(claim.SourceFactIDs, factsByID)
+		if len(validIDs) == 0 {
+			continue
+		}
+		claim.SourceFactIDs = validIDs
+		claim.ClaimText = normalizeClaimLabel(claim)
+		claim = enrichClaimAtoms(claim, sourceFacts)
+		key := claimSimilarityKey(claim, sourceFacts)
+		if key == "" {
+			key = strings.ToLower(claim.ClaimText)
+		}
+		if existingIndex, ok := indexByKey[key]; ok {
+			existing := merged[existingIndex]
+			existing.SourceFactIDs = uniqueInt64s(append(existing.SourceFactIDs, claim.SourceFactIDs...))
+			existing.Actions = normalizeStringList(append(existing.Actions, claim.Actions...))
+			existing.Capabilities = normalizeStringList(append(existing.Capabilities, claim.Capabilities...))
+			existing.Objects = normalizeStringList(append(existing.Objects, claim.Objects...))
+			existing.Technologies = normalizeStringList(append(existing.Technologies, claim.Technologies...))
+			existing.Domains = normalizeStringList(append(existing.Domains, claim.Domains...))
+			existing.Artifacts = normalizeStringList(append(existing.Artifacts, claim.Artifacts...))
+			existing.Scope = normalizeStringList(append(existing.Scope, claim.Scope...))
+			existing.Metrics = normalizeStringList(append(existing.Metrics, claim.Metrics...))
+			existing.Outcomes = normalizeStringList(append(existing.Outcomes, claim.Outcomes...))
+			existing.ProfileContext = normalizeStringList(append(existing.ProfileContext, claim.ProfileContext...))
+			existing.AllowedUse = normalizeStringList(append(existing.AllowedUse, claim.AllowedUse...))
+			existing.AllowedContexts = normalizeStringList(append(existing.AllowedContexts, claim.AllowedContexts...))
+			existing.BlockedContexts = normalizeStringList(append(existing.BlockedContexts, claim.BlockedContexts...))
+			existing.SafePhrasings = normalizeStringList(append(existing.SafePhrasings, claim.SafePhrasings...))
+			existing.UnsafePhrasings = normalizeStringList(append(existing.UnsafePhrasings, claim.UnsafePhrasings...))
+			existing.RiskFlags = normalizeStringList(append(existing.RiskFlags, claim.RiskFlags...))
+			merged[existingIndex] = existing
+			continue
+		}
+		indexByKey[key] = len(merged)
+		merged = append(merged, claim)
+	}
+	return merged
+}
+
+func claimSimilarityKey(claim parsedCandidateClaim, facts []factPromptContext) string {
+	context := append([]string{}, claim.ProfileContext...)
+	for _, fact := range facts {
+		context = append(context, fact.Context...)
+		context = append(context, fact.SectionHeading, fact.SectionType)
+	}
+	text := strings.Join([]string{
+		claim.ClaimText,
+		strings.Join(claim.Actions, " "),
+		strings.Join(claim.Capabilities, " "),
+		strings.Join(claim.Objects, " "),
+		strings.Join(claim.Technologies, " "),
+		strings.Join(claim.Domains, " "),
+		strings.Join(claim.Artifacts, " "),
+		strings.Join(claim.Scope, " "),
+		strings.Join(claim.Metrics, " "),
+		strings.Join(claim.Outcomes, " "),
+	}, " ")
+	return normalizedSimilarityKey(text, claim.Technologies, context)
+}
+
 func fallbackCandidateClaims(facts []factPromptContext) []parsedCandidateClaim {
 	claims := []parsedCandidateClaim{}
 	for _, fact := range facts {
 		if fact.Status == factStatusRejected {
 			continue
 		}
-		claimText := claimTextFromFact(fact)
-		if claimText == "" {
+		atoms := atomsFromFact(fact)
+		label := claimLabelFromAtoms(atoms)
+		if label == "" {
 			continue
 		}
 		claims = append(claims, parsedCandidateClaim{
-			ClaimText:       claimText,
-			ClaimType:       normalizeClaimType(fact.SectionType),
-			SourceFactIDs:   []int64{fact.ID},
-			Strength:        inferClaimStrength([]factPromptContext{fact}),
-			AllowedUse:      defaultAllowedUse(nil, fact.SectionType),
-			AllowedContexts: claimContextsFromFact(fact),
-			BlockedContexts: defaultBlockedContexts(nil, claimText),
-			SafePhrasings:   []string{claimText},
-			UnsafePhrasings: []string{},
-			RiskFlags:       fact.RiskFlags,
+			ClaimText:        label,
+			Label:            label,
+			ClaimType:        normalizeClaimType(fact.SectionType),
+			SourceFactIDs:    []int64{fact.ID},
+			Actions:          atoms.Actions,
+			Capabilities:     atoms.Capabilities,
+			Objects:          atoms.Objects,
+			Technologies:     atoms.Technologies,
+			Domains:          atoms.Domains,
+			Artifacts:        atoms.Artifacts,
+			Scope:            atoms.Scope,
+			Metrics:          atoms.Metrics,
+			Outcomes:         atoms.Outcomes,
+			ProfileContext:   atoms.ProfileContext,
+			EvidenceStrength: inferEvidenceStrengthFromFact(fact),
+			Strength:         inferClaimStrength([]factPromptContext{fact}),
+			AllowedUse:       defaultAllowedUse(nil, fact.SectionType),
+			AllowedContexts:  claimContextsFromFact(fact),
+			BlockedContexts:  defaultBlockedContexts(nil, label),
+			SafePhrasings:    []string{label},
+			UnsafePhrasings:  []string{},
+			RiskFlags:        fact.RiskFlags,
 		})
 	}
 	return claims
@@ -517,6 +696,203 @@ func claimTextFromFact(fact factPromptContext) string {
 	return strings.TrimSuffix(claim, ".") + "."
 }
 
+type claimAtoms struct {
+	Actions        []string
+	Capabilities   []string
+	Objects        []string
+	Technologies   []string
+	Domains        []string
+	Artifacts      []string
+	Scope          []string
+	Metrics        []string
+	Outcomes       []string
+	ProfileContext []string
+}
+
+func atomsFromFact(fact factPromptContext) claimAtoms {
+	parts := parseKeyValueFact(fact.FactText)
+	text := strings.TrimSpace(strings.Join([]string{fact.FactText, fact.EvidenceQuote}, " "))
+	atoms := claimAtoms{
+		Actions:        splitAtomList(firstNonEmpty(parts["actions"], parts["action"], inferActionAtom(text))),
+		Capabilities:   splitAtomList(firstNonEmpty(parts["capabilities"], parts["capability"], inferCapabilityAtom(text))),
+		Objects:        splitAtomList(firstNonEmpty(parts["objects"], parts["object"])),
+		Technologies:   normalizeStringList(append(splitAtomList(parts["tools"]), fact.Technologies...)),
+		Domains:        splitAtomList(firstNonEmpty(parts["domain"], parts["domains"], inferDomainAtom(text))),
+		Artifacts:      splitAtomList(firstNonEmpty(parts["artifact"], parts["artifacts"])),
+		Scope:          splitAtomList(firstNonEmpty(parts["scope"], parts["evidence"])),
+		Metrics:        extractMetricAtoms(text),
+		Outcomes:       splitAtomList(firstNonEmpty(parts["outcome"], parts["outcomes"])),
+		ProfileContext: normalizeStringList(append(fact.Context, fact.SectionHeading, fact.SectionType)),
+	}
+	if len(atoms.Objects) == 0 && len(atoms.Artifacts) > 0 {
+		atoms.Objects = atoms.Artifacts
+	}
+	return atoms
+}
+
+func enrichClaimAtoms(claim parsedCandidateClaim, facts []factPromptContext) parsedCandidateClaim {
+	for _, fact := range facts {
+		atoms := atomsFromFact(fact)
+		claim.Actions = firstNonEmptyList(claim.Actions, atoms.Actions)
+		claim.Capabilities = firstNonEmptyList(claim.Capabilities, atoms.Capabilities)
+		claim.Objects = firstNonEmptyList(claim.Objects, atoms.Objects)
+		claim.Technologies = firstNonEmptyList(claim.Technologies, atoms.Technologies)
+		claim.Domains = firstNonEmptyList(claim.Domains, atoms.Domains)
+		claim.Artifacts = firstNonEmptyList(claim.Artifacts, atoms.Artifacts)
+		claim.Scope = firstNonEmptyList(claim.Scope, atoms.Scope)
+		claim.Metrics = firstNonEmptyList(claim.Metrics, atoms.Metrics)
+		claim.Outcomes = firstNonEmptyList(claim.Outcomes, atoms.Outcomes)
+		claim.ProfileContext = normalizeStringList(append(claim.ProfileContext, atoms.ProfileContext...))
+		if claim.EvidenceStrength == "" {
+			claim.EvidenceStrength = inferEvidenceStrengthFromFact(fact)
+		}
+	}
+	claim.Actions = normalizeStringList(claim.Actions)
+	claim.Capabilities = normalizeStringList(claim.Capabilities)
+	claim.Objects = normalizeStringList(claim.Objects)
+	claim.Technologies = normalizeStringList(claim.Technologies)
+	claim.Domains = normalizeStringList(claim.Domains)
+	claim.Artifacts = normalizeStringList(claim.Artifacts)
+	claim.Scope = normalizeStringList(claim.Scope)
+	claim.Metrics = normalizeStringList(claim.Metrics)
+	claim.Outcomes = normalizeStringList(claim.Outcomes)
+	if claim.ClaimText == "" {
+		claim.ClaimText = claimLabelFromAtoms(claimAtoms{
+			Actions:      claim.Actions,
+			Capabilities: claim.Capabilities,
+			Objects:      claim.Objects,
+			Technologies: claim.Technologies,
+			Domains:      claim.Domains,
+			Artifacts:    claim.Artifacts,
+			Scope:        claim.Scope,
+		})
+	}
+	return claim
+}
+
+func normalizeClaimLabel(claim parsedCandidateClaim) string {
+	label := firstNonEmpty(claim.Label, claim.ClaimText)
+	label = strings.TrimSpace(strings.TrimSuffix(label, "."))
+	label = regexp.MustCompile(`\s+`).ReplaceAllString(label, " ")
+	if label == "" {
+		return ""
+	}
+	metrics := extractMetricAtoms(label)
+	words := strings.Fields(label)
+	if len(words) > 9 {
+		label = strings.Join(words[:9], " ")
+	}
+	if len(metrics) > 0 && !strings.Contains(label, metrics[0]) {
+		label = strings.TrimSpace(label + " " + metrics[0])
+	}
+	return label
+}
+
+func claimLabelFromAtoms(atoms claimAtoms) string {
+	parts := []string{}
+	if len(atoms.Technologies) > 0 {
+		parts = append(parts, strings.Join(limitStrings(atoms.Technologies, 3), "/"))
+	}
+	if len(atoms.Capabilities) > 0 {
+		parts = append(parts, atoms.Capabilities[0])
+	} else if len(atoms.Objects) > 0 {
+		parts = append(parts, atoms.Objects[0])
+	} else if len(atoms.Artifacts) > 0 {
+		parts = append(parts, atoms.Artifacts[0])
+	} else if len(atoms.Scope) > 0 {
+		parts = append(parts, atoms.Scope[0])
+	}
+	if len(atoms.Domains) > 0 {
+		parts = append(parts, atoms.Domains[0])
+	}
+	return normalizeClaimLabel(parsedCandidateClaim{Label: strings.Join(parts, " ")})
+}
+
+func splitAtomList(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '|' || r == '\n'
+	})
+	result := []string{}
+	for _, part := range parts {
+		part = strings.TrimSpace(strings.Trim(part, ".-"))
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return normalizeStringList(result)
+}
+
+func extractMetricAtoms(text string) []string {
+	matches := regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:%|x|\b(?:users|requests|seconds|minutes|hours|days|ms|milliseconds|thousand|million|manual workload|workload)\b)`).FindAllString(text, -1)
+	return normalizeStringList(matches)
+}
+
+func inferActionAtom(text string) string {
+	lower := strings.ToLower(text)
+	for _, action := range []string{"built", "shipped", "implemented", "designed", "developed", "created", "automated", "tested", "supported", "integrated", "optimized", "documented"} {
+		if strings.Contains(lower, action) {
+			return action
+		}
+	}
+	return ""
+}
+
+func inferCapabilityAtom(text string) string {
+	lower := strings.ToLower(text)
+	for needle, label := range map[string]string{
+		"backend":    "backend development",
+		"api":        "API development",
+		"postgres":   "database-backed systems",
+		"test":       "testing",
+		"automation": "automation",
+		"rbac":       "access control",
+		"audit":      "audit logging",
+		"workflow":   "workflow systems",
+		"frontend":   "frontend development",
+	} {
+		if strings.Contains(lower, needle) {
+			return label
+		}
+	}
+	return ""
+}
+
+func inferDomainAtom(text string) string {
+	lower := strings.ToLower(text)
+	for needle, label := range map[string]string{
+		"construction": "construction planning",
+		"planning":     "planning platform",
+		"legal":        "legal technology",
+		"finance":      "finance",
+	} {
+		if strings.Contains(lower, needle) {
+			return label
+		}
+	}
+	return ""
+}
+
+func inferEvidenceStrengthFromFact(fact factPromptContext) string {
+	if fact.Confidence == "high" && fact.Status == factStatusApproved {
+		return "direct"
+	}
+	if fact.Confidence == "low" || len(fact.RiskFlags) > 0 {
+		return "weak"
+	}
+	return "inferred"
+}
+
+func limitStrings(values []string, limit int) []string {
+	if limit > 0 && len(values) > limit {
+		return values[:limit]
+	}
+	return values
+}
+
 func parseKeyValueFact(text string) map[string]string {
 	result := map[string]string{}
 	for _, part := range strings.Split(text, ";") {
@@ -527,6 +903,14 @@ func parseKeyValueFact(text string) map[string]string {
 		result[strings.TrimSpace(strings.ToLower(key))] = strings.TrimSpace(value)
 	}
 	return result
+}
+
+func (c parsedCandidateClaim) SourceFactIDsKey() []string {
+	keys := []string{}
+	for _, id := range c.SourceFactIDs {
+		keys = append(keys, fmt.Sprint(id))
+	}
+	return keys
 }
 
 func validClaimFacts(ids []int64, factsByID map[int64]factPromptContext) ([]int64, []factPromptContext) {
@@ -567,7 +951,18 @@ func claimEvidenceContext(facts []factPromptContext) ([]string, []string, string
 }
 
 func verifyClaimRiskFlags(claim parsedCandidateClaim, facts []factPromptContext, blocked []BlockedClaim) []string {
-	text := claim.ClaimText
+	text := strings.Join([]string{
+		claim.ClaimText,
+		strings.Join(claim.Actions, " "),
+		strings.Join(claim.Capabilities, " "),
+		strings.Join(claim.Objects, " "),
+		strings.Join(claim.Technologies, " "),
+		strings.Join(claim.Domains, " "),
+		strings.Join(claim.Artifacts, " "),
+		strings.Join(claim.Scope, " "),
+		strings.Join(claim.Metrics, " "),
+		strings.Join(claim.Outcomes, " "),
+	}, " ")
 	lower := strings.ToLower(text)
 	evidence := strings.ToLower(joinFactEvidence(facts))
 	flags := []string{}
@@ -774,8 +1169,8 @@ func compactFactsForClaims(facts []factPromptContext) []factPromptContext {
 	return selected
 }
 
-func (c parsedCandidateClaim) Technologies() []string {
-	return extractTechnologies(c.ClaimText)
+func claimTechnologies(c parsedCandidateClaim) []string {
+	return normalizeStringList(append(c.Technologies, extractTechnologies(c.ClaimText)...))
 }
 
 func firstNonEmptyList(primary []string, fallback []string) []string {
@@ -812,6 +1207,15 @@ func normalizeClaimStrength(strength string) string {
 	}
 }
 
+func normalizeEvidenceStrength(strength string) string {
+	switch strings.TrimSpace(strings.ToLower(strength)) {
+	case "direct", "inferred", "weak":
+		return strings.TrimSpace(strings.ToLower(strength))
+	default:
+		return "direct"
+	}
+}
+
 func normalizeSeverity(severity string) string {
 	switch strings.TrimSpace(strings.ToLower(severity)) {
 	case "low", "medium", "high":
@@ -826,7 +1230,9 @@ func (s *Store) getCandidateClaim(id int64) (CandidateClaim, error) {
 		context.Background(),
 		`SELECT id, claim_text, claim_type, source_fact_ids_json, evidence_quotes_json, technologies_json,
 		strength, allowed_use_json, allowed_contexts_json, blocked_contexts_json, safe_phrasings_json,
-		unsafe_phrasings_json, origin_heading, origin_type, status, risk_flags_json, review_note, created_at, updated_at
+		unsafe_phrasings_json, origin_heading, origin_type, status, risk_flags_json, review_note, created_at, updated_at,
+		actions_json, capabilities_json, objects_json, domains_json, artifacts_json, scope_json, metrics_json,
+		outcomes_json, profile_context_json, evidence_strength, similarity_key, similarity_score, duplicate_of_id
 		FROM candidate_claims WHERE id = ?`,
 		id,
 	)
@@ -865,6 +1271,7 @@ func scanCandidateClaims(rows *sql.Rows) ([]CandidateClaim, error) {
 	for rows.Next() {
 		var claim CandidateClaim
 		var sourceFactJSON, evidenceJSON, techJSON, allowedUseJSON, allowedContextsJSON, blockedContextsJSON, safeJSON, unsafeJSON, riskJSON string
+		var actionsJSON, capabilitiesJSON, objectsJSON, domainsJSON, artifactsJSON, scopeJSON, metricsJSON, outcomesJSON, profileContextJSON string
 		if err := rows.Scan(
 			&claim.ID,
 			&claim.ClaimText,
@@ -885,12 +1292,35 @@ func scanCandidateClaims(rows *sql.Rows) ([]CandidateClaim, error) {
 			&claim.ReviewNote,
 			&claim.CreatedAt,
 			&claim.UpdatedAt,
+			&actionsJSON,
+			&capabilitiesJSON,
+			&objectsJSON,
+			&domainsJSON,
+			&artifactsJSON,
+			&scopeJSON,
+			&metricsJSON,
+			&outcomesJSON,
+			&profileContextJSON,
+			&claim.EvidenceStrength,
+			&claim.SimilarityKey,
+			&claim.SimilarityScore,
+			&claim.DuplicateOfID,
 		); err != nil {
 			return nil, err
 		}
 		claim.SourceFactIDs = decodeInt64List(sourceFactJSON)
 		claim.EvidenceQuotes = decodeStringList(evidenceJSON)
 		claim.Technologies = decodeStringList(techJSON)
+		claim.Actions = decodeStringList(actionsJSON)
+		claim.Capabilities = decodeStringList(capabilitiesJSON)
+		claim.Objects = decodeStringList(objectsJSON)
+		claim.Domains = decodeStringList(domainsJSON)
+		claim.Artifacts = decodeStringList(artifactsJSON)
+		claim.Scope = decodeStringList(scopeJSON)
+		claim.Metrics = decodeStringList(metricsJSON)
+		claim.Outcomes = decodeStringList(outcomesJSON)
+		claim.ProfileContext = decodeStringList(profileContextJSON)
+		claim.EvidenceStrength = normalizeEvidenceStrength(claim.EvidenceStrength)
 		claim.AllowedUse = decodeStringList(allowedUseJSON)
 		claim.AllowedContexts = decodeStringList(allowedContextsJSON)
 		claim.BlockedContexts = decodeStringList(blockedContextsJSON)

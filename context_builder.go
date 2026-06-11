@@ -56,6 +56,7 @@ type CandidateProfileRecord struct {
 type CandidateSource struct {
 	ID         int64  `json:"id"`
 	SourceType string `json:"source_type"`
+	TrustTier  string `json:"trust_tier"`
 	Title      string `json:"title"`
 	RawText    string `json:"raw_text"`
 	FilePath   string `json:"file_path"`
@@ -65,6 +66,7 @@ type CandidateSource struct {
 
 type CreateCandidateSourceInput struct {
 	SourceType string `json:"source_type"`
+	TrustTier  string `json:"trust_tier"`
 	Title      string `json:"title"`
 	RawText    string `json:"raw_text"`
 }
@@ -72,6 +74,7 @@ type CreateCandidateSourceInput struct {
 type ImportCandidateSourceFileInput struct {
 	Path       string `json:"path"`
 	SourceType string `json:"source_type"`
+	TrustTier  string `json:"trust_tier"`
 	Title      string `json:"title"`
 }
 
@@ -105,22 +108,25 @@ type ExtractEvidenceFactsInput struct {
 }
 
 type EvidenceFact struct {
-	ID            int64    `json:"id"`
-	SourceID      int64    `json:"source_id"`
-	SectionID     int64    `json:"section_id"`
-	FactText      string   `json:"fact_text"`
-	EvidenceQuote string   `json:"evidence_quote"`
-	Technologies  []string `json:"technologies"`
-	Confidence    string   `json:"confidence"`
-	RiskFlags     []string `json:"risk_flags"`
-	OriginHeading string   `json:"origin_heading"`
-	OriginType    string   `json:"origin_type"`
-	Context       []string `json:"context"`
-	Status        string   `json:"status"`
-	AutoApproved  bool     `json:"auto_approved"`
-	ReviewNote    string   `json:"review_note"`
-	CreatedAt     string   `json:"created_at"`
-	UpdatedAt     string   `json:"updated_at"`
+	ID              int64    `json:"id"`
+	SourceID        int64    `json:"source_id"`
+	SectionID       int64    `json:"section_id"`
+	FactText        string   `json:"fact_text"`
+	EvidenceQuote   string   `json:"evidence_quote"`
+	Technologies    []string `json:"technologies"`
+	Confidence      string   `json:"confidence"`
+	RiskFlags       []string `json:"risk_flags"`
+	OriginHeading   string   `json:"origin_heading"`
+	OriginType      string   `json:"origin_type"`
+	Context         []string `json:"context"`
+	Status          string   `json:"status"`
+	AutoApproved    bool     `json:"auto_approved"`
+	SimilarityKey   string   `json:"similarity_key"`
+	SimilarityScore float64  `json:"similarity_score"`
+	DuplicateOfID   int64    `json:"duplicate_of_id"`
+	ReviewNote      string   `json:"review_note"`
+	CreatedAt       string   `json:"created_at"`
+	UpdatedAt       string   `json:"updated_at"`
 }
 
 type UpdateEvidenceFactReviewInput struct {
@@ -294,7 +300,7 @@ func (s *Store) SaveCandidateProfile(input CandidateProfile) (CandidateProfile, 
 func (s *Store) ListCandidateSources() ([]CandidateSource, error) {
 	rows, err := s.db.QueryContext(
 		context.Background(),
-		`SELECT id, source_type, title, raw_text, file_path, imported_at, updated_at
+		`SELECT id, source_type, trust_tier, title, raw_text, file_path, imported_at, updated_at
 		FROM candidate_sources ORDER BY id DESC`,
 	)
 	if err != nil {
@@ -314,13 +320,15 @@ func (s *Store) CreateCandidateSource(input CreateCandidateSourceInput) (Candida
 		title = "Untitled source"
 	}
 	sourceType := normalizeSourceType(input.SourceType)
+	trustTier := normalizeSourceTrustTier(input.TrustTier, sourceType)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	result, err := s.db.ExecContext(
 		context.Background(),
-		`INSERT INTO candidate_sources (source_type, title, raw_text, file_path, imported_at, updated_at)
-		VALUES (?, ?, ?, '', ?, ?)`,
+		`INSERT INTO candidate_sources (source_type, trust_tier, title, raw_text, file_path, imported_at, updated_at)
+		VALUES (?, ?, ?, ?, '', ?, ?)`,
 		sourceType,
+		trustTier,
 		title,
 		rawText,
 		now,
@@ -352,6 +360,7 @@ func (s *Store) ImportCandidateSourceFile(input ImportCandidateSourceFileInput) 
 	}
 	source := CreateCandidateSourceInput{
 		SourceType: input.SourceType,
+		TrustTier:  input.TrustTier,
 		Title:      strings.TrimSpace(input.Title),
 		RawText:    string(content),
 	}
@@ -571,13 +580,13 @@ Extract atomic, evidence-backed candidate facts from one source section.
 }
 
 func (s *Store) ListEvidenceFacts(status string) ([]EvidenceFact, error) {
-	query := `SELECT id, source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, origin_heading, origin_type, context_json, status, auto_approved, review_note, created_at, updated_at FROM evidence_facts`
+	query := `SELECT id, source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, origin_heading, origin_type, context_json, status, auto_approved, similarity_key, similarity_score, duplicate_of_id, review_note, created_at, updated_at FROM evidence_facts`
 	args := []any{}
 	if strings.TrimSpace(status) != "" && status != "all" {
 		query += ` WHERE status = ?`
 		args = append(args, normalizeFactStatus(status))
 	}
-	query += ` ORDER BY CASE status WHEN 'needs_review' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, id DESC`
+	query += ` ORDER BY CASE status WHEN 'needs_review' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, duplicate_of_id, id DESC`
 	rows, err := s.db.QueryContext(context.Background(), query, args...)
 	if err != nil {
 		return nil, err
@@ -677,6 +686,14 @@ func (s *Store) DraftCandidateProfileFromSource(sourceID int64) (CandidateProfil
 
 func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFact) ([]EvidenceFact, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+	source, err := s.getCandidateSource(section.SourceID)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := s.existingFactSimilarityRefs()
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return nil, err
@@ -687,6 +704,7 @@ func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFac
 	}
 
 	ids := make([]int64, 0, len(facts))
+	batchRefs := []factSimilarityRef{}
 	for _, fact := range facts {
 		fact = enrichExtractedFact(section, fact)
 		fact.FactText = strings.TrimSpace(fact.FactText)
@@ -703,7 +721,16 @@ func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFac
 		}
 		confidence := normalizeConfidence(fact.Confidence)
 		riskFlags := normalizeStringList(fact.RiskFlags)
-		status, autoApproved := reviewStatus(confidence, riskFlags)
+		similarityKey := factSimilarityKey(fact, section)
+		duplicateID, similarityScore := bestFactDuplicate(similarityKey, fact, append(existing, batchRefs...))
+		status, autoApproved := reviewStatusForSource(confidence, riskFlags, source.TrustTier)
+		reviewNote := ""
+		if duplicateID > 0 && similarityScore >= 0.82 {
+			status = factStatusRejected
+			autoApproved = true
+			riskFlags = normalizeStringList(append(riskFlags, "duplicate_fact"))
+			reviewNote = fmt.Sprintf("Duplicate-like fact skipped from truth bank; %.0f%% similar to fact %d.", similarityScore*100, duplicateID)
+		}
 		techJSON, err := encodeStringList(fact.Technologies)
 		if err != nil {
 			return nil, err
@@ -720,8 +747,8 @@ func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFac
 		result, err := tx.ExecContext(
 			context.Background(),
 			`INSERT INTO evidence_facts
-				(source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, origin_heading, origin_type, context_json, status, auto_approved, review_note, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`,
+				(source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, origin_heading, origin_type, context_json, status, auto_approved, similarity_key, similarity_score, duplicate_of_id, review_note, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			section.SourceID,
 			section.ID,
 			fact.FactText,
@@ -734,6 +761,10 @@ func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFac
 			contextJSON,
 			status,
 			boolToInt(autoApproved),
+			similarityKey,
+			similarityScore,
+			duplicateID,
+			reviewNote,
 			now,
 			now,
 		)
@@ -745,6 +776,9 @@ func (s *Store) insertExtractedFacts(section SourceSection, facts []extractedFac
 			return nil, err
 		}
 		ids = append(ids, id)
+		if duplicateID == 0 {
+			batchRefs = append(batchRefs, factSimilarityRef{ID: id, Key: similarityKey, Text: fact.FactText, Technologies: fact.Technologies})
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -1680,6 +1714,158 @@ func reviewStatus(confidence string, riskFlags []string) (string, bool) {
 	return factStatusNeedsReview, false
 }
 
+func reviewStatusForSource(confidence string, riskFlags []string, trustTier string) (string, bool) {
+	riskFlags = normalizeStringList(riskFlags)
+	if len(riskFlags) == 0 {
+		if confidence == "high" || (confidence == "medium" && (trustTier == "verified" || trustTier == "trusted_ai_summary")) {
+			return factStatusApproved, true
+		}
+	}
+	return factStatusNeedsReview, false
+}
+
+type factSimilarityRef struct {
+	ID           int64
+	Key          string
+	Text         string
+	Technologies []string
+}
+
+func (s *Store) existingFactSimilarityRefs() ([]factSimilarityRef, error) {
+	rows, err := s.db.QueryContext(
+		context.Background(),
+		`SELECT id, fact_text, technologies_json, similarity_key FROM evidence_facts WHERE status <> ? AND duplicate_of_id = 0`,
+		factStatusRejected,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	refs := []factSimilarityRef{}
+	for rows.Next() {
+		var ref factSimilarityRef
+		var techJSON string
+		if err := rows.Scan(&ref.ID, &ref.Text, &techJSON, &ref.Key); err != nil {
+			return nil, err
+		}
+		ref.Technologies = decodeStringList(techJSON)
+		if ref.Key == "" {
+			ref.Key = normalizedSimilarityKey(ref.Text, ref.Technologies, nil)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+func bestFactDuplicate(key string, fact extractedFact, refs []factSimilarityRef) (int64, float64) {
+	bestID := int64(0)
+	bestScore := 0.0
+	factTokens := similarityTokens(strings.Join([]string{fact.FactText, fact.EvidenceQuote, strings.Join(fact.Technologies, " ")}, " "))
+	for _, ref := range refs {
+		score := 0.0
+		if key != "" && ref.Key == key {
+			score = 1
+		} else {
+			score = jaccardScore(factTokens, similarityTokens(strings.Join([]string{ref.Text, strings.Join(ref.Technologies, " ")}, " ")))
+		}
+		if score > bestScore {
+			bestScore = score
+			bestID = ref.ID
+		}
+	}
+	if bestScore < 0.82 {
+		return 0, bestScore
+	}
+	return bestID, bestScore
+}
+
+func factSimilarityKey(fact extractedFact, section SourceSection) string {
+	return normalizedSimilarityKey(strings.Join([]string{fact.FactText, fact.EvidenceQuote, section.Heading, section.SectionType}, " "), fact.Technologies, fact.Context)
+}
+
+func normalizedSimilarityKey(text string, technologies []string, context []string) string {
+	parts := parseKeyValueFact(text)
+	keyParts := []string{}
+	for _, key := range []string{"actions", "action", "artifact", "capability", "scope", "tools", "outcome", "metric"} {
+		keyParts = append(keyParts, splitSimilarityTerms(parts[key])...)
+	}
+	keyParts = append(keyParts, technologies...)
+	for _, item := range context {
+		lower := strings.ToLower(item)
+		if strings.HasPrefix(lower, "organization=") || strings.HasPrefix(lower, "project=") || strings.HasPrefix(lower, "role=") {
+			keyParts = append(keyParts, item)
+		}
+	}
+	if len(keyParts) == 0 {
+		keyParts = similarityTokens(text)
+	}
+	keyParts = normalizeStringList(keyParts)
+	sort.Strings(keyParts)
+	if len(keyParts) > 16 {
+		keyParts = keyParts[:16]
+	}
+	return strings.Join(keyParts, "|")
+}
+
+func splitSimilarityTerms(value string) []string {
+	terms := []string{}
+	for _, part := range strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+		return r == ',' || r == ';' || r == '|' || r == '/' || r == '-' || r == '\n'
+	}) {
+		part = strings.TrimSpace(part)
+		if len(part) >= 3 && !isSimilarityStopWord(part) {
+			terms = append(terms, part)
+		}
+	}
+	return terms
+}
+
+func similarityTokens(text string) []string {
+	tokens := []string{}
+	for _, token := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '#'
+	}) {
+		if len(token) >= 3 && !isSimilarityStopWord(token) {
+			tokens = append(tokens, token)
+		}
+	}
+	return normalizeStringList(tokens)
+}
+
+func isSimilarityStopWord(token string) bool {
+	switch token {
+	case "the", "and", "for", "with", "that", "this", "from", "into", "using", "used", "built", "created", "added", "implemented", "developed", "supported", "section", "origin", "type":
+		return true
+	default:
+		return false
+	}
+}
+
+func jaccardScore(left []string, right []string) float64 {
+	if len(left) == 0 || len(right) == 0 {
+		return 0
+	}
+	leftSet := map[string]bool{}
+	for _, value := range left {
+		leftSet[value] = true
+	}
+	rightSet := map[string]bool{}
+	for _, value := range right {
+		rightSet[value] = true
+	}
+	intersection := 0
+	for value := range leftSet {
+		if rightSet[value] {
+			intersection++
+		}
+	}
+	union := len(leftSet) + len(rightSet) - intersection
+	if union == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(union)
+}
+
 func detectSections(rawText string) []SourceSection {
 	text := normalizeRawSourceText(rawText)
 	text = ensureKnownSectionHeadingsOnLines(text)
@@ -1897,6 +2083,24 @@ func normalizeSourceType(sourceType string) string {
 	}
 }
 
+func normalizeSourceTrustTier(trustTier string, sourceType string) string {
+	trustTier = strings.TrimSpace(strings.ToLower(trustTier))
+	switch trustTier {
+	case "verified", "trusted_ai_summary", "unverified_ai", "raw_source":
+		return trustTier
+	}
+	switch normalizeSourceType(sourceType) {
+	case "current_resume":
+		return "verified"
+	case "extended_resume", "old_resume":
+		return "trusted_ai_summary"
+	case "project_notes", "readme", "architecture_notes":
+		return "raw_source"
+	default:
+		return "unverified_ai"
+	}
+}
+
 func normalizeProfileRecordType(recordType string) string {
 	recordType = strings.TrimSpace(strings.ToLower(recordType))
 	switch recordType {
@@ -1972,7 +2176,7 @@ func intToBool(value int) bool {
 func (s *Store) getCandidateSource(id int64) (CandidateSource, error) {
 	rows, err := s.db.QueryContext(
 		context.Background(),
-		`SELECT id, source_type, title, raw_text, file_path, imported_at, updated_at
+		`SELECT id, source_type, trust_tier, title, raw_text, file_path, imported_at, updated_at
 		FROM candidate_sources WHERE id = ?`,
 		id,
 	)
@@ -2014,7 +2218,7 @@ func (s *Store) getSourceSection(id int64) (SourceSection, error) {
 func (s *Store) getEvidenceFact(id int64) (EvidenceFact, error) {
 	rows, err := s.db.QueryContext(
 		context.Background(),
-		`SELECT id, source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, origin_heading, origin_type, context_json, status, auto_approved, review_note, created_at, updated_at
+		`SELECT id, source_id, section_id, fact_text, evidence_quote, technologies_json, confidence, risk_flags_json, origin_heading, origin_type, context_json, status, auto_approved, similarity_key, similarity_score, duplicate_of_id, review_note, created_at, updated_at
 		FROM evidence_facts WHERE id = ?`,
 		id,
 	)
@@ -2036,9 +2240,10 @@ func scanCandidateSources(rows *sql.Rows) ([]CandidateSource, error) {
 	sources := []CandidateSource{}
 	for rows.Next() {
 		var source CandidateSource
-		if err := rows.Scan(&source.ID, &source.SourceType, &source.Title, &source.RawText, &source.FilePath, &source.ImportedAt, &source.UpdatedAt); err != nil {
+		if err := rows.Scan(&source.ID, &source.SourceType, &source.TrustTier, &source.Title, &source.RawText, &source.FilePath, &source.ImportedAt, &source.UpdatedAt); err != nil {
 			return nil, err
 		}
+		source.TrustTier = normalizeSourceTrustTier(source.TrustTier, source.SourceType)
 		sources = append(sources, source)
 	}
 	return sources, rows.Err()
@@ -2089,6 +2294,9 @@ func scanEvidenceFacts(rows *sql.Rows) ([]EvidenceFact, error) {
 			&contextJSON,
 			&fact.Status,
 			&autoApproved,
+			&fact.SimilarityKey,
+			&fact.SimilarityScore,
+			&fact.DuplicateOfID,
 			&fact.ReviewNote,
 			&fact.CreatedAt,
 			&fact.UpdatedAt,

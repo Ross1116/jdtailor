@@ -318,6 +318,20 @@ func (a *App) UpdateTailoredBulletDraft(input UpdateTailoredBulletDraftInput) (T
 	return a.store.UpdateTailoredBulletDraft(input)
 }
 
+func (a *App) SelectTailoredBulletDraft(input SelectTailoredBulletDraftInput) (TailoredBulletDraft, error) {
+	if err := a.ensureStore(); err != nil {
+		return TailoredBulletDraft{}, err
+	}
+	return a.store.SelectTailoredBulletDraft(input)
+}
+
+func (a *App) AutoSelectResumeBullets(jobID int64) ([]TailoredBulletDraft, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.AutoSelectResumeBullets(jobID)
+}
+
 func (a *App) DeleteTailoredBulletDraft(input DeleteInput) error {
 	if err := a.ensureStore(); err != nil {
 		return err

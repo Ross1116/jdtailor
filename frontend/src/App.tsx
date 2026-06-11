@@ -26,6 +26,7 @@ import {
 import {
   AnalyzeJobDescription,
   ApplicationStrategy,
+  AutoSelectResumeBullets,
   CandidateProfile,
   CandidateProfileRecord,
   CandidateSource,
@@ -79,6 +80,7 @@ import {
   SaveAPIKey,
   SaveCandidateProfile,
   SaveSettings,
+  SelectTailoredBulletDraft,
   SourceSection,
   TailoredBulletDraft,
   TestLLM,
@@ -196,6 +198,7 @@ function App() {
   const [selectedJobID, setSelectedJobID] = useState<number>(0);
   const [sourceDraft, setSourceDraft] = useState({
     source_type: 'current_resume',
+    trust_tier: 'verified',
     title: '',
     raw_text: '',
   });
@@ -267,7 +270,7 @@ function App() {
       setPromptRules((nextPromptRules ?? []) as PromptRule[]);
       setPromptSources((nextPromptSources ?? []) as PromptResearchSource[]);
       setProfile(normalizeProfile(nextProfile as CandidateProfile));
-      setSources((nextSources ?? []) as CandidateSource[]);
+      setSources(normalizeSources(nextSources as CandidateSource[] | null | undefined));
       setSections((nextSections ?? []) as SourceSection[]);
       setFacts(normalizeFacts(nextFacts as EvidenceFact[] | null | undefined));
       setClaims(normalizeClaims(nextClaims as CandidateClaim[] | null | undefined));
@@ -307,7 +310,7 @@ function App() {
       ListEvidenceFacts('all'),
       ListJobDescriptions(),
     ]);
-    setSources((nextSources ?? []) as CandidateSource[]);
+    setSources(normalizeSources(nextSources as CandidateSource[] | null | undefined));
     setSections((nextSections ?? []) as SourceSection[]);
     setFacts(normalizeFacts(nextFacts as EvidenceFact[] | null | undefined));
     setJobs((nextJobs ?? []) as JobDescription[]);
@@ -440,6 +443,7 @@ function App() {
       const rawText = await file.text();
       const source = (await CreateCandidateSource({
         source_type: sourceDraft.source_type,
+        trust_tier: sourceDraft.trust_tier,
         title: sourceDraft.title || file.name.replace(/\.(txt|md|markdown|tex|latex)$/i, ''),
         raw_text: rawText,
       })) as CandidateSource;
@@ -565,6 +569,17 @@ function App() {
         id: claim.id,
         claim_text: claim.claim_text,
         claim_type: claim.claim_type,
+        actions: claim.actions,
+        capabilities: claim.capabilities,
+        objects: claim.objects,
+        technologies: claim.technologies,
+        domains: claim.domains,
+        artifacts: claim.artifacts,
+        scope: claim.scope,
+        metrics: claim.metrics,
+        outcomes: claim.outcomes,
+        profile_context: claim.profile_context,
+        evidence_strength: claim.evidence_strength,
         strength: claim.strength,
         allowed_use: claim.allowed_use,
         allowed_contexts: claim.allowed_contexts,
@@ -772,6 +787,23 @@ function App() {
     });
   }
 
+  async function selectBulletDraft(draft: TailoredBulletDraft, selected: boolean) {
+    await runAction(`select-draft-${draft.id}`, async () => {
+      const saved = (await SelectTailoredBulletDraft({id: draft.id, selected})) as TailoredBulletDraft;
+      setBulletDrafts((previous) => normalizeDrafts(previous.map((item) => item.id === saved.id ? saved : item)));
+      await refreshEvents();
+    });
+  }
+
+  async function autoSelectBulletDrafts() {
+    if (!selectedJobID) return;
+    await runAction('auto-select-drafts', async () => {
+      const drafts = (await AutoSelectResumeBullets(selectedJobID)) as TailoredBulletDraft[];
+      setBulletDrafts(normalizeDrafts(drafts));
+      await refreshEvents();
+    });
+  }
+
   async function deleteBulletDraft(draftID: number) {
     await runAction(`delete-draft-${draftID}`, async () => {
       await DeleteTailoredBulletDraft({id: draftID});
@@ -870,7 +902,7 @@ function App() {
           <TabButton active={activeTab === 'profile'} label="Profile" icon={<UserRound size={16} />} onClick={() => setActiveTab('profile')} />
           <TabButton active={activeTab === 'sections'} label="Sections" icon={<Layers3 size={16} />} onClick={() => setActiveTab('sections')} />
           <TabButton active={activeTab === 'facts'} label={`Fact Review${queuedFacts.length ? ` ${queuedFacts.length}` : ''}`} icon={<ListChecks size={16} />} onClick={() => setActiveTab('facts')} />
-          <TabButton active={activeTab === 'claims'} label={`Claims${claims.filter((claim) => claim.status === 'needs_review').length ? ` ${claims.filter((claim) => claim.status === 'needs_review').length}` : ''}`} icon={<ShieldCheck size={16} />} onClick={() => setActiveTab('claims')} />
+          <TabButton active={activeTab === 'claims'} label={`Claim Bank${claims.filter((claim) => claim.status === 'needs_review').length ? ` ${claims.filter((claim) => claim.status === 'needs_review').length}` : ''}`} icon={<ShieldCheck size={16} />} onClick={() => setActiveTab('claims')} />
           <TabButton active={activeTab === 'settings'} label="Settings" icon={<SettingsIcon size={16} />} onClick={() => setActiveTab('settings')} />
         </nav>
       </section>
@@ -922,6 +954,7 @@ function App() {
             jobAnalysis={jobAnalysis}
             jobs={jobs}
             matches={jobMatches}
+            onAutoSelectDrafts={autoSelectBulletDrafts}
             onBuildMatchMap={buildMatchMap}
             onChangeDraft={(draft) => setBulletDrafts((previous) => normalizeDrafts(previous.map((item) => item.id === draft.id ? draft : item)))}
             onDeleteDraft={deleteBulletDraft}
@@ -935,6 +968,7 @@ function App() {
             onSaveDraft={(draft) => updateBulletDraft(draft)}
             onSaveJob={saveJob}
             onSelectJob={selectJob}
+            onSelectDraft={selectBulletDraft}
             onSetDraftStatus={updateBulletDraft}
             requirements={jobRequirements}
             selectedJobID={selectedJobID}
@@ -1123,8 +1157,8 @@ function SourcesView({
   sources,
 }: {
   busy: boolean;
-  draft: {source_type: string; title: string; raw_text: string};
-  onDraftChange: (draft: {source_type: string; title: string; raw_text: string}) => void;
+  draft: {source_type: string; trust_tier: string; title: string; raw_text: string};
+  onDraftChange: (draft: {source_type: string; trust_tier: string; title: string; raw_text: string}) => void;
   onDelete: (id: number) => void;
   onFile: (file?: File) => void;
   onSave: (event: FormEvent<HTMLFormElement>) => void;
@@ -1135,11 +1169,11 @@ function SourcesView({
     <div className="grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
       <Panel icon={<Upload size={18} />} title="Import source" subtitle="Paste raw context or import TXT/MD material.">
         <form className="space-y-4" onSubmit={onSave}>
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-3 md:grid-cols-3">
             <SelectInput
               label="Source type"
               value={draft.source_type}
-              onChange={(value) => onDraftChange({...draft, source_type: value})}
+              onChange={(value) => onDraftChange({...draft, source_type: value, trust_tier: defaultSourceTrust(value)})}
               options={[
                 ['current_resume', 'Current resume'],
                 ['extended_resume', 'Extended resume'],
@@ -1149,6 +1183,17 @@ function SourcesView({
                 ['architecture_notes', 'Architecture notes'],
                 ['interview_notes', 'Interview notes'],
                 ['manual_notes', 'Manual notes'],
+              ]}
+            />
+            <SelectInput
+              label="Trust"
+              value={draft.trust_tier}
+              onChange={(value) => onDraftChange({...draft, trust_tier: value})}
+              options={[
+                ['verified', 'Verified'],
+                ['trusted_ai_summary', 'Trusted AI summary'],
+                ['raw_source', 'Raw source'],
+                ['unverified_ai', 'Unverified AI'],
               ]}
             />
             <TextInput label="Title" value={draft.title} onChange={(value) => onDraftChange({...draft, title: value})} />
@@ -1190,6 +1235,7 @@ function SourcesView({
                   </button>
                   <div className="flex shrink-0 items-center gap-2">
                     <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-slate-600">{sourceTypeLabel(source.source_type)}</span>
+                    <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-slate-600">{sourceTrustLabel(source.trust_tier)}</span>
                     <IconOnlyButton label="Delete source" onClick={() => onDelete(source.id)}>
                       <Trash2 size={16} />
                     </IconOnlyButton>
@@ -1213,6 +1259,7 @@ function JobsView({
   jobAnalysis,
   jobs,
   matches,
+  onAutoSelectDrafts,
   onBuildMatchMap,
   onChangeDraft,
   onDeleteDraft,
@@ -1226,6 +1273,7 @@ function JobsView({
   onSaveDraft,
   onSaveJob,
   onSelectJob,
+  onSelectDraft,
   onSetDraftStatus,
   requirements,
   selectedJobID,
@@ -1239,6 +1287,7 @@ function JobsView({
   jobAnalysis: JobAnalysis | null;
   jobs: JobDescription[];
   matches: JobFactMatch[];
+  onAutoSelectDrafts: () => void;
   onBuildMatchMap: () => void;
   onChangeDraft: (draft: TailoredBulletDraft) => void;
   onDeleteDraft: (id: number) => void;
@@ -1252,6 +1301,7 @@ function JobsView({
   onSaveDraft: (draft: TailoredBulletDraft) => void;
   onSaveJob: (event: FormEvent<HTMLFormElement>) => void;
   onSelectJob: (job: JobDescription) => void;
+  onSelectDraft: (draft: TailoredBulletDraft, selected: boolean) => void;
   onSetDraftStatus: (draft: TailoredBulletDraft, status: string) => void;
   requirements: JobRequirement[];
   selectedJobID: number;
@@ -1301,7 +1351,7 @@ function JobsView({
               <TextInput label="URL" value={draft.url} onChange={(value) => onDraftChange({...draft, url: value})} />
             </div>
             <TextArea label="Raw JD text" rows={10} value={draft.raw_text} onChange={(value) => onDraftChange({...draft, raw_text: value})} />
-            <div className="grid gap-3 md:grid-cols-6">
+            <div className="grid gap-3 md:grid-cols-7">
               <IconButton label={selectedJobID ? 'Update JD' : 'Save JD'} submit disabled={busyAction === 'save-job' || draft.raw_text.trim() === ''}>
                 <Save size={16} />
               </IconButton>
@@ -1319,6 +1369,9 @@ function JobsView({
               </IconButton>
               <IconButton label="Draft bullets" onClick={onGenerateDrafts} disabled={!selectedJobID || matches.length === 0 || busyAction === 'generate-bullets'}>
                 <Sparkles size={16} />
+              </IconButton>
+              <IconButton label="Auto-select" onClick={onAutoSelectDrafts} disabled={!selectedJobID || tailoredDrafts.length === 0 || busyAction === 'auto-select-drafts'}>
+                <CheckCircle2 size={16} />
               </IconButton>
             </div>
           </form>
@@ -1421,7 +1474,13 @@ function JobsView({
                 <div key={item.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
                   <div className="mb-3 flex flex-wrap items-center gap-2">
                     <StatusBadge text={item.status} />
+                    {item.selected_for_resume && <StatusBadge text="selected" />}
+                    <StatusBadge text={`${Math.round(item.selection_score * 100)} score`} />
+                    <StatusBadge text={item.origin_type || 'unknown origin'} />
+                    {item.origin_heading && <StatusBadge text={item.origin_heading} />}
                     <StatusBadge text={requirementLabel(item.requirement_id)} />
+                    {item.claim_ids.length > 0 && <StatusBadge text={`claims ${item.claim_ids.join(', ')}`} />}
+                    {item.fact_ids.length > 0 && <StatusBadge text={`facts ${item.fact_ids.join(', ')}`} />}
                     {asStringArray(item.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
                   </div>
                   <TextArea
@@ -1441,11 +1500,12 @@ function JobsView({
                     <SecondaryButton label="Accept" onClick={() => onSetDraftStatus(item, 'accepted')} />
                     <SecondaryButton label="Needs review" onClick={() => onSetDraftStatus(item, 'needs_review')} />
                     <DangerButton label="Reject" onClick={() => onSetDraftStatus(item, 'rejected')} />
+                    <SecondaryButton label={item.selected_for_resume ? 'Unselect' : 'Select'} onClick={() => onSelectDraft(item, !item.selected_for_resume)} />
+                  </div>
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
                     <IconButton label="Copy" onClick={() => navigator.clipboard?.writeText(item.draft_text)} disabled={false}>
                       <Clipboard size={16} />
                     </IconButton>
-                  </div>
-                  <div className="mt-3">
                     <DangerButton label="Delete draft" onClick={() => onDeleteDraft(item.id)} />
                   </div>
                 </div>
@@ -1645,6 +1705,8 @@ function FactsView({
                   <StatusBadge text={fact.status} />
                   <StatusBadge text={fact.confidence} />
                   {fact.auto_approved && <StatusBadge text="auto approved" />}
+                  {fact.duplicate_of_id > 0 && <StatusBadge text={`duplicate of ${fact.duplicate_of_id}`} />}
+                  {fact.similarity_score < 1 && <StatusBadge text={`${Math.round(fact.similarity_score * 100)} similar`} />}
                   {fact.origin_type && <StatusBadge text={fact.origin_type} />}
                   {asStringArray(fact.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
                 </div>
@@ -1731,8 +1793,15 @@ function ClaimsView({
     approved: claims.filter((claim) => claim.status === 'approved').length,
     approved_restricted: claims.filter((claim) => claim.status === 'approved_restricted').length,
     blocked: claims.filter((claim) => claim.status === 'blocked').length,
+    has_metrics: claims.filter((claim) => asStringArray(claim.metrics).length > 0).length,
+    has_risk: claims.filter((claim) => asStringArray(claim.risk_flags).length > 0).length,
   };
-  const visibleClaims = claims.filter((claim) => filter === 'all' || claim.status === filter).slice(0, 50);
+  const visibleClaims = claims.filter((claim) => {
+    if (filter === 'all') return true;
+    if (filter === 'has_metrics') return asStringArray(claim.metrics).length > 0;
+    if (filter === 'has_risk') return asStringArray(claim.risk_flags).length > 0;
+    return claim.status === filter;
+  }).slice(0, 50);
   const approveVisible = async () => {
     for (const claim of visibleClaims.filter((item) => item.status === 'needs_review')) {
       await onSetClaimStatus(claim, 'approved');
@@ -1741,7 +1810,7 @@ function ClaimsView({
 
   return (
     <div className="grid gap-4 xl:grid-cols-[1fr_420px]">
-      <Panel icon={<ShieldCheck size={18} />} title="Claim ledger" subtitle="Approved claims become the permission layer for future resume generation.">
+      <Panel icon={<ShieldCheck size={18} />} title="Claim Bank" subtitle="Approved atom records become the permission layer for future resume generation.">
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
             <div className="flex flex-wrap gap-2">
@@ -1750,6 +1819,8 @@ function ClaimsView({
                 ['approved', `Approved ${counts.approved}`],
                 ['approved_restricted', `Restricted ${counts.approved_restricted}`],
                 ['blocked', `Blocked ${counts.blocked}`],
+                ['has_metrics', `Metrics ${counts.has_metrics}`],
+                ['has_risk', `Risk ${counts.has_risk}`],
                 ['all', `All ${counts.all}`],
               ].map(([value, label]) => (
                 <button
@@ -1763,7 +1834,7 @@ function ClaimsView({
               ))}
             </div>
             <div className="flex flex-wrap gap-2">
-              <IconButton label="Generate claims" onClick={onGenerateClaims} disabled={busyAction === 'generate-claims'}>
+              <IconButton label="Generate bank" onClick={onGenerateClaims} disabled={busyAction === 'generate-claims'}>
                 <Sparkles size={16} />
               </IconButton>
               <SecondaryButton label="Approve visible" onClick={approveVisible} />
@@ -1772,7 +1843,7 @@ function ClaimsView({
           </div>
 
           {claims.length === 0 ? (
-            <EmptyState text="Generate claims after approving evidence facts." />
+            <EmptyState text="Generate the claim bank after approving evidence facts." />
           ) : visibleClaims.length === 0 ? (
             <EmptyState text="Nothing in this claim queue." />
           ) : (
@@ -1783,13 +1854,15 @@ function ClaimsView({
                     <StatusBadge text={claim.status} />
                     <StatusBadge text={claim.strength} />
                     <StatusBadge text={claim.claim_type} />
+                    {claim.source_fact_ids.length > 1 && <StatusBadge text={`${claim.source_fact_ids.length} merged facts`} />}
+                    {claim.duplicate_of_id > 0 && <StatusBadge text={`duplicate of ${claim.duplicate_of_id}`} />}
                     {asStringArray(claim.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
                   </div>
                   <IconOnlyButton label="Delete claim" onClick={() => onDeleteClaim(claim.id)}>
                     <Trash2 size={16} />
                   </IconOnlyButton>
                 </div>
-                <TextArea label="Claim" rows={3} value={claim.claim_text} onChange={(value) => onClaimChange({...claim, claim_text: value})} />
+                <TextInput label="Label" value={claim.claim_text} onChange={(value) => onClaimChange({...claim, claim_text: value})} />
                 <div className="mt-3 grid gap-3 md:grid-cols-3">
                   <SelectInput
                     label="Status"
@@ -1813,15 +1886,35 @@ function ClaimsView({
                       ['weak', 'Weak'],
                     ]}
                   />
-                  <TextInput label="Technologies" value={asStringArray(claim.technologies).join(', ')} onChange={() => undefined} disabled />
+                  <SelectInput
+                    label="Evidence"
+                    value={claim.evidence_strength}
+                    onChange={(value) => onClaimChange({...claim, evidence_strength: value})}
+                    options={[
+                      ['direct', 'Direct'],
+                      ['inferred', 'Inferred'],
+                      ['weak', 'Weak'],
+                    ]}
+                  />
                 </div>
                 <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <TextInput label="Actions" value={asStringArray(claim.actions).join(', ')} onChange={(value) => onClaimChange({...claim, actions: splitList(value)})} />
+                  <TextInput label="Capabilities" value={asStringArray(claim.capabilities).join(', ')} onChange={(value) => onClaimChange({...claim, capabilities: splitList(value)})} />
+                  <TextInput label="Objects" value={asStringArray(claim.objects).join(', ')} onChange={(value) => onClaimChange({...claim, objects: splitList(value)})} />
+                  <TextInput label="Tools" value={asStringArray(claim.technologies).join(', ')} onChange={(value) => onClaimChange({...claim, technologies: splitList(value)})} />
+                  <TextInput label="Scope" value={asStringArray(claim.scope).join(', ')} onChange={(value) => onClaimChange({...claim, scope: splitList(value)})} />
+                  <TextInput label="Domains" value={asStringArray(claim.domains).join(', ')} onChange={(value) => onClaimChange({...claim, domains: splitList(value)})} />
+                  <TextInput label="Artifacts" value={asStringArray(claim.artifacts).join(', ')} onChange={(value) => onClaimChange({...claim, artifacts: splitList(value)})} />
+                  <TextInput label="Metrics" value={asStringArray(claim.metrics).join(', ')} onChange={(value) => onClaimChange({...claim, metrics: splitList(value)})} />
+                  <TextInput label="Outcomes" value={asStringArray(claim.outcomes).join(', ')} onChange={(value) => onClaimChange({...claim, outcomes: splitList(value)})} />
+                  <TextInput label="Context tags" value={asStringArray(claim.profile_context).join(', ')} onChange={(value) => onClaimChange({...claim, profile_context: splitList(value)})} />
                   <TextInput label="Allowed use" value={asStringArray(claim.allowed_use).join(', ')} onChange={(value) => onClaimChange({...claim, allowed_use: splitList(value)})} />
                   <TextInput label="Allowed contexts" value={asStringArray(claim.allowed_contexts).join(', ')} onChange={(value) => onClaimChange({...claim, allowed_contexts: splitList(value)})} />
                   <TextInput label="Blocked contexts" value={asStringArray(claim.blocked_contexts).join(', ')} onChange={(value) => onClaimChange({...claim, blocked_contexts: splitList(value)})} />
                   <TextInput label="Risk flags" value={asStringArray(claim.risk_flags).join(', ')} onChange={(value) => onClaimChange({...claim, risk_flags: splitList(value)})} />
                 </div>
                 <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <TextInput label="Origin" value={[claim.origin_type, claim.origin_heading].filter(Boolean).join(' | ')} onChange={() => undefined} disabled />
                   <TextArea label="Evidence quotes" rows={2} value={asStringArray(claim.evidence_quotes).join('\n')} onChange={() => undefined} disabled />
                   <TextArea label="Safe phrasings" rows={2} value={asStringArray(claim.safe_phrasings).join('\n')} onChange={(value) => onClaimChange({...claim, safe_phrasings: splitList(value.replace(/\n/g, ','))})} />
                   <TextArea label="Unsafe phrasings" rows={2} value={asStringArray(claim.unsafe_phrasings).join('\n')} onChange={(value) => onClaimChange({...claim, unsafe_phrasings: splitList(value.replace(/\n/g, ','))})} />
@@ -2475,6 +2568,13 @@ function mergeDraftRecords(current: CandidateProfileRecord[], draft: CandidatePr
   return next;
 }
 
+function normalizeSources(value?: CandidateSource[] | null) {
+  return asArray(value).map((source) => ({
+    ...source,
+    trust_tier: source.trust_tier || defaultSourceTrust(source.source_type),
+  }));
+}
+
 function normalizeFacts(value?: EvidenceFact[] | null) {
   return asArray(value).map((fact) => ({
     ...fact,
@@ -2483,6 +2583,9 @@ function normalizeFacts(value?: EvidenceFact[] | null) {
     origin_heading: fact.origin_heading || '',
     origin_type: fact.origin_type || '',
     context: asStringArray(fact.context),
+    similarity_key: fact.similarity_key || '',
+    similarity_score: Number(fact.similarity_score ?? 1),
+    duplicate_of_id: Number(fact.duplicate_of_id ?? 0),
   }));
 }
 
@@ -2504,7 +2607,12 @@ function normalizeDrafts(value?: TailoredBulletDraft[] | null) {
   return asArray(value).map((draft) => ({
     ...draft,
     fact_ids: asArray(draft.fact_ids),
+    claim_ids: asArray(draft.claim_ids),
+    origin_heading: draft.origin_heading || '',
+    origin_type: draft.origin_type || '',
     risk_flags: asStringArray(draft.risk_flags),
+    selection_score: Number(draft.selection_score ?? 0),
+    selected_for_resume: Boolean(draft.selected_for_resume),
   }));
 }
 
@@ -2514,12 +2622,25 @@ function normalizeClaims(value?: CandidateClaim[] | null) {
     source_fact_ids: asArray(claim.source_fact_ids),
     evidence_quotes: asStringArray(claim.evidence_quotes),
     technologies: asStringArray(claim.technologies),
+    actions: asStringArray(claim.actions),
+    capabilities: asStringArray(claim.capabilities),
+    objects: asStringArray(claim.objects),
+    domains: asStringArray(claim.domains),
+    artifacts: asStringArray(claim.artifacts),
+    scope: asStringArray(claim.scope),
+    metrics: asStringArray(claim.metrics),
+    outcomes: asStringArray(claim.outcomes),
+    profile_context: asStringArray(claim.profile_context),
+    evidence_strength: claim.evidence_strength || 'direct',
     allowed_use: asStringArray(claim.allowed_use),
     allowed_contexts: asStringArray(claim.allowed_contexts),
     blocked_contexts: asStringArray(claim.blocked_contexts),
     safe_phrasings: asStringArray(claim.safe_phrasings),
     unsafe_phrasings: asStringArray(claim.unsafe_phrasings),
     risk_flags: asStringArray(claim.risk_flags),
+    similarity_key: claim.similarity_key || '',
+    similarity_score: Number(claim.similarity_score ?? 1),
+    duplicate_of_id: Number(claim.duplicate_of_id ?? 0),
   }));
 }
 
@@ -2645,6 +2766,23 @@ function sourceTypeLabel(value: string) {
     architecture_notes: 'Architecture notes',
     interview_notes: 'Interview notes',
     manual_notes: 'Manual notes',
+  };
+  return labels[value] ?? value;
+}
+
+function defaultSourceTrust(sourceType: string) {
+  if (sourceType === 'current_resume') return 'verified';
+  if (sourceType === 'extended_resume' || sourceType === 'old_resume') return 'trusted_ai_summary';
+  if (['project_notes', 'readme', 'architecture_notes'].includes(sourceType)) return 'raw_source';
+  return 'unverified_ai';
+}
+
+function sourceTrustLabel(value: string) {
+  const labels: Record<string, string> = {
+    verified: 'Verified',
+    trusted_ai_summary: 'Trusted AI summary',
+    raw_source: 'Raw source',
+    unverified_ai: 'Unverified AI',
   };
   return labels[value] ?? value;
 }

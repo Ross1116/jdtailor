@@ -1,5 +1,6 @@
 import {
   AnalyzeJobDescription as WailsAnalyzeJobDescription,
+  AutoSelectResumeBullets as WailsAutoSelectResumeBullets,
   BuildJobMatchMap as WailsBuildJobMatchMap,
   CreateCandidateSource as WailsCreateCandidateSource,
   CreateBlockedClaim as WailsCreateBlockedClaim,
@@ -46,6 +47,7 @@ import {
   SaveAPIKey as WailsSaveAPIKey,
   SaveCandidateProfile as WailsSaveCandidateProfile,
   SaveSettings as WailsSaveSettings,
+  SelectTailoredBulletDraft as WailsSelectTailoredBulletDraft,
   TestLLM as WailsTestLLM,
   UpdateEvidenceFactReview as WailsUpdateEvidenceFactReview,
   UpdateBlockedClaim as WailsUpdateBlockedClaim,
@@ -91,6 +93,7 @@ export type CandidateProfileRecord = {
 export type CandidateSource = {
   id: number;
   source_type: string;
+  trust_tier: string;
   title: string;
   raw_text: string;
   file_path: string;
@@ -125,6 +128,9 @@ export type EvidenceFact = {
   context: string[];
   status: string;
   auto_approved: boolean;
+  similarity_key: string;
+  similarity_score: number;
+  duplicate_of_id: number;
   review_note: string;
   created_at: string;
   updated_at: string;
@@ -173,10 +179,15 @@ export type TailoredBulletDraft = {
   job_id: number;
   requirement_id: number;
   fact_ids: number[];
+  claim_ids: number[];
+  origin_heading: string;
+  origin_type: string;
   draft_text: string;
   rationale: string;
   status: string;
   risk_flags: string[];
+  selection_score: number;
+  selected_for_resume: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -188,6 +199,16 @@ export type CandidateClaim = {
   source_fact_ids: number[];
   evidence_quotes: string[];
   technologies: string[];
+  actions: string[];
+  capabilities: string[];
+  objects: string[];
+  domains: string[];
+  artifacts: string[];
+  scope: string[];
+  metrics: string[];
+  outcomes: string[];
+  profile_context: string[];
+  evidence_strength: string;
   strength: string;
   allowed_use: string[];
   allowed_contexts: string[];
@@ -198,6 +219,9 @@ export type CandidateClaim = {
   origin_type: string;
   status: string;
   risk_flags: string[];
+  similarity_key: string;
+  similarity_score: number;
+  duplicate_of_id: number;
   review_note: string;
   created_at: string;
   updated_at: string;
@@ -525,14 +549,16 @@ export async function DeleteCandidateSource(input: {id: number}) {
   mockEvents.unshift(mockEvent('info', 'mock source deleted'));
 }
 
-export async function CreateCandidateSource(input: {source_type: string; title: string; raw_text: string}) {
+export async function CreateCandidateSource(input: {source_type: string; trust_tier?: string; title: string; raw_text: string}) {
+  const payload = {...input, trust_tier: input.trust_tier || defaultTrustTier(input.source_type)};
   if (hasWailsBackend()) {
-    return WailsCreateCandidateSource(input);
+    return WailsCreateCandidateSource(payload);
   }
   const timestamp = now();
   const source = {
     id: Date.now(),
     source_type: input.source_type || 'manual_notes',
+    trust_tier: payload.trust_tier,
     title: input.title || 'Untitled source',
     raw_text: normalizeRawSourceText(input.raw_text),
     file_path: '',
@@ -544,14 +570,16 @@ export async function CreateCandidateSource(input: {source_type: string; title: 
   return source;
 }
 
-export async function ImportCandidateSourceFile(input: {path: string; source_type: string; title: string}) {
+export async function ImportCandidateSourceFile(input: {path: string; source_type: string; trust_tier?: string; title: string}) {
+  const payload = {...input, trust_tier: input.trust_tier || defaultTrustTier(input.source_type)};
   if (hasWailsBackend()) {
-    return WailsImportCandidateSourceFile(input);
+    return WailsImportCandidateSourceFile(payload);
   }
   return CreateCandidateSource({
-    source_type: input.source_type,
-    title: input.title || input.path,
-    raw_text: `Mock file import from ${input.path}`,
+    source_type: payload.source_type,
+    trust_tier: payload.trust_tier,
+    title: payload.title || payload.path,
+    raw_text: `Mock file import from ${payload.path}`,
   });
 }
 
@@ -622,25 +650,40 @@ export async function ExtractEvidenceFacts(input: {source_id: number; section_id
   if (!section) {
     return [];
   }
+  const source = mockSources.find((item) => item.id === section.source_id);
   const timestamp = now();
-  const facts = fallbackFactsFromSection(section).map((item, index) => ({
-    id: Date.now() + index,
-    source_id: section.source_id,
-    section_id: section.id,
-    fact_text: item.fact_text,
-    evidence_quote: item.evidence_quote,
-    technologies: item.technologies,
-    confidence: item.confidence,
-    risk_flags: item.risk_flags,
-    origin_heading: section.heading,
-    origin_type: section.section_type,
-    context: factContextAtoms(section),
-    status: 'needs_review',
-    auto_approved: false,
-    review_note: '',
-    created_at: timestamp,
-    updated_at: timestamp,
-  }));
+  const refs = mockFacts.filter((fact) => fact.status !== 'rejected' && !fact.duplicate_of_id);
+  const facts = fallbackFactsFromSection(section).map((item, index) => {
+    const similarityKey = mockFactSimilarityKey(item.fact_text, item.technologies);
+    const duplicate = refs.find((fact) => fact.similarity_key === similarityKey);
+    const isDuplicate = Boolean(duplicate);
+    const lowRisk = item.risk_flags.length === 0;
+    const trusted = source?.trust_tier === 'verified' || source?.trust_tier === 'trusted_ai_summary';
+    const autoApproved = isDuplicate || (lowRisk && (item.confidence === 'high' || (item.confidence === 'medium' && trusted)));
+    const fact = {
+      id: Date.now() + index,
+      source_id: section.source_id,
+      section_id: section.id,
+      fact_text: item.fact_text,
+      evidence_quote: item.evidence_quote,
+      technologies: item.technologies,
+      confidence: item.confidence,
+      risk_flags: isDuplicate ? [...new Set([...item.risk_flags, 'duplicate_fact'])] : item.risk_flags,
+      origin_heading: section.heading,
+      origin_type: section.section_type,
+      context: factContextAtoms(section),
+      status: isDuplicate ? 'rejected' : autoApproved ? 'approved' : 'needs_review',
+      auto_approved: autoApproved,
+      similarity_key: similarityKey,
+      similarity_score: isDuplicate ? 1 : 1,
+      duplicate_of_id: duplicate?.id ?? 0,
+      review_note: isDuplicate ? `Duplicate-like fact skipped from truth bank; 100% similar to fact ${duplicate?.id}.` : '',
+      created_at: timestamp,
+      updated_at: timestamp,
+    };
+    if (!isDuplicate) refs.push(fact);
+    return fact;
+  });
   mockFacts = [...facts, ...mockFacts];
   mockClaims = [];
   mockEvents.unshift(mockEvent('info', 'mock evidence facts extracted'));
@@ -794,12 +837,27 @@ export async function BuildJobMatchMap(jobID: number) {
   const timestamp = now();
   const requirements = mockRequirements.filter((req) => req.job_id === jobID);
   const matches: JobFactMatch[] = [];
+  const approvedClaims = mockClaims.filter((claim) => claim.status === 'approved' || claim.status === 'approved_restricted');
   for (const req of requirements) {
     const reqTerms = new Set(req.keywords.map((word) => word.toLowerCase()));
-    for (const fact of mockFacts) {
-      const factText = `${fact.fact_text} ${fact.technologies.join(' ')}`.toLowerCase();
-      const overlap = [...reqTerms].filter((term) => factText.includes(term));
+    for (const claim of approvedClaims) {
+      const claimText = [
+        claim.claim_text,
+        claim.actions.join(' '),
+        claim.capabilities.join(' '),
+        claim.objects.join(' '),
+        claim.technologies.join(' '),
+        claim.domains.join(' '),
+        claim.artifacts.join(' '),
+        claim.scope.join(' '),
+        claim.metrics.join(' '),
+        claim.outcomes.join(' '),
+        claim.profile_context.join(' '),
+      ].join(' ').toLowerCase();
+      const overlap = [...reqTerms].filter((term) => claimText.includes(term));
       if (!overlap.length) continue;
+      const fact = mockFacts.find((item) => claim.source_fact_ids.includes(item.id));
+      if (!fact) continue;
       const score = Math.min(1, 0.45 + overlap.length * 0.18);
       if (score <= 0) continue;
       matches.push({
@@ -836,26 +894,42 @@ export async function GenerateTailoredBulletDrafts(jobID: number) {
     return WailsGenerateTailoredBulletDrafts(jobID);
   }
   const timestamp = now();
+  const approvedClaims = mockClaims.filter((claim) => claim.status === 'approved' || claim.status === 'approved_restricted');
   const grouped = new Map<number, JobFactMatch[]>();
   mockMatches.filter((match) => match.job_id === jobID).forEach((match) => {
     grouped.set(match.requirement_id, [...(grouped.get(match.requirement_id) ?? []), match]);
   });
-  const drafts: TailoredBulletDraft[] = [...grouped.entries()].map(([requirementID, matches], index) => {
+  const originCounts = new Map<string, number>();
+  const drafts: TailoredBulletDraft[] = [];
+  [...grouped.entries()].forEach(([requirementID, matches], index) => {
     const topMatches = matches.sort((a, b) => b.score - a.score).slice(0, 2);
-    const risky = topMatches.flatMap((match) => match.fact_status === 'approved' ? match.risk_flags : [match.fact_status, ...match.risk_flags]);
-    const draftText = `${topMatches[0]?.fact_text ?? 'Tailored bullet needs evidence.'}`;
-    return {
+    const matchedClaims = approvedClaims.filter((claim) => claim.source_fact_ids.some((id) => topMatches.some((match) => match.fact_id === id)));
+    if (!matchedClaims.length) return;
+    const claim = matchedClaims[0];
+    const originKey = `${claim.origin_type}|${claim.origin_heading}`;
+    const budget = claim.origin_type === 'experience' ? 5 : claim.origin_type === 'project' ? 2 : claim.origin_type === 'education' || claim.origin_type === 'certification' ? 1 : 2;
+    if ((originCounts.get(originKey) ?? 0) >= budget) return;
+    const risky = matchedClaims.flatMap((item) => item.status === 'approved' ? item.risk_flags : [item.status, ...item.risk_flags]);
+    if (risky.some((flag) => ['blocked_claim', 'blocked_context', 'unsupported_metric', 'unsupported_tool'].includes(flag))) return;
+    const draftText = mockBulletFromClaim(claim);
+    drafts.push({
       id: Date.now() + index,
       job_id: jobID,
       requirement_id: requirementID,
-      fact_ids: topMatches.map((match) => match.fact_id),
+      fact_ids: [...new Set(matchedClaims.flatMap((item) => item.source_fact_ids))],
+      claim_ids: matchedClaims.map((item) => item.id),
+      origin_heading: claim.origin_heading,
+      origin_type: claim.origin_type,
       draft_text: draftText,
       rationale: topMatches.map((match) => match.rationale).join('; '),
       status: 'needs_review',
       risk_flags: [...new Set([...risky, ...styleRiskFlags(draftText)])].filter(Boolean),
+      selection_score: Math.min(1, 0.65 + matchedClaims.length * 0.08 - risky.length * 0.03),
+      selected_for_resume: false,
       created_at: timestamp,
       updated_at: timestamp,
-    };
+    });
+    originCounts.set(originKey, (originCounts.get(originKey) ?? 0) + 1);
   });
   mockDrafts = [...drafts, ...mockDrafts.filter((draft) => draft.job_id !== jobID)];
   mockEvents.unshift(mockEvent('info', 'mock tailored bullet drafts generated'));
@@ -878,6 +952,36 @@ export async function UpdateTailoredBulletDraft(input: {id: number; draft_text: 
   return mockDrafts.find((draft) => draft.id === input.id);
 }
 
+export async function SelectTailoredBulletDraft(input: {id: number; selected: boolean}) {
+  if (hasWailsBackend()) {
+    return WailsSelectTailoredBulletDraft(input);
+  }
+  const timestamp = now();
+  mockDrafts = mockDrafts.map((draft) => draft.id === input.id ? {...draft, selected_for_resume: input.selected, updated_at: timestamp} : draft);
+  return mockDrafts.find((draft) => draft.id === input.id);
+}
+
+export async function AutoSelectResumeBullets(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsAutoSelectResumeBullets(jobID);
+  }
+  const timestamp = now();
+  const counts = new Map<string, number>();
+  const selected = new Set<number>();
+  mockDrafts
+    .filter((draft) => draft.job_id === jobID && draft.status !== 'rejected' && !draft.risk_flags.some((flag) => ['blocked_claim', 'blocked_context', 'unsupported_metric', 'unsupported_tool'].includes(flag)))
+    .sort((a, b) => b.selection_score - a.selection_score)
+    .forEach((draft) => {
+      const key = `${draft.origin_type}|${draft.origin_heading}`;
+      const budget = draft.origin_type === 'experience' ? 5 : draft.origin_type === 'project' ? 2 : draft.origin_type === 'education' || draft.origin_type === 'certification' ? 1 : 2;
+      if ((counts.get(key) ?? 0) >= budget) return;
+      selected.add(draft.id);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    });
+  mockDrafts = mockDrafts.map((draft) => draft.job_id === jobID ? {...draft, selected_for_resume: selected.has(draft.id), updated_at: timestamp} : draft);
+  return mockDrafts.filter((draft) => draft.job_id === jobID);
+}
+
 export async function DeleteTailoredBulletDraft(input: {id: number}) {
   if (hasWailsBackend()) {
     return WailsDeleteTailoredBulletDraft(input);
@@ -898,11 +1002,21 @@ export async function GenerateCandidateClaims() {
       const riskFlags = [...new Set([...fact.risk_flags, ...claimRiskFlags(claimText, fact), ...styleRiskFlags(claimText)])].filter(Boolean);
       return {
         id: Date.now() + index,
-        claim_text: claimText,
+        claim_text: atomLabelFromFact(fact),
         claim_type: fact.origin_type || 'experience',
         source_fact_ids: [fact.id],
         evidence_quotes: [fact.evidence_quote],
         technologies: fact.technologies,
+        actions: atomActionsFromText(fact.fact_text),
+        capabilities: atomCapabilitiesFromText(fact.fact_text),
+        objects: atomObjectsFromText(fact.fact_text),
+        domains: atomDomainsFromText(fact.fact_text),
+        artifacts: atomObjectsFromText(fact.fact_text),
+        scope: atomScopeFromFact(fact),
+        metrics: extractMetricAtoms(fact.fact_text),
+        outcomes: atomOutcomesFromText(fact.fact_text),
+        profile_context: [...new Set([fact.origin_heading, fact.origin_type, ...fact.context].filter(Boolean))],
+        evidence_strength: fact.confidence === 'high' && fact.status === 'approved' ? 'direct' : fact.confidence === 'low' ? 'weak' : 'inferred',
         strength: fact.origin_type === 'experience' && fact.status === 'approved' && fact.confidence === 'high' ? 'strong' : fact.origin_type === 'project' ? 'moderate' : 'weak',
         allowed_use: fact.origin_type === 'skills' ? ['skills', 'summary'] : ['experience_bullet', 'summary', 'skills'],
         allowed_contexts: claimContextsFromFact(fact),
@@ -913,6 +1027,9 @@ export async function GenerateCandidateClaims() {
         origin_type: fact.origin_type,
         status: claimStatusForFact(fact, riskFlags),
         risk_flags: riskFlags,
+        similarity_key: mockFactSimilarityKey(fact.fact_text, fact.technologies),
+        similarity_score: 1,
+        duplicate_of_id: 0,
         review_note: '',
         created_at: timestamp,
         updated_at: timestamp,
@@ -935,6 +1052,17 @@ export async function UpdateCandidateClaimReview(input: {
   id: number;
   claim_text: string;
   claim_type: string;
+  actions: string[];
+  capabilities: string[];
+  objects: string[];
+  technologies: string[];
+  domains: string[];
+  artifacts: string[];
+  scope: string[];
+  metrics: string[];
+  outcomes: string[];
+  profile_context: string[];
+  evidence_strength: string;
   strength: string;
   allowed_use: string[];
   allowed_contexts: string[];
@@ -1899,6 +2027,107 @@ function claimTextFromFact(fact: EvidenceFact) {
   return `${segments.join(' ').replace(/\s+/g, ' ').replace(/\.$/, '').trim()}.`;
 }
 
+function atomLabelFromFact(fact: EvidenceFact) {
+  const parts = [
+    fact.technologies.slice(0, 3).join('/'),
+    atomCapabilitiesFromText(fact.fact_text)[0] ?? atomObjectsFromText(fact.fact_text)[0] ?? '',
+    atomDomainsFromText(fact.fact_text)[0] ?? '',
+  ].filter(Boolean);
+  return parts.join(' ').split(/\s+/).slice(0, 9).join(' ') || claimTextFromFact(fact).replace(/\.$/, '').split(/\s+/).slice(0, 9).join(' ');
+}
+
+function atomActionsFromText(text: string) {
+  const lower = text.toLowerCase();
+  return ['built', 'shipped', 'implemented', 'designed', 'developed', 'created', 'automated', 'tested', 'supported', 'integrated', 'optimized']
+    .filter((action) => lower.includes(action));
+}
+
+function atomCapabilitiesFromText(text: string) {
+  const lower = text.toLowerCase();
+  const pairs: Array<[string, string]> = [
+    ['backend', 'backend development'],
+    ['api', 'API development'],
+    ['postgres', 'database-backed systems'],
+    ['test', 'testing'],
+    ['automation', 'automation'],
+    ['rbac', 'access control'],
+    ['audit', 'audit logging'],
+    ['workflow', 'workflow systems'],
+    ['frontend', 'frontend development'],
+  ];
+  return [...new Set(pairs.filter(([needle]) => lower.includes(needle)).map(([, label]) => label))];
+}
+
+function atomObjectsFromText(text: string) {
+  const atoms = parseFactAtoms(text);
+  return splitAtomList([atoms.artifact, atoms.scope, atoms.evidence].filter(Boolean).join(', ')).slice(0, 6);
+}
+
+function atomDomainsFromText(text: string) {
+  const lower = text.toLowerCase();
+  const domains: string[] = [];
+  if (lower.includes('construction')) domains.push('construction planning');
+  if (lower.includes('planning')) domains.push('planning platform');
+  if (lower.includes('legal')) domains.push('legal technology');
+  return [...new Set(domains)];
+}
+
+function atomScopeFromFact(fact: EvidenceFact) {
+  const atoms = parseFactAtoms(fact.fact_text);
+  return splitAtomList([atoms.scope, atoms.evidence].filter(Boolean).join(', ')).slice(0, 8);
+}
+
+function atomOutcomesFromText(text: string) {
+  const atoms = parseFactAtoms(text);
+  return splitAtomList(atoms.outcome ?? '').slice(0, 5);
+}
+
+function extractMetricAtoms(text: string) {
+  return [...new Set(text.match(/\b\d+(?:\.\d+)?\s*(?:%|x|users|requests|seconds|minutes|hours|days|ms|milliseconds|thousand|million|manual workload|workload)\b/gi) ?? [])];
+}
+
+function mockBulletFromClaim(claim: CandidateClaim) {
+  const action = titleWord(claim.actions[0] ?? 'built');
+  const capability = claim.capabilities[0] ?? claim.objects[0] ?? claim.artifacts[0] ?? claim.claim_text;
+  const tools = claim.technologies.slice(0, 3).join('/');
+  const scope = (claim.scope.length ? claim.scope : claim.objects).slice(0, 3).join(', ');
+  const outcome = claim.outcomes.slice(0, 2).join(', ');
+  return [
+    action,
+    capability,
+    tools ? `using ${tools}` : '',
+    scope && !capability.toLowerCase().includes(scope.toLowerCase()) ? `across ${scope}` : '',
+    outcome ? `to support ${outcome}` : '',
+  ].filter(Boolean).join(' ').replace(/\s+/g, ' ').replace(/\.$/, '') + '.';
+}
+
+function defaultTrustTier(sourceType: string) {
+  if (sourceType === 'current_resume') return 'verified';
+  if (sourceType === 'extended_resume' || sourceType === 'old_resume') return 'trusted_ai_summary';
+  if (['project_notes', 'readme', 'architecture_notes'].includes(sourceType)) return 'raw_source';
+  return 'unverified_ai';
+}
+
+function mockFactSimilarityKey(text: string, technologies: string[]) {
+  const atoms = parseFactAtoms(text);
+  const parts = [
+    atoms.actions,
+    atoms.action,
+    atoms.artifact,
+    atoms.capability,
+    atoms.scope,
+    atoms.tools,
+    atoms.outcome,
+    atoms.metric,
+    ...technologies,
+  ]
+    .join(' ')
+    .toLowerCase()
+    .split(/[^a-z0-9#]+/)
+    .filter((token) => token.length >= 3 && !['the', 'and', 'for', 'with', 'using', 'built', 'created', 'added', 'implemented'].includes(token));
+  return [...new Set(parts)].sort().slice(0, 16).join('|');
+}
+
 function parseFactAtoms(value: string) {
   const result: Record<string, string> = {};
   for (const part of value.split(';')) {
@@ -1907,6 +2136,10 @@ function parseFactAtoms(value: string) {
     result[key.trim().toLowerCase()] = rest.join('=').trim();
   }
   return result;
+}
+
+function splitAtomList(value: string) {
+  return [...new Set(value.split(/[,;|\n]/).map((part) => part.trim().replace(/^[.-]+|[.-]+$/g, '')).filter(Boolean))];
 }
 
 function titleWord(value: string) {

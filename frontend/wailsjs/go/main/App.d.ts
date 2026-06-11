@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function AnalyzeJobDescription(arg1:number):Promise<main.JobAnalysis>;
 
+export function AutoSelectResumeBullets(arg1:number):Promise<Array<main.TailoredBulletDraft>>;
+
 export function BuildJobMatchMap(arg1:number):Promise<Array<main.JobFactMatch>>;
 
 export function CreateBlockedClaim(arg1:main.CreateBlockedClaimInput):Promise<main.BlockedClaim>;
@@ -95,6 +97,8 @@ export function SaveAPIKey(arg1:main.SaveAPIKeyInput):Promise<main.ToolStatus>;
 export function SaveCandidateProfile(arg1:main.CandidateProfile):Promise<main.CandidateProfile>;
 
 export function SaveSettings(arg1:main.SaveSettingsInput):Promise<main.Settings>;
+
+export function SelectTailoredBulletDraft(arg1:main.SelectTailoredBulletDraftInput):Promise<main.TailoredBulletDraft>;
 
 export function TestLLM():Promise<main.LLMTestResult>;
 
