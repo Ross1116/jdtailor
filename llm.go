@@ -195,12 +195,11 @@ func (s *Store) GenerateLLMText(ctx context.Context, client *http.Client, system
 	if key == "" {
 		return "", errors.New(apiKeyEnvName(provider) + " is missing")
 	}
-	if client == nil {
-		client = &http.Client{Timeout: 45 * time.Second}
-	}
 	if maxTokens <= 0 {
 		maxTokens = 1024
 	}
+
+	client = llmClientWithMinTimeout(client, llmTimeoutForMaxTokens(maxTokens))
 	switch provider {
 	case "openai":
 		body, err := json.Marshal(openAIResponsesRequest{
@@ -277,6 +276,30 @@ func (s *Store) GenerateLLMText(ctx context.Context, client *http.Client, system
 			return "", errors.New(apiErr)
 		}
 		return text, nil
+	}
+}
+
+func llmClientWithMinTimeout(client *http.Client, minTimeout time.Duration) *http.Client {
+	if client == nil {
+		return &http.Client{Timeout: minTimeout}
+	}
+
+	clone := *client
+	if clone.Timeout == 0 || clone.Timeout < minTimeout {
+		clone.Timeout = minTimeout
+	}
+
+	return &clone
+}
+
+func llmTimeoutForMaxTokens(maxTokens int) time.Duration {
+	switch {
+	case maxTokens >= 1200:
+		return 120 * time.Second
+	case maxTokens >= 800:
+		return 90 * time.Second
+	default:
+		return 60 * time.Second
 	}
 }
 

@@ -134,6 +134,10 @@ export function ListBlockedClaims() {
   return window['go']['main']['App']['ListBlockedClaims']();
 }
 
+export function ListBulletGenerationEvents(arg1) {
+  return window['go']['main']['App']['ListBulletGenerationEvents'](arg1);
+}
+
 export function ListCandidateClaims(arg1) {
   return window['go']['main']['App']['ListCandidateClaims'](arg1);
 }

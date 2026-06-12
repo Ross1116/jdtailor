@@ -68,6 +68,8 @@ export function InstallTectonic():Promise<main.InstallTectonicResult>;
 
 export function ListBlockedClaims():Promise<Array<main.BlockedClaim>>;
 
+export function ListBulletGenerationEvents(arg1:number):Promise<Array<main.BulletGenerationEvent>>;
+
 export function ListCandidateClaims(arg1:string):Promise<Array<main.CandidateClaim>>;
 
 export function ListCandidateSources():Promise<Array<main.CandidateSource>>;

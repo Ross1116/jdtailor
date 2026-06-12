@@ -66,21 +66,38 @@ type JobFactMatch struct {
 }
 
 type TailoredBulletDraft struct {
-	ID                int64    `json:"id"`
-	JobID             int64    `json:"job_id"`
-	RequirementID     int64    `json:"requirement_id"`
-	FactIDs           []int64  `json:"fact_ids"`
-	ClaimIDs          []int64  `json:"claim_ids"`
-	OriginHeading     string   `json:"origin_heading"`
-	OriginType        string   `json:"origin_type"`
-	DraftText         string   `json:"draft_text"`
-	Rationale         string   `json:"rationale"`
-	Status            string   `json:"status"`
-	RiskFlags         []string `json:"risk_flags"`
-	SelectionScore    float64  `json:"selection_score"`
-	SelectedForResume bool     `json:"selected_for_resume"`
-	CreatedAt         string   `json:"created_at"`
-	UpdatedAt         string   `json:"updated_at"`
+	ID                 int64    `json:"id"`
+	JobID              int64    `json:"job_id"`
+	RequirementID      int64    `json:"requirement_id"`
+	FactIDs            []int64  `json:"fact_ids"`
+	ClaimIDs           []int64  `json:"claim_ids"`
+	OriginHeading      string   `json:"origin_heading"`
+	OriginType         string   `json:"origin_type"`
+	DraftText          string   `json:"draft_text"`
+	Rationale          string   `json:"rationale"`
+	Status             string   `json:"status"`
+	RiskFlags          []string `json:"risk_flags"`
+	SelectionScore     float64  `json:"selection_score"`
+	ResumeValueScore   float64  `json:"resume_value_score"`
+	JDRelevanceScore   float64  `json:"jd_relevance_score"`
+	OriginWeight       float64  `json:"origin_weight"`
+	RiskPenalty        float64  `json:"risk_penalty"`
+	UnsupportedPenalty float64  `json:"unsupported_context_penalty"`
+	SelectionReason    string   `json:"selection_reason"`
+	SelectedForResume  bool     `json:"selected_for_resume"`
+	CreatedAt          string   `json:"created_at"`
+	UpdatedAt          string   `json:"updated_at"`
+}
+
+type BulletGenerationEvent struct {
+	ID            int64  `json:"id"`
+	JobID         int64  `json:"job_id"`
+	OriginHeading string `json:"origin_heading"`
+	Stage         string `json:"stage"`
+	Status        string `json:"status"`
+	Reason        string `json:"reason"`
+	DraftText     string `json:"draft_text"`
+	CreatedAt     string `json:"created_at"`
 }
 
 type UpdateTailoredBulletDraftInput struct {
@@ -489,6 +506,9 @@ func (s *Store) GenerateTailoredBulletDrafts(ctx context.Context, jobID int64, c
 	}
 
 	styleRules := s.promptRuleDigest("resume", "validation")
+	bulletClient := llmClientWithMinTimeout(client, 120*time.Second)
+
+	_ = s.clearBulletGenerationEvents(jobID)
 
 	groups := buildBulletOriginGroups(requirements, matches, facts, claims)
 	if len(groups) == 0 {
@@ -498,19 +518,41 @@ func (s *Store) GenerateTailoredBulletDrafts(ctx context.Context, jobID int64, c
 	parsedAll := []parsedBulletDraft{}
 
 	for _, group := range groups {
+		_ = s.recordBulletGenerationEvent(jobID, group.OriginHeading, "origin_grouped", "ok", fmt.Sprintf("reqs=%d facts=%d claims=%d", len(group.Requirements), len(group.Facts), len(group.Claims)), "")
 		if len(group.Requirements) == 0 || len(group.Facts) == 0 || len(group.Claims) == 0 {
+			_ = s.recordBulletGenerationEvent(jobID, group.OriginHeading, "origin_grouped", "skipped", "missing requirements, facts, or claims", "")
+			_ = s.LogEvent(
+				"warning",
+				fmt.Sprintf(
+					"origin skipped before drafting: %s reqs=%d facts=%d claims=%d",
+					group.OriginHeading,
+					len(group.Requirements),
+					len(group.Facts),
+					len(group.Claims),
+				),
+			)
 			continue
 		}
 
-		parsed, err := s.generateBulletDraftsForOrigin(ctx, client, job, group, styleRules)
+		parsed, err := s.generateBulletDraftsForOrigin(ctx, bulletClient, job, group, styleRules)
 		if err != nil {
-			parsed = fallbackBulletDraftsForOrigin(group)
-			if len(parsed) == 0 {
-				_ = s.LogEvent("warning", "origin bullet drafting failed for "+group.OriginHeading+": "+err.Error())
-				continue
-			}
-			_ = s.LogEvent("warning", "origin bullet drafts used local fallback for "+group.OriginHeading+": "+err.Error())
+			_ = s.recordBulletGenerationEvent(jobID, group.OriginHeading, "llm_failed", "failed", err.Error(), "")
+			_ = s.LogEvent("warning", "origin bullet drafting failed for "+group.OriginHeading+": "+err.Error())
+			continue
 		}
+		_ = s.recordBulletGenerationEvent(jobID, group.OriginHeading, "llm_returned", "ok", fmt.Sprintf("drafts=%d", len(parsed)), "")
+
+		_ = s.LogEvent(
+			"info",
+			fmt.Sprintf(
+				"origin bullet drafting returned drafts: %s drafts=%d reqs=%d facts=%d claims=%d",
+				group.OriginHeading,
+				len(parsed),
+				len(group.Requirements),
+				len(group.Facts),
+				len(group.Claims),
+			),
+		)
 
 		parsedAll = append(parsedAll, parsed...)
 	}
@@ -655,6 +697,29 @@ func matchCanDriveBullet(match JobFactMatch) bool {
 }
 
 func (s *Store) generateBulletDraftsForOrigin(ctx context.Context, client *http.Client, job JobDescription, group bulletOriginGroup, styleRules string) ([]parsedBulletDraft, error) {
+	attempts := []struct {
+		maxDrafts int
+		compact   bool
+	}{
+		{maxDrafts: 3},
+		{maxDrafts: 2, compact: true},
+		{maxDrafts: 1, compact: true},
+	}
+
+	var lastErr error
+	for index, attempt := range attempts {
+		_ = s.recordBulletGenerationEvent(job.ID, group.OriginHeading, "llm_started", "attempt", fmt.Sprintf("attempt=%d max_drafts=%d compact=%t", index+1, attempt.maxDrafts, attempt.compact), "")
+		parsed, err := s.generateBulletDraftsForOriginAttempt(ctx, client, job, group, styleRules, attempt.maxDrafts, attempt.compact)
+		if err == nil {
+			return parsed, nil
+		}
+		lastErr = err
+		_ = s.recordBulletGenerationEvent(job.ID, group.OriginHeading, "parse_failed", "retry", err.Error(), "")
+	}
+	return nil, lastErr
+}
+
+func (s *Store) generateBulletDraftsForOriginAttempt(ctx context.Context, client *http.Client, job JobDescription, group bulletOriginGroup, styleRules string, maxDrafts int, compact bool) ([]parsedBulletDraft, error) {
 	reqJSON, _ := json.Marshal(group.Requirements)
 	matchJSON, _ := json.Marshal(group.Matches)
 
@@ -668,6 +733,19 @@ func (s *Store) generateBulletDraftsForOrigin(ctx context.Context, client *http.
 
 	system := `You are JD Tailor's section-scoped resume bullet drafter. Return strict JSON only.
 Write bullet suggestions for one resume origin only. Never use facts from another origin.`
+
+	resumeValueRules := `- Prefer bullets that show concrete engineering output, technical ownership, system design, production reliability, security, observability, or measurable scope.
+- Prefer real artifacts over generic skills: APIs, backend services, data models, ingestion pipelines, auth systems, tracing, background jobs, schedulers, distributed systems, UI surfaces, packaging systems.
+- Prefer supported outcomes: improved debugging, reduced manual work, reliability, validation, auditability, recovery, processing quality, or delivery breadth.
+- Prefer bullets with clear action + artifact + technical detail + supported outcome/scope.
+- Do not write low-value bullets only to cover missing JD terms.
+- Do not force bullets for soft skills, degree requirements, team culture, collaboration, generic ownership, or domain language unless same-origin evidence directly supports it.
+- If a JD requirement is only weakly supported, do not write a bullet for it unless the underlying evidence is still strong and resume-worthy.`
+	if compact {
+		resumeValueRules = `- Return only the best evidence-backed bullets for this origin.
+- Prefer concrete software artifacts, production reliability, architecture, data, security, observability, or shipped UI surfaces.
+- Skip degree, soft-skill, culture, generic collaboration, and weak keyword-overlap requirements.`
+	}
 
 	user := fmt.Sprintf(`# Task
 Generate the strongest resume-worthy bullet suggestions for this origin only.
@@ -683,6 +761,9 @@ origin_type: %s
 # Output JSON schema
 {"drafts":[{"origin_heading":"","origin_type":"","requirement_id":0,"requirement_ids":[0],"claim_ids":[0],"fact_ids":[0],"draft_text":"","rationale":"","risk_flags":[]}]}
 
+# Draft budget
+Return at most %d drafts.
+
 # Section-scope rules
 - Every draft must use origin_heading="%s" and origin_type="%s".
 - Every claim_id must exist in <candidate_claims_json>.
@@ -694,13 +775,7 @@ origin_type: %s
 - If the JD asks for a tool, domain, production scope, or responsibility not supported by this origin, omit it or phrase the match conservatively.
 
 # Resume-value rules
-- Prefer bullets that show concrete engineering output, technical ownership, system design, production reliability, security, observability, or measurable scope.
-- Prefer real artifacts over generic skills: APIs, backend services, data models, ingestion pipelines, auth systems, tracing, background jobs, schedulers, distributed systems, UI surfaces, packaging systems.
-- Prefer supported outcomes: improved debugging, reduced manual work, reliability, validation, auditability, recovery, processing quality, or delivery breadth.
-- Prefer bullets with clear action + artifact + technical detail + supported outcome/scope.
-- Do not write low-value bullets only to cover missing JD terms.
-- Do not force bullets for soft skills, degree requirements, team culture, collaboration, generic ownership, or domain language unless same-origin evidence directly supports it.
-- If a JD requirement is only weakly supported, do not write a bullet for it unless the underlying evidence is still strong and resume-worthy.
+%s
 
 # Requirement usage
 - requirement_id should identify the main JD requirement this bullet best supports.
@@ -752,8 +827,10 @@ Missing/unsupported: mention any important JD detail that was not supported and 
 </candidate_facts_json>`,
 		group.OriginHeading,
 		group.OriginType,
+		maxDrafts,
 		group.OriginHeading,
 		group.OriginType,
+		resumeValueRules,
 		firstNonEmpty(styleRules, "Use plain, specific, evidence-backed resume language."),
 		job.Company,
 		job.Title,
@@ -768,7 +845,14 @@ Missing/unsupported: mention any important JD detail that was not supported and 
 		return nil, err
 	}
 
-	return parseBulletDrafts(text)
+	parsed, err := parseBulletDrafts(text)
+	if err != nil {
+		return nil, err
+	}
+	if maxDrafts > 0 && len(parsed) > maxDrafts {
+		parsed = parsed[:maxDrafts]
+	}
+	return parsed, nil
 }
 
 func appendUniqueRequirement(list []JobRequirement, req JobRequirement) []JobRequirement {
@@ -937,7 +1021,8 @@ func (s *Store) ListTailoredBulletDrafts(jobID int64) ([]TailoredBulletDraft, er
 	rows, err := s.db.QueryContext(
 		context.Background(),
 		`SELECT id, job_id, requirement_id, fact_ids_json, draft_text, rationale, status, risk_flags_json, created_at, updated_at,
-			claim_ids_json, origin_heading, origin_type, selection_score, selected_for_resume
+			claim_ids_json, origin_heading, origin_type, selection_score, selected_for_resume,
+			resume_value_score, jd_relevance_score, origin_weight, risk_penalty, unsupported_context_penalty, selection_reason
 		FROM tailored_bullet_drafts WHERE job_id = ?
 		ORDER BY selected_for_resume DESC, selection_score DESC, CASE status WHEN 'needs_review' THEN 0 WHEN 'accepted' THEN 1 ELSE 2 END, id DESC`,
 		jobID,
@@ -947,6 +1032,45 @@ func (s *Store) ListTailoredBulletDrafts(jobID int64) ([]TailoredBulletDraft, er
 	}
 	defer rows.Close()
 	return scanTailoredBulletDrafts(rows)
+}
+
+func (s *Store) ListBulletGenerationEvents(jobID int64) ([]BulletGenerationEvent, error) {
+	rows, err := s.db.QueryContext(
+		context.Background(),
+		`SELECT id, job_id, origin_heading, stage, status, reason, draft_text, created_at
+		FROM bullet_generation_events WHERE job_id = ?
+		ORDER BY id DESC LIMIT 200`,
+		jobID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanBulletGenerationEvents(rows)
+}
+
+func (s *Store) clearBulletGenerationEvents(jobID int64) error {
+	_, err := s.db.ExecContext(context.Background(), `DELETE FROM bullet_generation_events WHERE job_id = ?`, jobID)
+	return err
+}
+
+func (s *Store) recordBulletGenerationEvent(jobID int64, originHeading, stage, status, reason, draftText string) error {
+	if jobID <= 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(
+		context.Background(),
+		`INSERT INTO bullet_generation_events (job_id, origin_heading, stage, status, reason, draft_text, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		jobID,
+		strings.TrimSpace(originHeading),
+		strings.TrimSpace(stage),
+		strings.TrimSpace(status),
+		strings.TrimSpace(reason),
+		strings.TrimSpace(draftText),
+		time.Now().UTC().Format(time.RFC3339),
+	)
+	return err
 }
 
 func (s *Store) UpdateTailoredBulletDraft(input UpdateTailoredBulletDraftInput) (TailoredBulletDraft, error) {
@@ -1001,6 +1125,7 @@ func (s *Store) AutoSelectResumeBullets(jobID int64) ([]TailoredBulletDraft, err
 	}
 	selectedIDs := map[int64]bool{}
 	originCounts := map[string]int{}
+	candidates := []TailoredBulletDraft{}
 	for _, draft := range drafts {
 		if draft.Status == "rejected" || draftHasUnsupportedRisk(draft.RiskFlags) {
 			continue
@@ -1010,19 +1135,44 @@ func (s *Store) AutoSelectResumeBullets(jobID int64) ([]TailoredBulletDraft, err
 			continue
 		}
 
-		originKey := strings.TrimSpace(draft.OriginType) + "|" + strings.TrimSpace(draft.OriginHeading)
-		budget := bulletBudgetForSectionType(draft.OriginType)
-		if budget <= 0 {
-			budget = 2
-		}
+		candidates = append(candidates, draft)
+	}
 
-		if originCounts[originKey] >= budget {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].SelectionScore > candidates[j].SelectionScore
+	})
+
+	// First pass: guarantee at least one good bullet from each major experience origin.
+	coveredExperienceOrigins := map[string]bool{}
+	for _, draft := range candidates {
+		if normalizeOriginPart(draft.OriginType) != "experience" {
 			continue
 		}
+		originKey := originKey(draft.OriginHeading, draft.OriginType)
+		if coveredExperienceOrigins[originKey] {
+			continue
+		}
+		if !autoSelectCanAdd(draft, originCounts) {
+			continue
+		}
+		selectedIDs[draft.ID] = true
+		originCounts[originKey]++
+		coveredExperienceOrigins[originKey] = true
+	}
 
+	// Second pass: fill by score, subject to origin budgets and project penalties.
+	for _, draft := range candidates {
+		if selectedIDs[draft.ID] {
+			continue
+		}
+		if !autoSelectCanAdd(draft, originCounts) {
+			continue
+		}
+		originKey := originKey(draft.OriginHeading, draft.OriginType)
 		selectedIDs[draft.ID] = true
 		originCounts[originKey]++
 	}
+
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return nil, err
@@ -1040,7 +1190,24 @@ func (s *Store) AutoSelectResumeBullets(jobID int64) ([]TailoredBulletDraft, err
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	for _, draft := range candidates {
+		if selectedIDs[draft.ID] {
+			_ = s.recordBulletGenerationEvent(jobID, draft.OriginHeading, "selected", "ok", draft.SelectionReason, draft.DraftText)
+		}
+	}
 	return s.ListTailoredBulletDrafts(jobID)
+}
+
+func autoSelectCanAdd(draft TailoredBulletDraft, originCounts map[string]int) bool {
+	key := originKey(draft.OriginHeading, draft.OriginType)
+	budget := bulletBudgetForSectionType(draft.OriginType)
+	if budget <= 0 {
+		budget = 2
+	}
+	if normalizeOriginPart(draft.OriginType) == "project" && strings.Contains(strings.ToLower(draft.SelectionReason+" "+draft.Rationale), "production") {
+		budget = 1
+	}
+	return originCounts[key] < budget
 }
 
 func (s *Store) DeleteTailoredBulletDraft(input DeleteInput) error {
@@ -1211,8 +1378,15 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 
 		originHeading := strings.TrimSpace(draft.OriginHeading)
 		originType := strings.TrimSpace(draft.OriginType)
+		if originHeading == "" || originType == "" {
+			originHeading, originType = inferDraftOrigin(draft, factsByID, claimsByID)
+			draft.OriginHeading = originHeading
+			draft.OriginType = originType
+		}
 
 		if draft.DraftText == "" || !reqIDs[draft.RequirementID] || originHeading == "" || originType == "" {
+			_ = s.recordBulletGenerationEvent(jobID, originHeading, "validation_rejected", "rejected", "missing text, requirement, or origin", draft.DraftText)
+			_ = s.LogEvent("warning", "bullet draft rejected: missing text, requirement, or origin")
 			continue
 		}
 
@@ -1232,6 +1406,8 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 		validClaimIDs = uniqueInt64s(validClaimIDs)
 
 		if len(validClaimIDs) == 0 {
+			_ = s.recordBulletGenerationEvent(jobID, originHeading, "validation_rejected", "rejected", "no valid same-origin claims", draft.DraftText)
+			_ = s.LogEvent("warning", "bullet draft rejected: no valid same-origin claims for "+originHeading+" text="+draft.DraftText)
 			continue
 		}
 
@@ -1254,7 +1430,8 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 				continue
 			}
 
-			if !sameOrigin(fact.SectionHeading, fact.SectionType, originHeading, originType) {
+			if strings.TrimSpace(fact.SectionHeading) != "" && strings.TrimSpace(fact.SectionType) != "" &&
+				!sameOrigin(fact.SectionHeading, fact.SectionType, originHeading, originType) {
 				continue
 			}
 
@@ -1263,11 +1440,14 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 		validFactIDs = uniqueInt64s(validFactIDs)
 
 		if len(validFactIDs) == 0 {
+			_ = s.recordBulletGenerationEvent(jobID, originHeading, "validation_rejected", "rejected", "no valid same-origin supporting facts", draft.DraftText)
+			_ = s.LogEvent("warning", "bullet draft rejected: no valid same-origin supporting facts for "+originHeading+" text="+draft.DraftText)
 			continue
 		}
 
 		originKey, originBudget := draftOriginBudgetFromOrigin(originHeading, originType)
 		if originBudget > 0 && originCounts[originKey] >= originBudget {
+			_ = s.recordBulletGenerationEvent(jobID, originHeading, "validation_rejected", "rejected", "origin budget reached", draft.DraftText)
 			continue
 		}
 
@@ -1292,6 +1472,8 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 		))
 
 		if draftHasUnsupportedRisk(draft.RiskFlags) {
+			_ = s.recordBulletGenerationEvent(jobID, originHeading, "validation_rejected", "rejected", "unsupported risk: "+strings.Join(draft.RiskFlags, ","), draft.DraftText)
+			_ = s.LogEvent("warning", "bullet draft rejected: unsupported risk for "+originHeading+" flags="+strings.Join(draft.RiskFlags, ",")+" text="+draft.DraftText)
 			continue
 		}
 
@@ -1301,17 +1483,20 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 		}
 
 		if lowResumeValueDraft(draft, validClaimIDs, claimsByID) {
+			_ = s.recordBulletGenerationEvent(jobID, originHeading, "validation_rejected", "rejected", "low resume value", draft.DraftText)
+			_ = s.LogEvent("warning", "bullet draft rejected: low resume value for "+originHeading+" text="+draft.DraftText)
 			continue
 		}
 
-		selectionScore := draftSelectionScore(draft, reqsByID[draft.RequirementID], validClaimIDs, claimsByID)
+		score := draftSelectionScoreDetail(draft, reqsByID[draft.RequirementID], validClaimIDs, claimsByID)
 
 		if _, err := tx.ExecContext(
 			context.Background(),
 			`INSERT INTO tailored_bullet_drafts
 				(job_id, requirement_id, fact_ids_json, draft_text, rationale, status, risk_flags_json, created_at, updated_at,
-				claim_ids_json, origin_heading, origin_type, selection_score, selected_for_resume)
-			VALUES (?, ?, ?, ?, ?, 'needs_review', ?, ?, ?, ?, ?, ?, ?, 0)`,
+				claim_ids_json, origin_heading, origin_type, selection_score, selected_for_resume,
+				resume_value_score, jd_relevance_score, origin_weight, risk_penalty, unsupported_context_penalty, selection_reason)
+			VALUES (?, ?, ?, ?, ?, 'needs_review', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
 			jobID,
 			draft.RequirementID,
 			factIDsJSON,
@@ -1323,11 +1508,18 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 			claimIDsJSON,
 			originHeading,
 			originType,
-			selectionScore,
+			score.Final,
+			score.ResumeValue,
+			score.JDRelevance,
+			score.OriginWeight,
+			score.RiskPenalty,
+			score.UnsupportedPenalty,
+			score.Reason,
 		); err != nil {
 			return nil, err
 		}
 
+		_ = s.recordBulletGenerationEvent(jobID, originHeading, "inserted", "ok", score.Reason, draft.DraftText)
 		count++
 
 		if originBudget > 0 {
@@ -1353,37 +1545,8 @@ func lowResumeValueDraft(draft parsedBulletDraft, claimIDs []int64, claimsByID m
 	}
 
 	text := strings.ToLower(strings.TrimSpace(draft.DraftText))
-	if invalidBulletText(text) {
-		return true
-	}
 
-	// Reject bullets that are just generic statements.
-	genericPhrases := []string{
-		"worked on",
-		"helped with",
-		"used various",
-		"contributed to team",
-		"collaborated with",
-		"supported development",
-		"participated in",
-	}
-
-	for _, phrase := range genericPhrases {
-		if strings.Contains(text, phrase) {
-			return true
-		}
-	}
-
-	valueScore := 0.0
-	for _, claimID := range claimIDs {
-		valueScore += claimResumeValueScore(claimsByID[claimID])
-	}
-
-	if len(claimIDs) > 0 {
-		valueScore = valueScore / float64(len(claimIDs))
-	}
-
-	return valueScore < 0.35
+	return text == ""
 }
 
 func parseJobRequirements(text string) ([]parsedJobRequirement, error) {
@@ -1428,6 +1591,22 @@ func draftOriginBudgetFromOrigin(originHeading string, originType string) (strin
 	return key, bulletBudgetForSectionType(originType)
 }
 
+func inferDraftOrigin(draft parsedBulletDraft, factsByID map[int64]factPromptContext, claimsByID map[int64]CandidateClaim) (string, string) {
+	for _, factID := range draft.FactIDs {
+		fact, ok := factsByID[factID]
+		if ok && strings.TrimSpace(fact.SectionHeading) != "" && strings.TrimSpace(fact.SectionType) != "" {
+			return strings.TrimSpace(fact.SectionHeading), strings.TrimSpace(fact.SectionType)
+		}
+	}
+	for _, claimID := range draft.ClaimIDs {
+		claim, ok := claimsByID[claimID]
+		if ok && strings.TrimSpace(claim.OriginHeading) != "" && strings.TrimSpace(claim.OriginType) != "" {
+			return strings.TrimSpace(claim.OriginHeading), strings.TrimSpace(claim.OriginType)
+		}
+	}
+	return "", ""
+}
+
 func sameOrigin(aHeading, aType, bHeading, bType string) bool {
 	return normalizeOriginPart(aHeading) == normalizeOriginPart(bHeading) &&
 		normalizeOriginPart(aType) == normalizeOriginPart(bType)
@@ -1446,27 +1625,30 @@ func claimAllowedForOriginDraft(claim CandidateClaim, originHeading string, orig
 		return false
 	}
 
-	claimOriginHeading := strings.TrimSpace(claim.OriginHeading)
-	claimOriginType := strings.TrimSpace(claim.OriginType)
-
-	if claimOriginHeading != "" || claimOriginType != "" {
-		if !sameOrigin(claimOriginHeading, claimOriginType, originHeading, originType) {
-			return false
-		}
-	}
-
+	hasSourceFacts := false
 	for _, factID := range claim.SourceFactIDs {
 		fact, ok := factsByID[factID]
 		if !ok {
 			return false
 		}
+		hasSourceFacts = true
 
-		if !sameOrigin(fact.SectionHeading, fact.SectionType, originHeading, originType) {
+		if strings.TrimSpace(fact.SectionHeading) != "" && strings.TrimSpace(fact.SectionType) != "" &&
+			!sameOrigin(fact.SectionHeading, fact.SectionType, originHeading, originType) {
 			return false
 		}
 	}
 
-	return true
+	if hasSourceFacts {
+		return true
+	}
+
+	claimOriginHeading := strings.TrimSpace(claim.OriginHeading)
+	claimOriginType := strings.TrimSpace(claim.OriginType)
+	if claimOriginHeading == "" && claimOriginType == "" {
+		return true
+	}
+	return sameOrigin(claimOriginHeading, claimOriginType, originHeading, originType)
 }
 
 func sectionScopeRiskFlags(
@@ -1494,6 +1676,25 @@ func sectionScopeRiskFlags(
 
 		claimOriginHeading := strings.TrimSpace(claim.OriginHeading)
 		claimOriginType := strings.TrimSpace(claim.OriginType)
+		hasSourceFacts := false
+		sourceFactsSameOrigin := true
+		for _, factID := range claim.SourceFactIDs {
+			fact, ok := factsByID[factID]
+			if !ok {
+				continue
+			}
+			hasSourceFacts = true
+			if strings.TrimSpace(fact.SectionHeading) != "" && strings.TrimSpace(fact.SectionType) != "" &&
+				!sameOrigin(fact.SectionHeading, fact.SectionType, originHeading, originType) {
+				sourceFactsSameOrigin = false
+			}
+		}
+		if hasSourceFacts {
+			if !sourceFactsSameOrigin {
+				flags = append(flags, "cross_origin_claim")
+			}
+			continue
+		}
 
 		if claimOriginHeading != "" || claimOriginType != "" {
 			if !sameOrigin(claimOriginHeading, claimOriginType, originHeading, originType) {
@@ -1509,7 +1710,8 @@ func sectionScopeRiskFlags(
 			continue
 		}
 
-		if !sameOrigin(fact.SectionHeading, fact.SectionType, originHeading, originType) {
+		if strings.TrimSpace(fact.SectionHeading) != "" && strings.TrimSpace(fact.SectionType) != "" &&
+			!sameOrigin(fact.SectionHeading, fact.SectionType, originHeading, originType) {
 			flags = append(flags, "cross_origin_fact")
 		}
 	}
@@ -1559,8 +1761,25 @@ func draftHasUnsupportedRisk(flags []string) bool {
 	return false
 }
 
+type draftScoreDetail struct {
+	Final              float64
+	ResumeValue        float64
+	JDRelevance        float64
+	OriginWeight       float64
+	RiskPenalty        float64
+	UnsupportedPenalty float64
+	Reason             string
+}
+
 func draftSelectionScore(draft parsedBulletDraft, req JobRequirement, claimIDs []int64, claimsByID map[int64]CandidateClaim) float64 {
-	score := 0.25
+	return draftSelectionScoreDetail(draft, req, claimIDs, claimsByID).Final
+}
+
+func draftSelectionScoreDetail(draft parsedBulletDraft, req JobRequirement, claimIDs []int64, claimsByID map[int64]CandidateClaim) draftScoreDetail {
+	detail := draftScoreDetail{
+		Final:        0.25,
+		OriginWeight: originResumeWeight(draft.OriginType, draft.OriginHeading),
+	}
 
 	// 1. Resume value is primary.
 	valueTotal := 0.0
@@ -1569,48 +1788,95 @@ func draftSelectionScore(draft parsedBulletDraft, req JobRequirement, claimIDs [
 		valueTotal += claimResumeValueScore(claim)
 	}
 	if len(claimIDs) > 0 {
-		score += (valueTotal / float64(len(claimIDs))) * 0.45
+		detail.ResumeValue = valueTotal / float64(len(claimIDs))
+		detail.Final += detail.ResumeValue * 0.45
 	}
 
 	// 2. JD relevance is secondary.
 	switch req.Priority {
 	case "high":
-		score += 0.12
+		detail.JDRelevance = 0.12
 	case "medium":
-		score += 0.07
+		detail.JDRelevance = 0.07
 	case "low":
-		score += 0.02
+		detail.JDRelevance = 0.02
 	}
+	if req.Category == "must_have" || req.Category == "responsibility" {
+		detail.JDRelevance += 0.03
+	}
+	detail.Final += detail.JDRelevance
 
 	// 3. Prefer real work experience over projects when the JD asks for production.
 	reqText := strings.ToLower(req.RequirementText)
 	if draft.OriginType == "experience" {
-		score += 0.08
+		detail.Final += 0.08
 	}
 
 	if draft.OriginType == "project" && strings.Contains(reqText, "production") {
-		score -= 0.12
+		detail.UnsupportedPenalty += 0.12
 	}
 
 	// 4. Penalize weak or inferred tailoring.
 	for _, flag := range draft.RiskFlags {
 		switch flag {
 		case "weak_evidence":
-			score -= 0.10
+			detail.RiskPenalty += 0.10
 		case "inferred_tailoring":
-			score -= 0.08
+			detail.RiskPenalty += 0.08
 		case "ambiguous technology", "ambiguous_technology":
-			score -= 0.06
+			detail.RiskPenalty += 0.06
 		default:
-			score -= 0.03
+			detail.RiskPenalty += 0.03
 		}
 	}
 
 	if looksLikeToolListBullet(draft.DraftText) {
-		score -= 0.12
+		detail.RiskPenalty += 0.12
 	}
 
-	return clampScore(score)
+	detail.Final -= detail.RiskPenalty + detail.UnsupportedPenalty
+	detail.Final *= detail.OriginWeight
+	detail.Final = clampScore(detail.Final)
+	detail.Reason = draftSelectionReason(draft, detail)
+	return detail
+}
+
+func originResumeWeight(originType, originHeading string) float64 {
+	typ := strings.ToLower(strings.TrimSpace(originType))
+	heading := strings.ToLower(strings.TrimSpace(originHeading))
+
+	switch typ {
+	case "experience":
+		if strings.Contains(heading, "sitespace") {
+			return 1.18
+		}
+		if strings.Contains(heading, "tata") || strings.Contains(heading, "tcs") {
+			return 1.08
+		}
+		return 1.0
+	case "project":
+		return 0.82
+	default:
+		return 0.65
+	}
+}
+
+func draftSelectionReason(draft parsedBulletDraft, detail draftScoreDetail) string {
+	parts := []string{
+		fmt.Sprintf("resume %.0f%%", detail.ResumeValue*100),
+		fmt.Sprintf("JD %.0f%%", detail.JDRelevance*100),
+		fmt.Sprintf("origin x%.2f", detail.OriginWeight),
+	}
+	if detail.RiskPenalty > 0 {
+		parts = append(parts, fmt.Sprintf("risk -%.0f%%", detail.RiskPenalty*100))
+	}
+	if detail.UnsupportedPenalty > 0 {
+		parts = append(parts, fmt.Sprintf("unsupported -%.0f%%", detail.UnsupportedPenalty*100))
+	}
+	if draft.OriginType == "project" && detail.OriginWeight < 1 {
+		parts = append(parts, "project evidence capped below experience evidence")
+	}
+	return strings.Join(parts, "; ")
 }
 
 func looksLikeToolListBullet(text string) bool {
@@ -1722,12 +1988,10 @@ func parseBulletDrafts(text string) ([]parsedBulletDraft, error) {
 	}
 
 	for _, draft := range parsed.Drafts {
-		if strings.TrimSpace(draft.OriginHeading) == "" ||
-			strings.TrimSpace(draft.OriginType) == "" ||
-			strings.TrimSpace(draft.DraftText) == "" ||
+		if strings.TrimSpace(draft.DraftText) == "" ||
 			len(draft.ClaimIDs) == 0 ||
 			len(draft.FactIDs) == 0 {
-			return nil, errors.New("every draft must include origin_heading, origin_type, draft_text, claim_ids, and fact_ids")
+			return nil, errors.New("every draft must include draft_text, claim_ids, and fact_ids")
 		}
 	}
 
@@ -1862,60 +2126,6 @@ func hasConcreteRequirementVerb(line string) bool {
 		}
 	}
 	return false
-}
-
-func fallbackBulletDraftsForOrigin(group bulletOriginGroup) []parsedBulletDraft {
-	reqsByID := map[int64]JobRequirement{}
-	for _, req := range group.Requirements {
-		reqsByID[req.ID] = req
-	}
-
-	claimsByFactID := map[int64][]CandidateClaim{}
-	for _, claim := range group.Claims {
-		if !claimAllowedForDrafts(claim) {
-			continue
-		}
-
-		for _, factID := range claim.SourceFactIDs {
-			claimsByFactID[factID] = append(claimsByFactID[factID], claim)
-		}
-	}
-
-	drafts := []parsedBulletDraft{}
-	seen := map[string]bool{}
-
-	for _, match := range group.Matches {
-		req, ok := reqsByID[match.RequirementID]
-		if !ok {
-			continue
-		}
-
-		for _, claim := range claimsByFactID[match.FactID] {
-			text := fallbackBulletTextFromClaim(claim, req)
-			if text == "" {
-				continue
-			}
-
-			key := fmt.Sprintf("%d|%d|%s", req.ID, claim.ID, strings.ToLower(text))
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-
-			drafts = append(drafts, parsedBulletDraft{
-				OriginHeading: group.OriginHeading,
-				OriginType:    group.OriginType,
-				RequirementID: req.ID,
-				ClaimIDs:      []int64{claim.ID},
-				FactIDs:       []int64{match.FactID},
-				DraftText:     text,
-				Rationale:     "Local same-origin atom-bank draft for " + req.RequirementText + " from " + group.OriginHeading,
-				RiskFlags:     claim.RiskFlags,
-			})
-		}
-	}
-
-	return drafts
 }
 
 func fallbackJobRequirements(raw string) []parsedJobRequirement {
@@ -2787,7 +2997,8 @@ func (s *Store) getTailoredBulletDraft(id int64) (TailoredBulletDraft, error) {
 	rows, err := s.db.QueryContext(
 		context.Background(),
 		`SELECT id, job_id, requirement_id, fact_ids_json, draft_text, rationale, status, risk_flags_json, created_at, updated_at,
-			claim_ids_json, origin_heading, origin_type, selection_score, selected_for_resume
+			claim_ids_json, origin_heading, origin_type, selection_score, selected_for_resume,
+			resume_value_score, jd_relevance_score, origin_weight, risk_penalty, unsupported_context_penalty, selection_reason
 		FROM tailored_bullet_drafts WHERE id = ?`,
 		id,
 	)
@@ -2883,6 +3094,12 @@ func scanTailoredBulletDrafts(rows *sql.Rows) ([]TailoredBulletDraft, error) {
 			&draft.OriginType,
 			&draft.SelectionScore,
 			&selected,
+			&draft.ResumeValueScore,
+			&draft.JDRelevanceScore,
+			&draft.OriginWeight,
+			&draft.RiskPenalty,
+			&draft.UnsupportedPenalty,
+			&draft.SelectionReason,
 		); err != nil {
 			return nil, err
 		}
@@ -2893,6 +3110,27 @@ func scanTailoredBulletDrafts(rows *sql.Rows) ([]TailoredBulletDraft, error) {
 		drafts = append(drafts, draft)
 	}
 	return drafts, rows.Err()
+}
+
+func scanBulletGenerationEvents(rows *sql.Rows) ([]BulletGenerationEvent, error) {
+	events := []BulletGenerationEvent{}
+	for rows.Next() {
+		var event BulletGenerationEvent
+		if err := rows.Scan(
+			&event.ID,
+			&event.JobID,
+			&event.OriginHeading,
+			&event.Stage,
+			&event.Status,
+			&event.Reason,
+			&event.DraftText,
+			&event.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		events = append(events, event)
+	}
+	return events, rows.Err()
 }
 
 func encodeInt64List(values []int64) (string, error) {
@@ -2999,9 +3237,13 @@ func invalidBulletText(text string) bool {
 	}
 
 	badPhrases := []string{
-		"api development across",
+		"design backend development",
 		"built api development",
-		"using machine learning audio feature extraction and live ranking", // optional: too vague if unsupported by exact facts
+		"api development across",
+		"using postgresql/sql across",
+		"using fastapi/sql across",
+		"across activities, and",
+		"and ai-assisted workflows, and",
 		"worked on",
 		"helped with",
 		"used various",
@@ -3018,13 +3260,37 @@ func invalidBulletText(text string) bool {
 		}
 	}
 
-	// Catches junk fragments like "2:3, 3:2".
 	if strings.Contains(lower, "2:3") || strings.Contains(lower, "3:2") {
 		return true
 	}
 
-	// Catches malformed claim text like "a and control surface".
 	if strings.Contains(lower, " a and ") {
+		return true
+	}
+
+	words := strings.Fields(lower)
+	if len(words) < 10 {
+		return true
+	}
+
+	first := strings.Trim(words[0], " ,.;:")
+	validStarts := map[string]bool{
+		"built":         true,
+		"designed":      true,
+		"implemented":   true,
+		"refactored":    true,
+		"developed":     true,
+		"modeled":       true,
+		"shipped":       true,
+		"created":       true,
+		"integrated":    true,
+		"containerized": true,
+		"automated":     true,
+		"optimized":     true,
+		"improved":      true,
+	}
+
+	if !validStarts[first] {
 		return true
 	}
 

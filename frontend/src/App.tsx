@@ -27,6 +27,7 @@ import {
   AnalyzeJobDescription,
   ApplicationStrategy,
   AutoSelectResumeBullets,
+  BulletGenerationEvent,
   CandidateProfile,
   CandidateProfileRecord,
   CandidateSource,
@@ -72,6 +73,7 @@ import {
   ListJobDescriptions,
   ListJobFactMatches,
   ListJobRequirements,
+  ListBulletGenerationEvents,
   ListPromptResearchSources,
   ListPromptRules,
   ListSourceSections,
@@ -190,6 +192,7 @@ function App() {
   const [jobRequirements, setJobRequirements] = useState<JobRequirement[]>([]);
   const [jobMatches, setJobMatches] = useState<JobFactMatch[]>([]);
   const [bulletDrafts, setBulletDrafts] = useState<TailoredBulletDraft[]>([]);
+  const [bulletEvents, setBulletEvents] = useState<BulletGenerationEvent[]>([]);
   const [jobAnalysis, setJobAnalysis] = useState<JobAnalysis | null>(null);
   const [fitAnalysis, setFitAnalysis] = useState<JobFitAnalysis | null>(null);
   const [applicationStrategy, setApplicationStrategy] = useState<ApplicationStrategy | null>(null);
@@ -322,15 +325,17 @@ function App() {
       setJobRequirements([]);
       setJobMatches([]);
       setBulletDrafts([]);
+      setBulletEvents([]);
       setJobAnalysis(null);
       setFitAnalysis(null);
       setApplicationStrategy(null);
       return;
     }
-    const [requirements, matches, drafts, analysis, fit, strategy] = await Promise.all([
+    const [requirements, matches, drafts, generationEvents, analysis, fit, strategy] = await Promise.all([
       ListJobRequirements(jobID),
       ListJobFactMatches(jobID),
       ListTailoredBulletDrafts(jobID),
+      ListBulletGenerationEvents(jobID),
       GetJobAnalysis(jobID).catch(() => null),
       GetFitAnalysis(jobID).catch(() => null),
       GetApplicationStrategy(jobID).catch(() => null),
@@ -338,6 +343,7 @@ function App() {
     setJobRequirements(normalizeRequirements(requirements as JobRequirement[] | null | undefined));
     setJobMatches(normalizeMatches(matches as JobFactMatch[] | null | undefined));
     setBulletDrafts(normalizeDrafts(drafts as TailoredBulletDraft[] | null | undefined));
+    setBulletEvents(normalizeBulletEvents(generationEvents as BulletGenerationEvent[] | null | undefined));
     setJobAnalysis(normalizeJobAnalysis(analysis as JobAnalysis | null | undefined));
     setFitAnalysis(normalizeFitAnalysis(fit as JobFitAnalysis | null | undefined));
     setApplicationStrategy(normalizeApplicationStrategy(strategy as ApplicationStrategy | null | undefined));
@@ -549,6 +555,7 @@ function App() {
       setClaims([]);
       setJobMatches([]);
       setBulletDrafts([]);
+      setBulletEvents([]);
       setFitAnalysis(null);
       setApplicationStrategy(null);
       await refreshEvents();
@@ -769,6 +776,8 @@ function App() {
     await runAction('generate-bullets', async () => {
       const drafts = (await GenerateTailoredBulletDrafts(selectedJobID)) as TailoredBulletDraft[];
       setBulletDrafts(normalizeDrafts(drafts));
+      const generationEvents = (await ListBulletGenerationEvents(selectedJobID)) as BulletGenerationEvent[];
+      setBulletEvents(normalizeBulletEvents(generationEvents));
       await refreshEvents();
     });
   }
@@ -800,6 +809,8 @@ function App() {
     await runAction('auto-select-drafts', async () => {
       const drafts = (await AutoSelectResumeBullets(selectedJobID)) as TailoredBulletDraft[];
       setBulletDrafts(normalizeDrafts(drafts));
+      const generationEvents = (await ListBulletGenerationEvents(selectedJobID)) as BulletGenerationEvent[];
+      setBulletEvents(normalizeBulletEvents(generationEvents));
       await refreshEvents();
     });
   }
@@ -948,6 +959,7 @@ function App() {
           <JobsView
             busyAction={busyAction}
             applicationStrategy={applicationStrategy}
+            bulletEvents={bulletEvents}
             draft={jobDraft}
             facts={facts}
             fitAnalysis={fitAnalysis}
@@ -1253,6 +1265,7 @@ function SourcesView({
 function JobsView({
   busyAction,
   applicationStrategy,
+  bulletEvents,
   draft,
   facts,
   fitAnalysis,
@@ -1281,6 +1294,7 @@ function JobsView({
 }: {
   busyAction: string;
   applicationStrategy: ApplicationStrategy | null;
+  bulletEvents: BulletGenerationEvent[];
   draft: JobDraft;
   facts: EvidenceFact[];
   fitAnalysis: JobFitAnalysis | null;
@@ -1476,6 +1490,11 @@ function JobsView({
                     <StatusBadge text={item.status} />
                     {item.selected_for_resume && <StatusBadge text="selected" />}
                     <StatusBadge text={`${Math.round(item.selection_score * 100)} score`} />
+                    <StatusBadge text={`${Math.round(item.resume_value_score * 100)} resume`} />
+                    <StatusBadge text={`${Math.round(item.jd_relevance_score * 100)} JD`} />
+                    <StatusBadge text={`origin x${item.origin_weight.toFixed(2)}`} />
+                    {item.risk_penalty > 0 && <StatusBadge text={`${Math.round(item.risk_penalty * 100)} risk penalty`} />}
+                    {item.unsupported_context_penalty > 0 && <StatusBadge text={`${Math.round(item.unsupported_context_penalty * 100)} unsupported`} />}
                     <StatusBadge text={item.origin_type || 'unknown origin'} />
                     {item.origin_heading && <StatusBadge text={item.origin_heading} />}
                     <StatusBadge text={requirementLabel(item.requirement_id)} />
@@ -1493,6 +1512,11 @@ function JobsView({
                     <TextInput label="Rationale" value={item.rationale} onChange={(value) => onChangeDraft({...item, rationale: value})} />
                     <TextInput label="Risk flags" value={item.risk_flags.join(', ')} onChange={(value) => onChangeDraft({...item, risk_flags: splitList(value)})} />
                   </div>
+                  {item.selection_reason && (
+                    <p className="mt-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+                      {item.selected_for_resume ? 'Selected' : 'Not selected'}: {item.selection_reason}
+                    </p>
+                  )}
                   <div className="mt-3 grid gap-3 md:grid-cols-5">
                     <IconButton label="Save" onClick={() => onSaveDraft(item)} disabled={busyAction === `update-draft-${item.id}`}>
                       <Save size={16} />
@@ -1508,6 +1532,26 @@ function JobsView({
                     </IconButton>
                     <DangerButton label="Delete draft" onClick={() => onDeleteDraft(item.id)} />
                   </div>
+                </div>
+              ))
+            )}
+          </div>
+        </Panel>
+
+        <Panel icon={<Activity size={18} />} title="Bullet diagnostics" subtitle="Generation, rejection, insertion, and selection events for the current job.">
+          <div className="space-y-2">
+            {bulletEvents.length === 0 ? (
+              <EmptyState text="No bullet diagnostics yet." />
+            ) : (
+              bulletEvents.slice(0, 40).map((event) => (
+                <div key={event.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <StatusBadge text={event.stage} />
+                    <StatusBadge text={event.status} />
+                    {event.origin_heading && <StatusBadge text={event.origin_heading} />}
+                  </div>
+                  {event.reason && <p className="text-xs text-slate-600">{event.reason}</p>}
+                  {event.draft_text && <p className="mt-1 text-sm text-slate-900">{event.draft_text}</p>}
                 </div>
               ))
             )}
@@ -2612,7 +2656,24 @@ function normalizeDrafts(value?: TailoredBulletDraft[] | null) {
     origin_type: draft.origin_type || '',
     risk_flags: asStringArray(draft.risk_flags),
     selection_score: Number(draft.selection_score ?? 0),
+    resume_value_score: Number(draft.resume_value_score ?? 0),
+    jd_relevance_score: Number(draft.jd_relevance_score ?? 0),
+    origin_weight: Number(draft.origin_weight ?? 1),
+    risk_penalty: Number(draft.risk_penalty ?? 0),
+    unsupported_context_penalty: Number(draft.unsupported_context_penalty ?? 0),
+    selection_reason: draft.selection_reason || '',
     selected_for_resume: Boolean(draft.selected_for_resume),
+  }));
+}
+
+function normalizeBulletEvents(value?: BulletGenerationEvent[] | null) {
+  return asArray(value).map((event) => ({
+    ...event,
+    origin_heading: event.origin_heading || '',
+    stage: event.stage || '',
+    status: event.status || '',
+    reason: event.reason || '',
+    draft_text: event.draft_text || '',
   }));
 }
 

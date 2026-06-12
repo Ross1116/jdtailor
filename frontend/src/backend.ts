@@ -34,6 +34,7 @@ import {
   ListJobDescriptions as WailsListJobDescriptions,
   ListJobFactMatches as WailsListJobFactMatches,
   ListJobRequirements as WailsListJobRequirements,
+  ListBulletGenerationEvents as WailsListBulletGenerationEvents,
   ListPromptResearchSources as WailsListPromptResearchSources,
   ListPromptRules as WailsListPromptRules,
   ListBlockedClaims as WailsListBlockedClaims,
@@ -187,9 +188,26 @@ export type TailoredBulletDraft = {
   status: string;
   risk_flags: string[];
   selection_score: number;
+  resume_value_score: number;
+  jd_relevance_score: number;
+  origin_weight: number;
+  risk_penalty: number;
+  unsupported_context_penalty: number;
+  selection_reason: string;
   selected_for_resume: boolean;
   created_at: string;
   updated_at: string;
+};
+
+export type BulletGenerationEvent = {
+  id: number;
+  job_id: number;
+  origin_heading: string;
+  stage: string;
+  status: string;
+  reason: string;
+  draft_text: string;
+  created_at: string;
 };
 
 export type CandidateClaim = {
@@ -354,6 +372,7 @@ let mockJobs: JobDescription[] = [];
 let mockRequirements: JobRequirement[] = [];
 let mockMatches: JobFactMatch[] = [];
 let mockDrafts: TailoredBulletDraft[] = [];
+let mockBulletEvents: BulletGenerationEvent[] = [];
 let mockClaims: CandidateClaim[] = [];
 let mockBlockedClaims: BlockedClaim[] = defaultMockBlockedClaims();
 let mockAnalyses: JobAnalysis[] = [];
@@ -925,6 +944,12 @@ export async function GenerateTailoredBulletDrafts(jobID: number) {
       status: 'needs_review',
       risk_flags: [...new Set([...risky, ...styleRiskFlags(draftText)])].filter(Boolean),
       selection_score: Math.min(1, 0.65 + matchedClaims.length * 0.08 - risky.length * 0.03),
+      resume_value_score: Math.min(1, 0.55 + matchedClaims.length * 0.08),
+      jd_relevance_score: topMatches[0]?.score ?? 0,
+      origin_weight: claim.origin_type === 'project' ? 0.82 : claim.origin_type === 'experience' ? 1 : 0.65,
+      risk_penalty: risky.length * 0.03,
+      unsupported_context_penalty: 0,
+      selection_reason: `resume ${Math.round((0.55 + matchedClaims.length * 0.08) * 100)}%; JD ${Math.round((topMatches[0]?.score ?? 0) * 100)}%; origin ${claim.origin_type}`,
       selected_for_resume: false,
       created_at: timestamp,
       updated_at: timestamp,
@@ -932,6 +957,19 @@ export async function GenerateTailoredBulletDrafts(jobID: number) {
     originCounts.set(originKey, (originCounts.get(originKey) ?? 0) + 1);
   });
   mockDrafts = [...drafts, ...mockDrafts.filter((draft) => draft.job_id !== jobID)];
+  mockBulletEvents = [
+    ...drafts.map((draft) => ({
+      id: Date.now() + draft.id,
+      job_id: jobID,
+      origin_heading: draft.origin_heading,
+      stage: 'inserted',
+      status: 'ok',
+      reason: draft.selection_reason,
+      draft_text: draft.draft_text,
+      created_at: timestamp,
+    })),
+    ...mockBulletEvents.filter((event) => event.job_id !== jobID),
+  ];
   mockEvents.unshift(mockEvent('info', 'mock tailored bullet drafts generated'));
   return drafts;
 }
@@ -941,6 +979,13 @@ export async function ListTailoredBulletDrafts(jobID: number) {
     return WailsListTailoredBulletDrafts(jobID);
   }
   return mockDrafts.filter((draft) => draft.job_id === jobID);
+}
+
+export async function ListBulletGenerationEvents(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsListBulletGenerationEvents(jobID);
+  }
+  return mockBulletEvents.filter((event) => event.job_id === jobID);
 }
 
 export async function UpdateTailoredBulletDraft(input: {id: number; draft_text: string; rationale: string; status: string; risk_flags: string[]}) {

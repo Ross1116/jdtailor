@@ -311,6 +311,13 @@ func (a *App) ListTailoredBulletDrafts(jobID int64) ([]TailoredBulletDraft, erro
 	return a.store.ListTailoredBulletDrafts(jobID)
 }
 
+func (a *App) ListBulletGenerationEvents(jobID int64) ([]BulletGenerationEvent, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListBulletGenerationEvents(jobID)
+}
+
 func (a *App) UpdateTailoredBulletDraft(input UpdateTailoredBulletDraftInput) (TailoredBulletDraft, error) {
 	if err := a.ensureStore(); err != nil {
 		return TailoredBulletDraft{}, err

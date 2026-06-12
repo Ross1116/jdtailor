@@ -78,6 +78,32 @@ export namespace main {
 	        this.updated_at = source["updated_at"];
 	    }
 	}
+	export class BulletGenerationEvent {
+	    id: number;
+	    job_id: number;
+	    origin_heading: string;
+	    stage: string;
+	    status: string;
+	    reason: string;
+	    draft_text: string;
+	    created_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new BulletGenerationEvent(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.job_id = source["job_id"];
+	        this.origin_heading = source["origin_heading"];
+	        this.stage = source["stage"];
+	        this.status = source["status"];
+	        this.reason = source["reason"];
+	        this.draft_text = source["draft_text"];
+	        this.created_at = source["created_at"];
+	    }
+	}
 	export class CandidateClaim {
 	    id: number;
 	    claim_text: string;
@@ -866,6 +892,12 @@ export namespace main {
 	    status: string;
 	    risk_flags: string[];
 	    selection_score: number;
+	    resume_value_score: number;
+	    jd_relevance_score: number;
+	    origin_weight: number;
+	    risk_penalty: number;
+	    unsupported_context_penalty: number;
+	    selection_reason: string;
 	    selected_for_resume: boolean;
 	    created_at: string;
 	    updated_at: string;
@@ -888,6 +920,12 @@ export namespace main {
 	        this.status = source["status"];
 	        this.risk_flags = source["risk_flags"];
 	        this.selection_score = source["selection_score"];
+	        this.resume_value_score = source["resume_value_score"];
+	        this.jd_relevance_score = source["jd_relevance_score"];
+	        this.origin_weight = source["origin_weight"];
+	        this.risk_penalty = source["risk_penalty"];
+	        this.unsupported_context_penalty = source["unsupported_context_penalty"];
+	        this.selection_reason = source["selection_reason"];
 	        this.selected_for_resume = source["selected_for_resume"];
 	        this.created_at = source["created_at"];
 	        this.updated_at = source["updated_at"];

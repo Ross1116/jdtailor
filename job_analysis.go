@@ -215,7 +215,16 @@ func buildJobAnalysis(job JobDescription, requirements []JobRequirement) JobAnal
 			riskFlags = append(riskFlags, "domain_requirement")
 		}
 	}
-	painPoints := normalizeStringList(append(responsibilities, required...))
+	painPoints := []string{}
+	for _, req := range requirements {
+		if requirementCanBeTopPainPoint(req) {
+			painPoints = append(painPoints, req.RequirementText)
+		}
+	}
+	if len(painPoints) == 0 {
+		painPoints = append(responsibilities, required...)
+	}
+	painPoints = normalizeStringList(painPoints)
 	if len(painPoints) > 3 {
 		painPoints = painPoints[:3]
 	}
@@ -237,6 +246,37 @@ func buildJobAnalysis(job JobDescription, requirements []JobRequirement) JobAnal
 		JobPoster:        "",
 		CompanyURL:       firstURL(job.RawText),
 	}
+}
+
+func requirementCanBeTopPainPoint(req JobRequirement) bool {
+	if !requirementCanDriveBullet(req) {
+		return false
+	}
+
+	text := strings.ToLower(req.RequirementText)
+	bad := []string{
+		"degree",
+		"communication",
+		"team-first",
+		"team first",
+		"collaborative",
+		"collaborate",
+		"team culture",
+		"ownership mentality",
+		"seek clarity",
+		"shared outcomes",
+		"values",
+		"benefits",
+		"application instruction",
+	}
+
+	for _, word := range bad {
+		if strings.Contains(text, word) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func buildFitAnalysis(jobID int64, requirements []JobRequirement, matches []JobFactMatch) JobFitAnalysis {

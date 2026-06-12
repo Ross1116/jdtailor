@@ -591,6 +591,28 @@ func (s *Store) migrate(ctx context.Context) error {
 				ALTER TABLE candidate_claims ADD COLUMN duplicate_of_id INTEGER NOT NULL DEFAULT 0;
 			`,
 		},
+		{
+			version: 11,
+			sql: `
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN resume_value_score REAL NOT NULL DEFAULT 0;
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN jd_relevance_score REAL NOT NULL DEFAULT 0;
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN origin_weight REAL NOT NULL DEFAULT 1;
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN risk_penalty REAL NOT NULL DEFAULT 0;
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN unsupported_context_penalty REAL NOT NULL DEFAULT 0;
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN selection_reason TEXT NOT NULL DEFAULT '';
+
+				CREATE TABLE IF NOT EXISTS bullet_generation_events (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					job_id INTEGER NOT NULL REFERENCES job_descriptions(id) ON DELETE CASCADE,
+					origin_heading TEXT NOT NULL DEFAULT '',
+					stage TEXT NOT NULL,
+					status TEXT NOT NULL,
+					reason TEXT NOT NULL DEFAULT '',
+					draft_text TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL
+				);
+			`,
+		},
 	}
 
 	for _, migration := range migrations {
