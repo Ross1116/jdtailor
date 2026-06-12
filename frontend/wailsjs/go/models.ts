@@ -299,6 +299,54 @@ export namespace main {
 	        this.updated_at = source["updated_at"];
 	    }
 	}
+	export class ContextAgentRun {
+	    id: number;
+	    source_id: number;
+	    status: string;
+	    started_at: string;
+	    finished_at: string;
+	    error: string;
+	    facts_created: number;
+	    claims_created: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ContextAgentRun(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.source_id = source["source_id"];
+	        this.status = source["status"];
+	        this.started_at = source["started_at"];
+	        this.finished_at = source["finished_at"];
+	        this.error = source["error"];
+	        this.facts_created = source["facts_created"];
+	        this.claims_created = source["claims_created"];
+	    }
+	}
+	export class ContextAgentStep {
+	    id: number;
+	    run_id: number;
+	    stage: string;
+	    status: string;
+	    message: string;
+	    created_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ContextAgentStep(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.run_id = source["run_id"];
+	        this.stage = source["stage"];
+	        this.status = source["status"];
+	        this.message = source["message"];
+	        this.created_at = source["created_at"];
+	    }
+	}
 	export class CreateBlockedClaimInput {
 	    pattern: string;
 	    reason: string;
@@ -791,6 +839,143 @@ export namespace main {
 	        this.error = source["error"];
 	    }
 	}
+	export class ResumeContextClaim {
+	    id: number;
+	    label: string;
+	    source_fact_ids: number[];
+	    actions: string[];
+	    capabilities: string[];
+	    objects: string[];
+	    technologies: string[];
+	    domains: string[];
+	    artifacts: string[];
+	    scope: string[];
+	    metrics: string[];
+	    outcomes: string[];
+	    evidence_strength: string;
+	    status: string;
+	    risk_flags: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ResumeContextClaim(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.label = source["label"];
+	        this.source_fact_ids = source["source_fact_ids"];
+	        this.actions = source["actions"];
+	        this.capabilities = source["capabilities"];
+	        this.objects = source["objects"];
+	        this.technologies = source["technologies"];
+	        this.domains = source["domains"];
+	        this.artifacts = source["artifacts"];
+	        this.scope = source["scope"];
+	        this.metrics = source["metrics"];
+	        this.outcomes = source["outcomes"];
+	        this.evidence_strength = source["evidence_strength"];
+	        this.status = source["status"];
+	        this.risk_flags = source["risk_flags"];
+	    }
+	}
+	export class ResumeContextFact {
+	    id: number;
+	    atoms: string;
+	    technologies: string[];
+	    status: string;
+	    risk_flags: string[];
+	    evidence_quote: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ResumeContextFact(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.atoms = source["atoms"];
+	        this.technologies = source["technologies"];
+	        this.status = source["status"];
+	        this.risk_flags = source["risk_flags"];
+	        this.evidence_quote = source["evidence_quote"];
+	    }
+	}
+	export class ResumeContextOrigin {
+	    origin_heading: string;
+	    origin_type: string;
+	    facts: ResumeContextFact[];
+	    claims: ResumeContextClaim[];
+	    keywords: string[];
+	    risk_flags: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ResumeContextOrigin(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.origin_heading = source["origin_heading"];
+	        this.origin_type = source["origin_type"];
+	        this.facts = this.convertValues(source["facts"], ResumeContextFact);
+	        this.claims = this.convertValues(source["claims"], ResumeContextClaim);
+	        this.keywords = source["keywords"];
+	        this.risk_flags = source["risk_flags"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ResumeContext {
+	    source_id: number;
+	    origins: ResumeContextOrigin[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ResumeContext(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.source_id = source["source_id"];
+	        this.origins = this.convertValues(source["origins"], ResumeContextOrigin);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
+	
 	export class SaveAPIKeyInput {
 	    api_key: string;
 	    provider: string;

@@ -613,6 +613,30 @@ func (s *Store) migrate(ctx context.Context) error {
 				);
 			`,
 		},
+		{
+			version: 12,
+			sql: `
+				CREATE TABLE IF NOT EXISTS context_agent_runs (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					source_id INTEGER NOT NULL REFERENCES candidate_sources(id) ON DELETE CASCADE,
+					status TEXT NOT NULL,
+					started_at TEXT NOT NULL,
+					finished_at TEXT NOT NULL DEFAULT '',
+					error TEXT NOT NULL DEFAULT '',
+					facts_created INTEGER NOT NULL DEFAULT 0,
+					claims_created INTEGER NOT NULL DEFAULT 0
+				);
+
+				CREATE TABLE IF NOT EXISTS context_agent_steps (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					run_id INTEGER NOT NULL REFERENCES context_agent_runs(id) ON DELETE CASCADE,
+					stage TEXT NOT NULL,
+					status TEXT NOT NULL,
+					message TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL
+				);
+			`,
+		},
 	}
 
 	for _, migration := range migrations {

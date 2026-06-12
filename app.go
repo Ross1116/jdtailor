@@ -2,19 +2,22 @@ package main
 
 import (
 	"context"
+	"sync"
 )
 
 const appVersion = "0.1.0"
 
 // App struct
 type App struct {
-	ctx   context.Context
-	store *Store
+	ctx                 context.Context
+	store               *Store
+	contextAgentMu      sync.Mutex
+	contextAgentWorkers map[int64]bool
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{}
+	return &App{contextAgentWorkers: make(map[int64]bool)}
 }
 
 // startup is called when the app starts. The context is saved
@@ -239,6 +242,66 @@ func (a *App) DeleteAllEvidenceFacts() error {
 	}
 
 	return a.store.DeleteAllEvidenceFacts()
+}
+
+func (a *App) StartContextAgent(sourceID int64) (ContextAgentRun, error) {
+	if err := a.ensureStore(); err != nil {
+		return ContextAgentRun{}, err
+	}
+	run, err := a.store.StartContextAgent(sourceID)
+	if err != nil {
+		return ContextAgentRun{}, err
+	}
+	a.contextAgentMu.Lock()
+	if a.contextAgentWorkers == nil {
+		a.contextAgentWorkers = make(map[int64]bool)
+	}
+	shouldStartWorker := run.Status == contextAgentStatusRunning && !a.contextAgentWorkers[run.ID]
+	if shouldStartWorker {
+		a.contextAgentWorkers[run.ID] = true
+	}
+	a.contextAgentMu.Unlock()
+	if shouldStartWorker {
+		go func(runID int64) {
+			defer func() {
+				a.contextAgentMu.Lock()
+				delete(a.contextAgentWorkers, runID)
+				a.contextAgentMu.Unlock()
+			}()
+			if _, err := a.store.RunContextAgent(a.ctx, runID, nil); err != nil {
+				a.store.Logger().Error("context agent failed", "run_id", runID, "error", err)
+			}
+		}(run.ID)
+	}
+	return run, nil
+}
+
+func (a *App) GetContextAgentRun(runID int64) (ContextAgentRun, error) {
+	if err := a.ensureStore(); err != nil {
+		return ContextAgentRun{}, err
+	}
+	return a.store.GetContextAgentRun(runID)
+}
+
+func (a *App) ListContextAgentRuns(sourceID int64) ([]ContextAgentRun, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListContextAgentRuns(sourceID)
+}
+
+func (a *App) ListContextAgentSteps(runID int64) ([]ContextAgentStep, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListContextAgentSteps(runID)
+}
+
+func (a *App) BuildResumeContext(sourceID int64) (ResumeContext, error) {
+	if err := a.ensureStore(); err != nil {
+		return ResumeContext{}, err
+	}
+	return a.store.BuildResumeContext(sourceID)
 }
 
 func (a *App) ListJobDescriptions() ([]JobDescription, error) {

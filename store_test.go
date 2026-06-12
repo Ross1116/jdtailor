@@ -89,6 +89,16 @@ func TestMigrationAddsAtomBankAndDraftSelectionColumns(t *testing.T) {
 			t.Fatalf("tailored_bullet_drafts missing %s", column)
 		}
 	}
+	for _, column := range []string{"source_id", "status", "started_at", "finished_at", "error", "facts_created", "claims_created"} {
+		if !tableHasColumn(t, store, "context_agent_runs", column) {
+			t.Fatalf("context_agent_runs missing %s", column)
+		}
+	}
+	for _, column := range []string{"run_id", "stage", "status", "message", "created_at"} {
+		if !tableHasColumn(t, store, "context_agent_steps", column) {
+			t.Fatalf("context_agent_steps missing %s", column)
+		}
+	}
 }
 
 func TestSettingsSaveLoad(t *testing.T) {
@@ -979,6 +989,132 @@ func TestJobContextMigrationCreatesTables(t *testing.T) {
 		var name string
 		if err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name); err != nil {
 			t.Fatalf("table %s missing: %v", table, err)
+		}
+	}
+}
+
+func TestContextAgentReusesActiveRun(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	source, err := store.CreateCandidateSource(CreateCandidateSourceInput{
+		Title:   "Resume",
+		RawText: "PROJECTS\nBuilt FastAPI APIs.",
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidateSource() error = %v", err)
+	}
+	first, err := store.StartContextAgent(source.ID)
+	if err != nil {
+		t.Fatalf("StartContextAgent() first error = %v", err)
+	}
+	second, err := store.StartContextAgent(source.ID)
+	if err != nil {
+		t.Fatalf("StartContextAgent() second error = %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second run ID = %d, want active run %d", second.ID, first.ID)
+	}
+	steps, err := store.ListContextAgentSteps(first.ID)
+	if err != nil {
+		t.Fatalf("ListContextAgentSteps() error = %v", err)
+	}
+	if len(steps) != 1 || steps[0].Stage != "queued" {
+		t.Fatalf("steps = %+v, want one queued step", steps)
+	}
+}
+
+func TestContextAgentBuildsCompactResumeContext(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "")
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	source, err := store.CreateCandidateSource(CreateCandidateSourceInput{
+		SourceType: "current_resume",
+		TrustTier:  "verified",
+		Title:      "Resume",
+		RawText: `Roshan Example
+roshan@example.com
+
+PROJECTS
+- Built and shipped FastAPI/PostgreSQL backend APIs for planning workflows.
+- Added RBAC and audit logging for construction document workflows.
+
+TECHNICAL SKILLS
+FastAPI, PostgreSQL, React, TypeScript`,
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidateSource() error = %v", err)
+	}
+	run, err := store.StartContextAgent(source.ID)
+	if err != nil {
+		t.Fatalf("StartContextAgent() error = %v", err)
+	}
+	finished, err := store.RunContextAgent(t.Context(), run.ID, nil)
+	if err != nil {
+		t.Fatalf("RunContextAgent() error = %v", err)
+	}
+	if finished.Status != contextAgentStatusComplete {
+		t.Fatalf("finished status = %q, want complete: %+v", finished.Status, finished)
+	}
+	if finished.FactsCreated == 0 || finished.ClaimsCreated == 0 {
+		t.Fatalf("finished counts = facts %d claims %d", finished.FactsCreated, finished.ClaimsCreated)
+	}
+
+	steps, err := store.ListContextAgentSteps(run.ID)
+	if err != nil {
+		t.Fatalf("ListContextAgentSteps() error = %v", err)
+	}
+	stepStages := make(map[string]bool)
+	for _, step := range steps {
+		stepStages[step.Stage] = true
+	}
+	for _, stage := range []string{"queued", "source_preprocess", "section_detect", "fact_extract", "fact_compact", "profile_draft", "claim_generate", "claim_compact", "dedupe", "done"} {
+		if !stepStages[stage] {
+			t.Fatalf("steps missing %s: %+v", stage, steps)
+		}
+	}
+
+	facts, err := store.ListEvidenceFacts("all")
+	if err != nil {
+		t.Fatalf("ListEvidenceFacts() error = %v", err)
+	}
+	claims, err := store.ListCandidateClaims("all")
+	if err != nil {
+		t.Fatalf("ListCandidateClaims() error = %v", err)
+	}
+	if len(facts) == 0 || len(claims) == 0 {
+		t.Fatalf("facts = %d claims = %d, want generated context", len(facts), len(claims))
+	}
+	profile, err := store.GetCandidateProfile()
+	if err != nil {
+		t.Fatalf("GetCandidateProfile() error = %v", err)
+	}
+	if profile.Contact.Email != "roshan@example.com" || profile.Contact.Verified {
+		t.Fatalf("profile contact = %+v, want draft unverified contact", profile.Contact)
+	}
+
+	contextBank, err := store.BuildResumeContext(source.ID)
+	if err != nil {
+		t.Fatalf("BuildResumeContext() error = %v", err)
+	}
+	if len(contextBank.Origins) == 0 || len(contextBank.Origins[0].Facts) == 0 || len(contextBank.Origins[0].Claims) == 0 {
+		t.Fatalf("contextBank = %+v", contextBank)
+	}
+	for _, origin := range contextBank.Origins {
+		for _, fact := range origin.Facts {
+			if strings.Contains(fact.Atoms, ". ") {
+				t.Fatalf("fact atoms look like prose, want compact atoms: %q", fact.Atoms)
+			}
+			if strings.TrimSpace(fact.Atoms) == "" {
+				t.Fatalf("empty fact atoms: %+v", fact)
+			}
 		}
 	}
 }

@@ -14,6 +14,10 @@ export function BuildJobMatchMap(arg1) {
   return window['go']['main']['App']['BuildJobMatchMap'](arg1);
 }
 
+export function BuildResumeContext(arg1) {
+  return window['go']['main']['App']['BuildResumeContext'](arg1);
+}
+
 export function CreateBlockedClaim(arg1) {
   return window['go']['main']['App']['CreateBlockedClaim'](arg1);
 }
@@ -98,6 +102,10 @@ export function GetCandidateProfile() {
   return window['go']['main']['App']['GetCandidateProfile']();
 }
 
+export function GetContextAgentRun(arg1) {
+  return window['go']['main']['App']['GetContextAgentRun'](arg1);
+}
+
 export function GetFitAnalysis(arg1) {
   return window['go']['main']['App']['GetFitAnalysis'](arg1);
 }
@@ -144,6 +152,14 @@ export function ListCandidateClaims(arg1) {
 
 export function ListCandidateSources() {
   return window['go']['main']['App']['ListCandidateSources']();
+}
+
+export function ListContextAgentRuns(arg1) {
+  return window['go']['main']['App']['ListContextAgentRuns'](arg1);
+}
+
+export function ListContextAgentSteps(arg1) {
+  return window['go']['main']['App']['ListContextAgentSteps'](arg1);
 }
 
 export function ListEvidenceFacts(arg1) {
@@ -200,6 +216,10 @@ export function SaveSettings(arg1) {
 
 export function SelectTailoredBulletDraft(arg1) {
   return window['go']['main']['App']['SelectTailoredBulletDraft'](arg1);
+}
+
+export function StartContextAgent(arg1) {
+  return window['go']['main']['App']['StartContextAgent'](arg1);
 }
 
 export function TestLLM() {

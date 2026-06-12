@@ -2,6 +2,7 @@ import {
   AnalyzeJobDescription as WailsAnalyzeJobDescription,
   AutoSelectResumeBullets as WailsAutoSelectResumeBullets,
   BuildJobMatchMap as WailsBuildJobMatchMap,
+  BuildResumeContext as WailsBuildResumeContext,
   CreateCandidateSource as WailsCreateCandidateSource,
   CreateBlockedClaim as WailsCreateBlockedClaim,
   CreateJobDescription as WailsCreateJobDescription,
@@ -23,6 +24,7 @@ import {
   GenerateFitAnalysis as WailsGenerateFitAnalysis,
   GetApplicationStrategy as WailsGetApplicationStrategy,
   GetCandidateProfile as WailsGetCandidateProfile,
+  GetContextAgentRun as WailsGetContextAgentRun,
   GetFitAnalysis as WailsGetFitAnalysis,
   GetHealth as WailsGetHealth,
   GetJobAnalysis as WailsGetJobAnalysis,
@@ -40,6 +42,8 @@ import {
   ListBlockedClaims as WailsListBlockedClaims,
   ListCandidateClaims as WailsListCandidateClaims,
   ListCandidateSources as WailsListCandidateSources,
+  ListContextAgentRuns as WailsListContextAgentRuns,
+  ListContextAgentSteps as WailsListContextAgentSteps,
   ListEvidenceFacts as WailsListEvidenceFacts,
   ListSourceSections as WailsListSourceSections,
   ListTailoredBulletDrafts as WailsListTailoredBulletDrafts,
@@ -49,6 +53,7 @@ import {
   SaveCandidateProfile as WailsSaveCandidateProfile,
   SaveSettings as WailsSaveSettings,
   SelectTailoredBulletDraft as WailsSelectTailoredBulletDraft,
+  StartContextAgent as WailsStartContextAgent,
   TestLLM as WailsTestLLM,
   UpdateEvidenceFactReview as WailsUpdateEvidenceFactReview,
   UpdateBlockedClaim as WailsUpdateBlockedClaim,
@@ -208,6 +213,67 @@ export type BulletGenerationEvent = {
   reason: string;
   draft_text: string;
   created_at: string;
+};
+
+export type ContextAgentRun = {
+  id: number;
+  source_id: number;
+  status: string;
+  started_at: string;
+  finished_at: string;
+  error: string;
+  facts_created: number;
+  claims_created: number;
+};
+
+export type ContextAgentStep = {
+  id: number;
+  run_id: number;
+  stage: string;
+  status: string;
+  message: string;
+  created_at: string;
+};
+
+export type ResumeContext = {
+  source_id: number;
+  origins: ResumeContextOrigin[];
+};
+
+export type ResumeContextOrigin = {
+  origin_heading: string;
+  origin_type: string;
+  facts: ResumeContextFact[];
+  claims: ResumeContextClaim[];
+  keywords: string[];
+  risk_flags: string[];
+};
+
+export type ResumeContextFact = {
+  id: number;
+  atoms: string;
+  technologies: string[];
+  status: string;
+  risk_flags: string[];
+  evidence_quote: string;
+};
+
+export type ResumeContextClaim = {
+  id: number;
+  label: string;
+  source_fact_ids: number[];
+  actions: string[];
+  capabilities: string[];
+  objects: string[];
+  technologies: string[];
+  domains: string[];
+  artifacts: string[];
+  scope: string[];
+  metrics: string[];
+  outcomes: string[];
+  evidence_strength: string;
+  status: string;
+  risk_flags: string[];
 };
 
 export type CandidateClaim = {
@@ -373,6 +439,8 @@ let mockRequirements: JobRequirement[] = [];
 let mockMatches: JobFactMatch[] = [];
 let mockDrafts: TailoredBulletDraft[] = [];
 let mockBulletEvents: BulletGenerationEvent[] = [];
+let mockContextRuns: ContextAgentRun[] = [];
+let mockContextSteps: ContextAgentStep[] = [];
 let mockClaims: CandidateClaim[] = [];
 let mockBlockedClaims: BlockedClaim[] = defaultMockBlockedClaims();
 let mockAnalyses: JobAnalysis[] = [];
@@ -755,6 +823,116 @@ export async function DeleteAllEvidenceFacts() {
   mockFitAnalyses = [];
   mockStrategies = [];
   mockEvents.unshift(mockEvent('info', 'mock all evidence facts deleted'));
+}
+
+export async function StartContextAgent(sourceID: number) {
+  if (hasWailsBackend()) {
+    return WailsStartContextAgent(sourceID);
+  }
+  const active = mockContextRuns.find((run) => run.source_id === sourceID && run.status === 'running');
+  if (active) return active;
+  const timestamp = now();
+  const run: ContextAgentRun = {
+    id: Date.now(),
+    source_id: sourceID,
+    status: 'running',
+    started_at: timestamp,
+    finished_at: '',
+    error: '',
+    facts_created: 0,
+    claims_created: 0,
+  };
+  mockContextRuns = [run, ...mockContextRuns];
+  mockContextSteps = [...mockContextSteps, mockContextStep(run.id, 'queued', 'ok', 'context agent started')];
+  try {
+    const sections = await DetectSourceSections(sourceID);
+    mockContextSteps.push(mockContextStep(run.id, 'section_detect', 'ok', `${sections.length} sections`));
+    for (const section of sections) {
+      const facts = await ExtractEvidenceFacts({source_id: sourceID, section_id: section.id});
+      run.facts_created += facts.length;
+      mockContextSteps.push(mockContextStep(run.id, 'fact_extract', 'ok', `${section.heading}: ${facts.length} facts`));
+    }
+    const claims = await GenerateCandidateClaims();
+    run.claims_created = claims.length;
+    run.status = 'complete';
+    run.finished_at = now();
+    mockContextSteps.push(mockContextStep(run.id, 'done', 'ok', 'context agent complete'));
+  } catch (err) {
+    run.status = 'failed';
+    run.finished_at = now();
+    run.error = err instanceof Error ? err.message : String(err);
+    mockContextSteps.push(mockContextStep(run.id, 'failed', 'failed', run.error));
+  }
+  mockContextRuns = mockContextRuns.map((item) => item.id === run.id ? run : item);
+  return run;
+}
+
+export async function GetContextAgentRun(runID: number) {
+  if (hasWailsBackend()) {
+    return WailsGetContextAgentRun(runID);
+  }
+  return mockContextRuns.find((run) => run.id === runID);
+}
+
+export async function ListContextAgentRuns(sourceID: number) {
+  if (hasWailsBackend()) {
+    return WailsListContextAgentRuns(sourceID);
+  }
+  return mockContextRuns.filter((run) => !sourceID || run.source_id === sourceID);
+}
+
+export async function ListContextAgentSteps(runID: number) {
+  if (hasWailsBackend()) {
+    return WailsListContextAgentSteps(runID);
+  }
+  return mockContextSteps.filter((step) => step.run_id === runID);
+}
+
+export async function BuildResumeContext(sourceID: number) {
+  if (hasWailsBackend()) {
+    return WailsBuildResumeContext(sourceID);
+  }
+  const facts = mockFacts.filter((fact) => (!sourceID || fact.source_id === sourceID) && fact.status !== 'rejected');
+  const factIDs = new Set(facts.map((fact) => fact.id));
+  const claims = mockClaims.filter((claim) => claim.status !== 'blocked' && claim.status !== 'rejected' && claim.source_fact_ids.some((id) => factIDs.has(id)));
+  const originMap = new Map<string, ResumeContextOrigin>();
+  const ensureOrigin = (heading: string, type: string) => {
+    const key = `${type}|${heading}`;
+    const existing = originMap.get(key);
+    if (existing) return existing;
+    const origin: ResumeContextOrigin = {origin_heading: heading, origin_type: type, facts: [], claims: [], keywords: [], risk_flags: []};
+    originMap.set(key, origin);
+    return origin;
+  };
+  facts.forEach((fact) => {
+    const origin = ensureOrigin(fact.origin_heading, fact.origin_type);
+    origin.facts.push({id: fact.id, atoms: fact.fact_text, technologies: fact.technologies, status: fact.status, risk_flags: fact.risk_flags, evidence_quote: fact.evidence_quote});
+    origin.keywords = [...new Set([...origin.keywords, ...fact.technologies])];
+    origin.risk_flags = [...new Set([...origin.risk_flags, ...fact.risk_flags])];
+  });
+  claims.forEach((claim) => {
+    const origin = ensureOrigin(claim.origin_heading, claim.origin_type);
+    origin.claims.push({
+      id: claim.id,
+      label: claim.claim_text,
+      source_fact_ids: claim.source_fact_ids,
+      actions: claim.actions,
+      capabilities: claim.capabilities,
+      objects: claim.objects,
+      technologies: claim.technologies,
+      domains: claim.domains,
+      artifacts: claim.artifacts,
+      scope: claim.scope,
+      metrics: claim.metrics,
+      outcomes: claim.outcomes,
+      evidence_strength: claim.evidence_strength,
+      status: claim.status,
+      risk_flags: claim.risk_flags,
+    });
+    origin.keywords = [...new Set([...origin.keywords, ...claim.technologies])];
+    origin.risk_flags = [...new Set([...origin.risk_flags, ...claim.risk_flags])];
+  });
+  return {source_id: sourceID, origins: [...originMap.values()]};
 }
 
 export async function ListJobDescriptions() {
@@ -1278,6 +1456,17 @@ function mockEvent(level: string, message: string) {
   return {
     id: Date.now(),
     level,
+    message,
+    created_at: now(),
+  };
+}
+
+function mockContextStep(runID: number, stage: string, status: string, message: string): ContextAgentStep {
+  return {
+    id: Date.now() + mockContextSteps.length,
+    run_id: runID,
+    stage,
+    status,
     message,
     created_at: now(),
   };

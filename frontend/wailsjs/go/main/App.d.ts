@@ -8,6 +8,8 @@ export function AutoSelectResumeBullets(arg1:number):Promise<Array<main.Tailored
 
 export function BuildJobMatchMap(arg1:number):Promise<Array<main.JobFactMatch>>;
 
+export function BuildResumeContext(arg1:number):Promise<main.ResumeContext>;
+
 export function CreateBlockedClaim(arg1:main.CreateBlockedClaimInput):Promise<main.BlockedClaim>;
 
 export function CreateCandidateSource(arg1:main.CreateCandidateSourceInput):Promise<main.CandidateSource>;
@@ -50,6 +52,8 @@ export function GetApplicationStrategy(arg1:number):Promise<main.ApplicationStra
 
 export function GetCandidateProfile():Promise<main.CandidateProfile>;
 
+export function GetContextAgentRun(arg1:number):Promise<main.ContextAgentRun>;
+
 export function GetFitAnalysis(arg1:number):Promise<main.JobFitAnalysis>;
 
 export function GetHealth():Promise<main.Health>;
@@ -73,6 +77,10 @@ export function ListBulletGenerationEvents(arg1:number):Promise<Array<main.Bulle
 export function ListCandidateClaims(arg1:string):Promise<Array<main.CandidateClaim>>;
 
 export function ListCandidateSources():Promise<Array<main.CandidateSource>>;
+
+export function ListContextAgentRuns(arg1:number):Promise<Array<main.ContextAgentRun>>;
+
+export function ListContextAgentSteps(arg1:number):Promise<Array<main.ContextAgentStep>>;
 
 export function ListEvidenceFacts(arg1:string):Promise<Array<main.EvidenceFact>>;
 
@@ -101,6 +109,8 @@ export function SaveCandidateProfile(arg1:main.CandidateProfile):Promise<main.Ca
 export function SaveSettings(arg1:main.SaveSettingsInput):Promise<main.Settings>;
 
 export function SelectTailoredBulletDraft(arg1:main.SelectTailoredBulletDraftInput):Promise<main.TailoredBulletDraft>;
+
+export function StartContextAgent(arg1:number):Promise<main.ContextAgentRun>;
 
 export function TestLLM():Promise<main.LLMTestResult>;
 

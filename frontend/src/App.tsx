@@ -2,6 +2,7 @@ import {FormEvent, useEffect, useMemo, useState} from 'react';
 import {
   Activity,
   AlertCircle,
+  Bot,
   BriefcaseBusiness,
   CheckCircle2,
   Clipboard,
@@ -27,6 +28,7 @@ import {
   AnalyzeJobDescription,
   ApplicationStrategy,
   AutoSelectResumeBullets,
+  BuildResumeContext,
   BulletGenerationEvent,
   CandidateProfile,
   CandidateProfileRecord,
@@ -54,6 +56,7 @@ import {
   GenerateApplicationStrategy,
   GenerateFitAnalysis,
   GetCandidateProfile,
+  GetContextAgentRun,
   GetApplicationStrategy,
   GetFitAnalysis,
   GetHealth,
@@ -69,6 +72,8 @@ import {
   ListCandidateSources,
   ListBlockedClaims,
   ListCandidateClaims,
+  ListContextAgentRuns,
+  ListContextAgentSteps,
   ListEvidenceFacts,
   ListJobDescriptions,
   ListJobFactMatches,
@@ -84,6 +89,8 @@ import {
   SaveSettings,
   SelectTailoredBulletDraft,
   SourceSection,
+  ContextAgentRun,
+  ContextAgentStep,
   TailoredBulletDraft,
   TestLLM,
   UpdateEvidenceFactReview,
@@ -98,6 +105,7 @@ import {
   UpdateBlockedClaim,
   UpdateCandidateClaimReview,
   UpdatePromptRule,
+  StartContextAgent,
 } from './backend';
 
 type Health = {
@@ -188,6 +196,8 @@ function App() {
   const [facts, setFacts] = useState<EvidenceFact[]>([]);
   const [claims, setClaims] = useState<CandidateClaim[]>([]);
   const [blockedClaims, setBlockedClaims] = useState<BlockedClaim[]>([]);
+  const [contextRuns, setContextRuns] = useState<ContextAgentRun[]>([]);
+  const [contextSteps, setContextSteps] = useState<ContextAgentStep[]>([]);
   const [jobs, setJobs] = useState<JobDescription[]>([]);
   const [jobRequirements, setJobRequirements] = useState<JobRequirement[]>([]);
   const [jobMatches, setJobMatches] = useState<JobFactMatch[]>([]);
@@ -250,6 +260,7 @@ function App() {
         nextFacts,
         nextClaims,
         nextBlockedClaims,
+        nextContextRuns,
         nextJobs,
       ] = await Promise.all([
         GetHealth(),
@@ -264,6 +275,7 @@ function App() {
         ListEvidenceFacts('all'),
         ListCandidateClaims('all'),
         ListBlockedClaims(),
+        ListContextAgentRuns(0),
         ListJobDescriptions(),
       ]);
       setHealth(nextHealth as Health);
@@ -278,6 +290,7 @@ function App() {
       setFacts(normalizeFacts(nextFacts as EvidenceFact[] | null | undefined));
       setClaims(normalizeClaims(nextClaims as CandidateClaim[] | null | undefined));
       setBlockedClaims(normalizeBlockedClaims(nextBlockedClaims as BlockedClaim[] | null | undefined));
+      setContextRuns(normalizeContextRuns(nextContextRuns as ContextAgentRun[] | null | undefined));
       setJobs((nextJobs ?? []) as JobDescription[]);
       const firstSource = (nextSources as CandidateSource[] | undefined)?.[0];
       if (!selectedSourceID && firstSource) {
@@ -306,16 +319,83 @@ function App() {
     setEvents((nextEvents ?? []) as AppEvent[]);
   }
 
+  async function refreshContextRuns(sourceID = 0) {
+    const runs = (await ListContextAgentRuns(sourceID)) as ContextAgentRun[];
+    setContextRuns((previous) => {
+      const scoped = normalizeContextRuns(runs);
+      if (sourceID <= 0) return scoped;
+      return normalizeContextRuns([
+        ...scoped,
+        ...previous.filter((run) => run.source_id !== sourceID),
+      ]);
+    });
+    const latest = normalizeContextRuns(runs)[0];
+    if (latest) {
+      const steps = (await ListContextAgentSteps(latest.id)) as ContextAgentStep[];
+      setContextSteps((previous) => normalizeContextSteps([
+        ...previous.filter((step) => step.run_id !== latest.id),
+        ...steps,
+      ]));
+    }
+  }
+
+  async function startContextAgent(sourceID: number) {
+    if (!sourceID) return;
+    await runAction(`context-agent-${sourceID}`, async () => {
+      await beginContextAgent(sourceID);
+      await refreshEvents();
+    });
+  }
+
+  async function beginContextAgent(sourceID: number) {
+    const run = (await StartContextAgent(sourceID)) as ContextAgentRun;
+    setContextRuns((previous) => normalizeContextRuns([run, ...previous.filter((item) => item.id !== run.id)]));
+    const steps = (await ListContextAgentSteps(run.id)) as ContextAgentStep[];
+    setContextSteps((previous) => normalizeContextSteps([...previous.filter((step) => step.run_id !== run.id), ...steps]));
+    if (run.status === 'running') {
+      void pollContextAgent(run.id, sourceID);
+    }
+    return run;
+  }
+
+  async function pollContextAgent(runID: number, sourceID: number) {
+    for (let attempt = 0; attempt < 90; attempt++) {
+      await delay(1000);
+      const [run, steps] = await Promise.all([
+        GetContextAgentRun(runID),
+        ListContextAgentSteps(runID),
+      ]);
+      const normalizedRun = normalizeContextRun(run as ContextAgentRun);
+      setContextRuns((previous) => normalizeContextRuns([normalizedRun, ...previous.filter((item) => item.id !== normalizedRun.id)]));
+      setContextSteps((previous) => normalizeContextSteps([...previous.filter((step) => step.run_id !== runID), ...(steps as ContextAgentStep[])]));
+      if (normalizedRun.status !== 'running') {
+        await refreshWorkflow();
+        const sourceSections = (await ListSourceSections(sourceID)) as SourceSection[];
+        if (sourceSections[0]) {
+          setSelectedSectionID(sourceSections[0].id);
+        }
+        const nextProfile = (await GetCandidateProfile()) as CandidateProfile;
+        setProfile(normalizeProfile(nextProfile));
+        await BuildResumeContext(sourceID).catch(() => null);
+        return;
+      }
+    }
+  }
+
   async function refreshWorkflow() {
-    const [nextSources, nextSections, nextFacts, nextJobs] = await Promise.all([
+    const [nextSources, nextSections, nextFacts, nextClaims, nextRuns, nextJobs] = await Promise.all([
       ListCandidateSources(),
       ListSourceSections(0),
       ListEvidenceFacts('all'),
+      ListCandidateClaims('all'),
+      ListContextAgentRuns(0),
       ListJobDescriptions(),
     ]);
     setSources(normalizeSources(nextSources as CandidateSource[] | null | undefined));
     setSections((nextSections ?? []) as SourceSection[]);
     setFacts(normalizeFacts(nextFacts as EvidenceFact[] | null | undefined));
+    setClaims(normalizeClaims(nextClaims as CandidateClaim[] | null | undefined));
+    setContextRuns(normalizeContextRuns(nextRuns as ContextAgentRun[] | null | undefined));
     setJobs((nextJobs ?? []) as JobDescription[]);
     await refreshEvents();
   }
@@ -422,11 +502,9 @@ function App() {
       const source = (await CreateCandidateSource(sourceDraft)) as CandidateSource;
       setSelectedSourceID(source.id);
       setSourceDraft({...sourceDraft, title: '', raw_text: ''});
-      const detected = (await DetectSourceSections(source.id)) as SourceSection[];
-      setSelectedSectionID(detected[0]?.id ?? 0);
-      await applyDraftFromSource(source.id);
+      await beginContextAgent(source.id);
       await refreshWorkflow();
-      setActiveTab('profile');
+      setActiveTab('sources');
     });
   }
 
@@ -454,11 +532,9 @@ function App() {
         raw_text: rawText,
       })) as CandidateSource;
       setSelectedSourceID(source.id);
-      const detected = (await DetectSourceSections(source.id)) as SourceSection[];
-      setSelectedSectionID(detected[0]?.id ?? 0);
-      await applyDraftFromSource(source.id);
+      await beginContextAgent(source.id);
       await refreshWorkflow();
-      setActiveTab('profile');
+      setActiveTab('sources');
     });
   }
 
@@ -942,10 +1018,14 @@ function App() {
         {activeTab === 'sources' && (
           <SourcesView
             busy={busyAction === 'create-source' || busyAction === 'import-file'}
+            busyAction={busyAction}
+            contextRuns={contextRuns}
+            contextSteps={contextSteps}
             draft={sourceDraft}
             onDraftChange={setSourceDraft}
             onDelete={deleteSource}
             onFile={importFile}
+            onRunAgent={startContextAgent}
             onSave={createSource}
             onSelect={(id) => {
               setSelectedSourceID(id);
@@ -1160,23 +1240,35 @@ function ProfileView({
 
 function SourcesView({
   busy,
+  busyAction,
+  contextRuns,
+  contextSteps,
   draft,
   onDraftChange,
   onDelete,
   onFile,
+  onRunAgent,
   onSave,
   onSelect,
   sources,
 }: {
   busy: boolean;
+  busyAction: string;
+  contextRuns: ContextAgentRun[];
+  contextSteps: ContextAgentStep[];
   draft: {source_type: string; trust_tier: string; title: string; raw_text: string};
   onDraftChange: (draft: {source_type: string; trust_tier: string; title: string; raw_text: string}) => void;
   onDelete: (id: number) => void;
   onFile: (file?: File) => void;
+  onRunAgent: (id: number) => void;
   onSave: (event: FormEvent<HTMLFormElement>) => void;
   onSelect: (id: number) => void;
   sources: CandidateSource[];
 }) {
+  const latestRunForSource = (sourceID: number) => contextRuns
+    .filter((run) => run.source_id === sourceID)
+    .sort((a, b) => b.id - a.id)[0];
+  const latestStepForRun = (runID?: number) => runID ? contextSteps.filter((step) => step.run_id === runID).slice(-1)[0] : undefined;
   return (
     <div className="grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
       <Panel icon={<Upload size={18} />} title="Import source" subtitle="Paste raw context or import TXT/MD material.">
@@ -1239,20 +1331,39 @@ function SourcesView({
                 key={source.id}
                 className="rounded-md border border-slate-200 bg-slate-50 p-3"
               >
+                {(() => {
+                  const run = latestRunForSource(source.id);
+                  const step = latestStepForRun(run?.id);
+                  return (
                 <div className="flex items-start justify-between gap-3">
                   <button type="button" onClick={() => onSelect(source.id)} className="min-w-0 flex-1 text-left">
                     <span className="text-sm font-semibold text-slate-950">{source.title}</span>
                     <span className="mt-2 line-clamp-3 block text-sm text-slate-600">{source.raw_text}</span>
+                    {run && (
+                      <span className="mt-2 flex flex-wrap gap-2">
+                        <StatusBadge text={`agent ${run.status}`} />
+                        <StatusBadge text={`${run.facts_created} facts`} />
+                        <StatusBadge text={`${run.claims_created} claims`} />
+                        {step && <StatusBadge text={step.stage} />}
+                      </span>
+                    )}
+                    {run?.error && <span className="mt-2 block text-xs text-rose-700">{run.error}</span>}
+                    {step?.message && !run?.error && <span className="mt-2 block text-xs text-slate-500">{step.message}</span>}
                     <time className="mt-2 block text-xs text-slate-500">{formatDate(source.imported_at)}</time>
                   </button>
                   <div className="flex shrink-0 items-center gap-2">
                     <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-slate-600">{sourceTypeLabel(source.source_type)}</span>
                     <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-slate-600">{sourceTrustLabel(source.trust_tier)}</span>
+                    <IconOnlyButton label="Run context agent" onClick={() => onRunAgent(source.id)} disabled={busyAction === `context-agent-${source.id}` || run?.status === 'running'}>
+                      <Bot size={16} />
+                    </IconOnlyButton>
                     <IconOnlyButton label="Delete source" onClick={() => onDelete(source.id)}>
                       <Trash2 size={16} />
                     </IconOnlyButton>
                   </div>
                 </div>
+                  );
+                })()}
               </div>
             ))
           )}
@@ -2364,13 +2475,14 @@ function SecondaryButton({label, onClick}: {label: string; onClick: () => void})
   );
 }
 
-function IconOnlyButton({children, label, onClick}: {children: JSX.Element; label: string; onClick: () => void}) {
+function IconOnlyButton({children, disabled = false, label, onClick}: {children: JSX.Element; disabled?: boolean; label: string; onClick: () => void}) {
   return (
     <button
       type="button"
       onClick={onClick}
       title={label}
-      className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50"
+      disabled={disabled}
+      className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
     >
       {children}
     </button>
@@ -2677,6 +2789,29 @@ function normalizeBulletEvents(value?: BulletGenerationEvent[] | null) {
   }));
 }
 
+function normalizeContextRun(run: ContextAgentRun): ContextAgentRun {
+  return {
+    ...run,
+    status: run?.status || '',
+    error: run?.error || '',
+    facts_created: Number(run?.facts_created ?? 0),
+    claims_created: Number(run?.claims_created ?? 0),
+  };
+}
+
+function normalizeContextRuns(value?: ContextAgentRun[] | null) {
+  return asArray(value).map((run) => normalizeContextRun(run)).sort((a, b) => b.id - a.id);
+}
+
+function normalizeContextSteps(value?: ContextAgentStep[] | null) {
+  return asArray(value).map((step) => ({
+    ...step,
+    stage: step.stage || '',
+    status: step.status || '',
+    message: step.message || '',
+  })).sort((a, b) => a.id - b.id);
+}
+
 function normalizeClaims(value?: CandidateClaim[] | null) {
   return asArray(value).map((claim) => ({
     ...claim,
@@ -2761,6 +2896,10 @@ function asStringArray(value?: string[] | null): string[] {
 
 function splitList(value: string) {
   return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function inferJobDetailsFromText(rawText: string) {
