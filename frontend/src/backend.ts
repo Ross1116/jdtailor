@@ -54,6 +54,7 @@ import {
   SaveSettings as WailsSaveSettings,
   SelectTailoredBulletDraft as WailsSelectTailoredBulletDraft,
   StartContextAgent as WailsStartContextAgent,
+  StopContextAgent as WailsStopContextAgent,
   TestLLM as WailsTestLLM,
   UpdateEvidenceFactReview as WailsUpdateEvidenceFactReview,
   UpdateBlockedClaim as WailsUpdateBlockedClaim,
@@ -441,6 +442,7 @@ let mockDrafts: TailoredBulletDraft[] = [];
 let mockBulletEvents: BulletGenerationEvent[] = [];
 let mockContextRuns: ContextAgentRun[] = [];
 let mockContextSteps: ContextAgentStep[] = [];
+const mockCancelledContextRunIDs = new Set<number>();
 let mockClaims: CandidateClaim[] = [];
 let mockBlockedClaims: BlockedClaim[] = defaultMockBlockedClaims();
 let mockAnalyses: JobAnalysis[] = [];
@@ -829,8 +831,10 @@ export async function StartContextAgent(sourceID: number) {
   if (hasWailsBackend()) {
     return WailsStartContextAgent(sourceID);
   }
+
   const active = mockContextRuns.find((run) => run.source_id === sourceID && run.status === 'running');
   if (active) return active;
+
   const timestamp = now();
   const run: ContextAgentRun = {
     id: Date.now(),
@@ -842,28 +846,126 @@ export async function StartContextAgent(sourceID: number) {
     facts_created: 0,
     claims_created: 0,
   };
+
+  mockCancelledContextRunIDs.delete(run.id);
   mockContextRuns = [run, ...mockContextRuns];
   mockContextSteps = [...mockContextSteps, mockContextStep(run.id, 'queued', 'ok', 'context agent started')];
+
+  void runMockContextAgent(run.id, sourceID);
+
+  return run;
+}
+
+export async function StopContextAgent(runID: number) {
+  if (hasWailsBackend()) {
+    return WailsStopContextAgent(runID);
+  }
+
+  const run = mockContextRuns.find((item) => item.id === runID);
+  if (!run) {
+    throw new Error('context agent run not found');
+  }
+
+  if (run.status !== 'running') {
+    return run;
+  }
+
+  mockCancelledContextRunIDs.add(runID);
+  return markMockContextAgentCancelled(runID, 'cancelled by user');
+}
+
+async function runMockContextAgent(runID: number, sourceID: number) {
+  const run = mockContextRuns.find((item) => item.id === runID);
+  if (!run) return;
+
+  const isCancelled = () => mockCancelledContextRunIDs.has(runID);
+
   try {
+    await Promise.resolve();
+
+    if (isCancelled()) {
+      markMockContextAgentCancelled(runID, 'context agent cancelled');
+      return;
+    }
+
     const sections = await DetectSourceSections(sourceID);
+
+    if (isCancelled()) {
+      markMockContextAgentCancelled(runID, 'context agent cancelled');
+      return;
+    }
+
     mockContextSteps.push(mockContextStep(run.id, 'section_detect', 'ok', `${sections.length} sections`));
+
     for (const section of sections) {
+      if (isCancelled()) {
+        markMockContextAgentCancelled(runID, 'context agent cancelled');
+        return;
+      }
+
       const facts = await ExtractEvidenceFacts({source_id: sourceID, section_id: section.id});
+
+      if (isCancelled()) {
+        markMockContextAgentCancelled(runID, 'context agent cancelled');
+        return;
+      }
+
       run.facts_created += facts.length;
       mockContextSteps.push(mockContextStep(run.id, 'fact_extract', 'ok', `${section.heading}: ${facts.length} facts`));
+      mockContextRuns = mockContextRuns.map((item) => item.id === run.id ? run : item);
     }
+
+    if (isCancelled()) {
+      markMockContextAgentCancelled(runID, 'context agent cancelled');
+      return;
+    }
+
     const claims = await GenerateCandidateClaims();
+
+    if (isCancelled()) {
+      markMockContextAgentCancelled(runID, 'context agent cancelled');
+      return;
+    }
+
     run.claims_created = claims.length;
     run.status = 'complete';
     run.finished_at = now();
+
     mockContextSteps.push(mockContextStep(run.id, 'done', 'ok', 'context agent complete'));
+    mockContextRuns = mockContextRuns.map((item) => item.id === run.id ? run : item);
   } catch (err) {
+    if (isCancelled()) {
+      markMockContextAgentCancelled(runID, 'context agent cancelled');
+      return;
+    }
+
     run.status = 'failed';
     run.finished_at = now();
     run.error = err instanceof Error ? err.message : String(err);
+
     mockContextSteps.push(mockContextStep(run.id, 'failed', 'failed', run.error));
+    mockContextRuns = mockContextRuns.map((item) => item.id === run.id ? run : item);
   }
+}
+
+function markMockContextAgentCancelled(runID: number, message: string) {
+  const run = mockContextRuns.find((item) => item.id === runID);
+  if (!run) {
+    throw new Error('context agent run not found');
+  }
+
+  if (run.status !== 'running') {
+    return run;
+  }
+
+  run.status = 'cancelled';
+  run.finished_at = now();
+  run.error = message;
+
+  mockContextSteps.push(mockContextStep(run.id, 'cancelled', 'cancelled', message));
   mockContextRuns = mockContextRuns.map((item) => item.id === run.id ? run : item);
+  mockEvents.unshift(mockEvent('info', 'mock context agent cancelled'));
+
   return run;
 }
 

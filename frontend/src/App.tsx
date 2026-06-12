@@ -13,6 +13,7 @@ import {
   KeyRound,
   Layers3,
   ListChecks,
+  LoaderCircle,
   Play,
   RefreshCcw,
   Save,
@@ -23,6 +24,7 @@ import {
   Upload,
   UserRound,
   Wrench,
+  Square,
 } from 'lucide-react';
 import {
   AnalyzeJobDescription,
@@ -106,6 +108,7 @@ import {
   UpdateCandidateClaimReview,
   UpdatePromptRule,
   StartContextAgent,
+  StopContextAgent,
 } from './backend';
 
 type Health = {
@@ -154,6 +157,15 @@ type AppEvent = {
   level: string;
   message: string;
   created_at: string;
+};
+
+type WorkItem = {
+  key: string;
+  title: string;
+  detail: string;
+  progress: number;
+  kind?: 'context-agent' | 'action';
+  runID?: number;
 };
 
 type LoadState = 'loading' | 'ready' | 'error';
@@ -232,6 +244,21 @@ function App() {
   const queuedFacts = facts.filter((fact) => fact.status === 'needs_review');
   const apiConfigured = toolStatus?.api_key_configured ?? settings.api_key_configured;
   const tectonicStatus = toolStatus?.tectonic_status ?? health?.pdf_renderer ?? 'checking';
+  const runningContextRuns = contextRuns.filter((run) => run.status === 'running');
+  const activeWorkItems: WorkItem[] = [
+    ...runningContextRuns.map((run) => {
+      const latestStep = latestContextStep(contextSteps, run.id);
+      return {
+        key: `context-${run.id}`,
+        kind: 'context-agent' as const,
+        runID: run.id,
+        title: `Context agent: ${sourceTitle(sources, run.source_id)}`,
+        detail: latestStep?.message || contextStageLabel(latestStep?.stage || 'queued'),
+        progress: contextRunProgress(run, latestStep),
+      };
+    }),
+    ...(busyAction ? [{...workItemForAction(busyAction), kind: 'action' as const}] : []),
+  ];
 
   const statusText = useMemo(() => {
     if (loadState === 'loading') {
@@ -347,6 +374,33 @@ function App() {
     });
   }
 
+  async function stopContextAgent(runID: number) {
+  if (!runID) return;
+
+  await runAction(`stop-context-agent-${runID}`, async () => {
+    const stopped = (await StopContextAgent(runID)) as ContextAgentRun;
+
+    setContextRuns((previous) =>
+      normalizeContextRuns([
+        stopped,
+        ...previous.filter((item) => item.id !== stopped.id),
+      ]),
+    );
+
+    const steps = (await ListContextAgentSteps(runID)) as ContextAgentStep[];
+
+    setContextSteps((previous) =>
+      normalizeContextSteps([
+        ...previous.filter((step) => step.run_id !== runID),
+        ...steps,
+      ]),
+    );
+
+    await refreshWorkflow();
+    await refreshEvents();
+  });
+}
+
   async function beginContextAgent(sourceID: number) {
     const run = (await StartContextAgent(sourceID)) as ContextAgentRun;
     setContextRuns((previous) => normalizeContextRuns([run, ...previous.filter((item) => item.id !== run.id)]));
@@ -359,28 +413,49 @@ function App() {
   }
 
   async function pollContextAgent(runID: number, sourceID: number) {
-    for (let attempt = 0; attempt < 90; attempt++) {
-      await delay(1000);
-      const [run, steps] = await Promise.all([
-        GetContextAgentRun(runID),
-        ListContextAgentSteps(runID),
-      ]);
-      const normalizedRun = normalizeContextRun(run as ContextAgentRun);
-      setContextRuns((previous) => normalizeContextRuns([normalizedRun, ...previous.filter((item) => item.id !== normalizedRun.id)]));
-      setContextSteps((previous) => normalizeContextSteps([...previous.filter((step) => step.run_id !== runID), ...(steps as ContextAgentStep[])]));
-      if (normalizedRun.status !== 'running') {
-        await refreshWorkflow();
+  for (let attempt = 0; attempt < 90; attempt++) {
+    await delay(1000);
+
+    const [run, steps] = await Promise.all([
+      GetContextAgentRun(runID),
+      ListContextAgentSteps(runID),
+    ]);
+
+    const normalizedRun = normalizeContextRun(run as ContextAgentRun);
+
+    setContextRuns((previous) =>
+      normalizeContextRuns([
+        normalizedRun,
+        ...previous.filter((item) => item.id !== normalizedRun.id),
+      ]),
+    );
+
+    setContextSteps((previous) =>
+      normalizeContextSteps([
+        ...previous.filter((step) => step.run_id !== runID),
+        ...(steps as ContextAgentStep[]),
+      ]),
+    );
+
+    if (normalizedRun.status !== 'running') {
+      await refreshWorkflow();
+
+      if (normalizedRun.status === 'complete') {
         const sourceSections = (await ListSourceSections(sourceID)) as SourceSection[];
         if (sourceSections[0]) {
           setSelectedSectionID(sourceSections[0].id);
         }
+
         const nextProfile = (await GetCandidateProfile()) as CandidateProfile;
         setProfile(normalizeProfile(nextProfile));
+
         await BuildResumeContext(sourceID).catch(() => null);
-        return;
       }
+
+      return;
     }
   }
+}
 
   async function refreshWorkflow() {
     const [nextSources, nextSections, nextFacts, nextClaims, nextRuns, nextJobs] = await Promise.all([
@@ -1002,6 +1077,14 @@ function App() {
           </div>
         )}
 
+        {activeWorkItems.length > 0 && (
+          <WorkBanner
+            busyAction={busyAction}
+            items={activeWorkItems}
+            onStopAgent={stopContextAgent}
+          />
+        )}
+
         {activeTab === 'profile' && (
           <ProfileView
             busy={busyAction === 'save-profile'}
@@ -1027,11 +1110,13 @@ function App() {
             onFile={importFile}
             onRunAgent={startContextAgent}
             onSave={createSource}
+            onStopAgent={stopContextAgent}
             onSelect={(id) => {
               setSelectedSourceID(id);
               setActiveTab('sections');
             }}
             sources={sources}
+            
           />
         )}
 
@@ -1250,6 +1335,7 @@ function SourcesView({
   onRunAgent,
   onSave,
   onSelect,
+  onStopAgent,
   sources,
 }: {
   busy: boolean;
@@ -1263,6 +1349,7 @@ function SourcesView({
   onRunAgent: (id: number) => void;
   onSave: (event: FormEvent<HTMLFormElement>) => void;
   onSelect: (id: number) => void;
+  onStopAgent: (runID: number) => void;
   sources: CandidateSource[];
 }) {
   const latestRunForSource = (sourceID: number) => contextRuns
@@ -1273,6 +1360,13 @@ function SourcesView({
     <div className="grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
       <Panel icon={<Upload size={18} />} title="Import source" subtitle="Paste raw context or import TXT/MD material.">
         <form className="space-y-4" onSubmit={onSave}>
+          {busy && (
+            <InlineProgress
+              title={busyAction === 'import-file' ? 'Importing source' : 'Saving source'}
+              detail="Preparing the upload, then the context agent starts automatically."
+              progress={busyAction === 'import-file' ? 36 : 28}
+            />
+          )}
           <div className="grid gap-3 md:grid-cols-3">
             <SelectInput
               label="Source type"
@@ -1334,34 +1428,59 @@ function SourcesView({
                 {(() => {
                   const run = latestRunForSource(source.id);
                   const step = latestStepForRun(run?.id);
+                  const progress = contextRunProgress(run, step);
                   return (
-                <div className="flex items-start justify-between gap-3">
-                  <button type="button" onClick={() => onSelect(source.id)} className="min-w-0 flex-1 text-left">
-                    <span className="text-sm font-semibold text-slate-950">{source.title}</span>
-                    <span className="mt-2 line-clamp-3 block text-sm text-slate-600">{source.raw_text}</span>
-                    {run && (
-                      <span className="mt-2 flex flex-wrap gap-2">
-                        <StatusBadge text={`agent ${run.status}`} />
-                        <StatusBadge text={`${run.facts_created} facts`} />
-                        <StatusBadge text={`${run.claims_created} claims`} />
-                        {step && <StatusBadge text={step.stage} />}
-                      </span>
-                    )}
-                    {run?.error && <span className="mt-2 block text-xs text-rose-700">{run.error}</span>}
-                    {step?.message && !run?.error && <span className="mt-2 block text-xs text-slate-500">{step.message}</span>}
-                    <time className="mt-2 block text-xs text-slate-500">{formatDate(source.imported_at)}</time>
-                  </button>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-slate-600">{sourceTypeLabel(source.source_type)}</span>
-                    <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-slate-600">{sourceTrustLabel(source.trust_tier)}</span>
-                    <IconOnlyButton label="Run context agent" onClick={() => onRunAgent(source.id)} disabled={busyAction === `context-agent-${source.id}` || run?.status === 'running'}>
-                      <Bot size={16} />
-                    </IconOnlyButton>
-                    <IconOnlyButton label="Delete source" onClick={() => onDelete(source.id)}>
-                      <Trash2 size={16} />
-                    </IconOnlyButton>
-                  </div>
-                </div>
+                    <div className="space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <button type="button" onClick={() => onSelect(source.id)} className="min-w-0 flex-1 text-left">
+                          <span className="text-sm font-semibold text-slate-950">{source.title}</span>
+                          <span className="mt-2 line-clamp-3 block text-sm text-slate-600">{source.raw_text}</span>
+                          {run && (
+                            <span className="mt-2 flex flex-wrap gap-2">
+                              <StatusBadge text={`agent ${run.status}`} />
+                              <StatusBadge text={`${run.facts_created} facts`} />
+                              <StatusBadge text={`${run.claims_created} claims`} />
+                              {step && <StatusBadge text={contextStageLabel(step.stage)} />}
+                            </span>
+                          )}
+                          {run?.error && <span className="mt-2 block text-xs text-rose-700">{run.error}</span>}
+                          {step?.message && !run?.error && <span className="mt-2 block text-xs text-slate-500">{step.message}</span>}
+                          <time className="mt-2 block text-xs text-slate-500">{formatDate(source.imported_at)}</time>
+                        </button>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-slate-600">{sourceTypeLabel(source.source_type)}</span>
+                          <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-slate-600">{sourceTrustLabel(source.trust_tier)}</span>
+                          <IconOnlyButton
+                          label="Run context agent"
+                          onClick={() => onRunAgent(source.id)}
+                          disabled={busyAction === `context-agent-${source.id}` || run?.status === 'running'}
+                        >
+                          <Bot size={16} />
+                        </IconOnlyButton>
+
+                        {run?.status === 'running' && (
+                          <IconOnlyButton
+                            label="Stop context agent"
+                            onClick={() => onStopAgent(run.id)}
+                            disabled={busyAction === `stop-context-agent-${run.id}`}
+                          >
+                            <Square size={16} />
+                          </IconOnlyButton>
+                        )}
+
+                        <IconOnlyButton label="Delete source" onClick={() => onDelete(source.id)}>
+                          <Trash2 size={16} />
+                        </IconOnlyButton>
+                        </div>
+                      </div>
+                      {run?.status === 'running' && (
+                        <InlineProgress
+                          title="Building resume context"
+                          detail={step?.message || contextStageLabel(step?.stage || 'queued')}
+                          progress={progress}
+                        />
+                      )}
+                    </div>
                   );
                 })()}
               </div>
@@ -1437,6 +1556,7 @@ function JobsView({
     matchesByRequirement.set(match.requirement_id, [...(matchesByRequirement.get(match.requirement_id) ?? []), match]);
   });
   const requirementLabel = (id: number) => requirements.find((req) => req.id === id)?.requirement_text ?? `Requirement ${id}`;
+  const jobWork = jobWorkItem(busyAction);
 
   return (
     <div className="grid gap-4 lg:grid-cols-[340px_1fr]">
@@ -1470,6 +1590,9 @@ function JobsView({
       <div className="space-y-4">
         <Panel icon={<FileText size={18} />} title="JD intake" subtitle="Paste the job description and parse it into requirements.">
           <form className="space-y-4" onSubmit={onSaveJob}>
+            {jobWork && (
+              <InlineProgress title={jobWork.title} detail={jobWork.detail} progress={jobWork.progress} />
+            )}
             <div className="grid gap-3 md:grid-cols-3">
               <TextInput label="Company" value={draft.company} onChange={(value) => onDraftChange({...draft, company: value})} />
               <TextInput label="Title" value={draft.title} onChange={(value) => onDraftChange({...draft, title: value})} />
@@ -1504,6 +1627,21 @@ function JobsView({
 
         <Panel icon={<Activity size={18} />} title="JD analysis and strategy" subtitle="Top pain points, evidence-backed fit, and resume positioning.">
           <div className="grid gap-3 lg:grid-cols-3">
+            {jobWork && (
+              <div className="lg:col-span-3">
+                <StageRail
+                  current={busyAction}
+                  stages={[
+                    ['parse-job', 'Parse'],
+                    ['build-match-map', 'Match'],
+                    ['generate-fit', 'Fit'],
+                    ['generate-strategy', 'Strategy'],
+                    ['generate-bullets', 'Draft'],
+                    ['auto-select-drafts', 'Select'],
+                  ]}
+                />
+              </div>
+            )}
             <SummaryBlock
               title="Top pain points"
               empty="Parse a saved JD."
@@ -1708,6 +1846,9 @@ function SectionsView({
     <div className="grid gap-4 lg:grid-cols-[340px_1fr]">
       <Panel icon={<Layers3 size={18} />} title="Source sections" subtitle="Split raw sources into editable chunks.">
         <div className="space-y-4">
+          {busyAction === 'detect-sections' && (
+            <InlineProgress title="Detecting sections" detail="Reading headings and splitting source text into editable chunks." progress={45} />
+          )}
           <SelectInput
             label="Source"
             value={String(selectedSourceID || '')}
@@ -1745,6 +1886,9 @@ function SectionsView({
           <EmptyState text="Select or detect a section to edit." />
         ) : (
           <div className="space-y-4">
+            {busyAction === 'extract-facts' && (
+              <InlineProgress title="Extracting evidence facts" detail="Converting section text into compact quote-backed atoms." progress={62} />
+            )}
             <div className="grid gap-3 md:grid-cols-2">
               <TextInput label="Heading" value={selectedSection.heading} onChange={(value) => onSectionChange({...selectedSection, heading: value})} />
               <SelectInput
@@ -1814,6 +1958,9 @@ function FactsView({
   return (
     <Panel icon={<ListChecks size={18} />} title="Fact review queue" subtitle="Approve the compact atoms; keep the quote as source evidence. Notes are optional.">
       <div className="space-y-4">
+        {busyAction === 'delete-all-facts' && (
+          <InlineProgress title="Clearing fact bank" detail="Removing facts and dependent match/draft outputs." progress={54} />
+        )}
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
           <div className="flex flex-wrap gap-2">
             {[
@@ -1967,6 +2114,12 @@ function ClaimsView({
     <div className="grid gap-4 xl:grid-cols-[1fr_420px]">
       <Panel icon={<ShieldCheck size={18} />} title="Claim Bank" subtitle="Approved atom records become the permission layer for future resume generation.">
         <div className="space-y-4">
+          {busyAction === 'generate-claims' && (
+            <InlineProgress title="Generating claim bank" detail="Merging approved facts into deduped, permission-aware claim atoms." progress={68} />
+          )}
+          {busyAction === 'delete-all-claims' && (
+            <InlineProgress title="Clearing claim bank" detail="Removing generated claims while keeping source evidence intact." progress={50} />
+          )}
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
             <div className="flex flex-wrap gap-2">
               {[
@@ -2669,6 +2822,113 @@ function ResultBox({ok, text, title}: {ok?: boolean; text: string; title: string
   );
 }
 
+function WorkBanner({
+  busyAction,
+  items,
+  onStopAgent,
+}: {
+  busyAction: string;
+  items: WorkItem[];
+  onStopAgent: (runID: number) => void;
+}) {
+  return (
+    <div className="mb-4 rounded-md border border-sky-200 bg-sky-50 p-3">
+      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-sky-950">
+        <LoaderCircle className="animate-spin" size={16} />
+        Background work
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        {items.map((item) => (
+          <div key={item.key} className="rounded-md border border-slate-200 bg-white p-3">
+            <div className="mb-2 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 text-sm font-semibold text-slate-950">
+                  <LoaderCircle className="shrink-0 animate-spin text-sky-600" size={15} />
+                  {item.title}
+                </p>
+                <p className="mt-1 text-xs text-slate-500">{item.detail}</p>
+              </div>
+
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600">
+                  {Math.round(clampProgress(item.progress))}%
+                </span>
+
+                {item.kind === 'context-agent' && item.runID ? (
+                  <button
+                    type="button"
+                    onClick={() => onStopAgent(item.runID!)}
+                    disabled={busyAction === `stop-context-agent-${item.runID}`}
+                    className="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-white px-2 py-1 text-xs font-semibold text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
+                    title="Stop this background agent"
+                  >
+                    <Square size={12} />
+                    Stop
+                  </button>
+                ) : null}
+              </div>
+            </div>
+
+            <ProgressBar progress={item.progress} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function InlineProgress({compact = false, detail, progress, title}: {compact?: boolean; detail: string; progress: number; title: string}) {
+  return (
+    <div className={`rounded-md border border-slate-200 bg-white ${compact ? 'p-3' : 'p-4'}`}>
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="flex items-center gap-2 text-sm font-semibold text-slate-950">
+            <LoaderCircle className="shrink-0 animate-spin text-sky-600" size={15} />
+            {title}
+          </p>
+          <p className="mt-1 text-xs text-slate-500">{detail}</p>
+        </div>
+        <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600">{Math.round(clampProgress(progress))}%</span>
+      </div>
+      <ProgressBar progress={progress} />
+    </div>
+  );
+}
+
+function ProgressBar({progress}: {progress: number}) {
+  return (
+    <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+      <div
+        className="h-full rounded-full bg-sky-500 transition-all duration-500"
+        style={{width: `${clampProgress(progress)}%`}}
+      />
+    </div>
+  );
+}
+
+function StageRail({current, stages}: {current: string; stages: Array<[string, string]>}) {
+  const currentIndex = stages.findIndex(([value]) => value === current);
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+      <div className="grid gap-2 md:grid-cols-6">
+        {stages.map(([value, label], index) => {
+          const active = value === current;
+          const done = currentIndex > index;
+          return (
+            <div key={value} className={`min-h-14 rounded-md border px-3 py-2 ${active ? 'border-sky-300 bg-white text-sky-950' : done ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-slate-200 bg-white text-slate-500'}`}>
+              <p className="text-xs font-semibold">{label}</p>
+              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
+                <div className={`h-full rounded-full ${active ? 'w-2/3 animate-pulse bg-sky-500' : done ? 'w-full bg-emerald-500' : 'w-0 bg-slate-300'}`} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function StatusBadge({text}: {text: string}) {
   return (
     <span className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-medium text-slate-600">
@@ -3029,6 +3289,114 @@ function formatDate(value: string) {
     return value;
   }
   return date.toLocaleString();
+}
+
+function latestContextStep(steps: ContextAgentStep[], runID: number) {
+  return steps.filter((step) => step.run_id === runID).sort((a, b) => b.id - a.id)[0];
+}
+
+function sourceTitle(sources: CandidateSource[], sourceID: number) {
+  return sources.find((source) => source.id === sourceID)?.title || `Source ${sourceID}`;
+}
+
+function contextStageLabel(stage: string) {
+  const labels: Record<string, string> = {
+    queued: 'Queued',
+    source_preprocess: 'Normalizing source',
+    section_detect: 'Detecting sections',
+    fact_extract: 'Extracting evidence',
+    fact_compact: 'Compacting facts',
+    profile_draft: 'Merging profile draft',
+    claim_generate: 'Generating claims',
+    claim_compact: 'Compacting claims',
+    dedupe: 'Deduplicating atoms',
+    done: 'Complete',
+    failed: 'Failed',
+    cancelled: 'Cancelled',
+  };
+  return labels[stage] ?? stage.replaceAll('_', ' ');
+}
+
+function contextRunProgress(run?: ContextAgentRun, step?: ContextAgentStep) {
+  if (!run) return 0;
+  if (run.status === 'complete') return 100;
+  if (run.status === 'failed') return 100;
+  if (run.status === 'cancelled') return 100;
+
+  const stageProgress: Record<string, number> = {
+    queued: 8,
+    source_preprocess: 16,
+    section_detect: 26,
+    fact_extract: Math.min(64, 34 + run.facts_created * 8),
+    fact_compact: 68,
+    profile_draft: 76,
+    claim_generate: Math.min(88, 78 + run.claims_created * 4),
+    claim_compact: 90,
+    dedupe: 94,
+    done: 100,
+    cancelled: 100,
+  };
+
+  return stageProgress[step?.stage || 'queued'] ?? 20;
+}
+
+function workItemForAction(action: string): WorkItem {
+  const known = actionWorkMap[action] ?? dynamicWorkItem(action);
+  return {key: `action-${action}`, ...known};
+}
+
+function jobWorkItem(action: string): WorkItem | null {
+  if (!['parse-job', 'build-match-map', 'generate-fit', 'generate-strategy', 'generate-bullets', 'auto-select-drafts', 'save-job'].includes(action)) {
+    return null;
+  }
+  return workItemForAction(action);
+}
+
+function dynamicWorkItem(action: string) {
+  if (action.startsWith('context-agent-')) {
+    return {title: 'Starting context agent', detail: 'Queueing the background source analysis loop.', progress: 12};
+  }
+  if (action.startsWith('stop-context-agent-')) {
+    return {title: 'Stopping context agent', detail: 'Cancelling the background source analysis loop.', progress: 72};
+  }
+  if (action.startsWith('review-fact-')) {
+    return {title: 'Saving fact review', detail: 'Updating fact status and review metadata.', progress: 72};
+  }
+  if (action.startsWith('update-claim-')) {
+    return {title: 'Saving claim review', detail: 'Updating claim atoms, permissions, and risk flags.', progress: 72};
+  }
+  if (action.startsWith('update-draft-') || action.startsWith('select-draft-')) {
+    return {title: 'Saving draft choice', detail: 'Updating the selected resume bullet state.', progress: 72};
+  }
+  if (action.startsWith('save-rule-')) {
+    return {title: 'Saving prompt rule', detail: 'Versioning the reusable instruction rule.', progress: 70};
+  }
+  return {title: 'Working', detail: action.replaceAll('-', ' '), progress: 45};
+}
+
+const actionWorkMap: Record<string, Omit<WorkItem, 'key'>> = {
+  'create-source': {title: 'Saving source', detail: 'Storing raw text before automatic context generation.', progress: 28},
+  'import-file': {title: 'Importing file', detail: 'Reading and normalizing source content.', progress: 36},
+  'detect-sections': {title: 'Detecting sections', detail: 'Splitting source material into editable origin chunks.', progress: 45},
+  'extract-facts': {title: 'Extracting facts', detail: 'Building compact quote-backed evidence atoms.', progress: 62},
+  'generate-claims': {title: 'Generating claim bank', detail: 'Merging approved facts into deduped permission atoms.', progress: 68},
+  'delete-all-facts': {title: 'Clearing fact bank', detail: 'Removing facts and dependent job outputs.', progress: 54},
+  'delete-all-claims': {title: 'Clearing claim bank', detail: 'Removing generated claims.', progress: 50},
+  'save-job': {title: 'Saving JD', detail: 'Storing the job description and refreshing context.', progress: 32},
+  'parse-job': {title: 'Parsing JD', detail: 'Extracting requirements, pain points, and keywords.', progress: 46},
+  'build-match-map': {title: 'Building match map', detail: 'Scoring job requirements against approved evidence.', progress: 58},
+  'generate-fit': {title: 'Generating fit analysis', detail: 'Evaluating strengths, gaps, and recommendation.', progress: 66},
+  'generate-strategy': {title: 'Generating strategy', detail: 'Turning fit analysis into resume positioning.', progress: 72},
+  'generate-bullets': {title: 'Drafting bullets', detail: 'Creating sourced bullets with diagnostics and risk checks.', progress: 74},
+  'auto-select-drafts': {title: 'Selecting bullets', detail: 'Ranking draft bullets for the best resume set.', progress: 78},
+  'test-llm': {title: 'Testing AI connection', detail: 'Sending a small smoke-test request.', progress: 50},
+  'install-tectonic': {title: 'Installing PDF renderer', detail: 'Downloading and preparing the local renderer.', progress: 48},
+  'render-pdf': {title: 'Rendering sample PDF', detail: 'Compiling a local sample document.', progress: 58},
+};
+
+function clampProgress(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
 }
 
 export default App;

@@ -1027,6 +1027,62 @@ func TestContextAgentReusesActiveRun(t *testing.T) {
 	}
 }
 
+func TestAppRevivesQueuedContextAgentRun(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "")
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	source, err := store.CreateCandidateSource(CreateCandidateSourceInput{
+		Title: "Full extended resume",
+		RawText: `PROJECTS
+- Built and shipped FastAPI backend APIs for planning workflows.
+- Added PostgreSQL persistence for project records.
+
+TECHNICAL SKILLS
+FastAPI, PostgreSQL, React`,
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidateSource() error = %v", err)
+	}
+	run, err := store.StartContextAgent(source.ID)
+	if err != nil {
+		t.Fatalf("StartContextAgent() error = %v", err)
+	}
+
+	app := NewApp()
+	app.ctx = context.Background()
+	app.store = store
+	if _, err := app.ListContextAgentRuns(0); err != nil {
+		t.Fatalf("ListContextAgentRuns() error = %v", err)
+	}
+
+	var finished ContextAgentRun
+	for attempt := 0; attempt < 40; attempt++ {
+		finished, err = store.GetContextAgentRun(run.ID)
+		if err != nil {
+			t.Fatalf("GetContextAgentRun() error = %v", err)
+		}
+		if finished.Status != contextAgentStatusRunning {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if finished.Status != contextAgentStatusComplete {
+		steps, _ := store.ListContextAgentSteps(run.ID)
+		t.Fatalf("revived run status = %q, want complete; steps = %+v", finished.Status, steps)
+	}
+	steps, err := store.ListContextAgentSteps(run.ID)
+	if err != nil {
+		t.Fatalf("ListContextAgentSteps() error = %v", err)
+	}
+	if len(steps) < 2 || steps[1].Stage != "source_preprocess" {
+		t.Fatalf("steps = %+v, want worker to advance past queued", steps)
+	}
+}
+
 func TestContextAgentBuildsCompactResumeContext(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "")
 	store, err := NewStore(t.TempDir())

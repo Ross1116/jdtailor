@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	contextAgentStatusRunning  = "running"
-	contextAgentStatusComplete = "complete"
-	contextAgentStatusFailed   = "failed"
+	contextAgentStatusRunning   = "running"
+	contextAgentStatusComplete  = "complete"
+	contextAgentStatusFailed    = "failed"
+	contextAgentStatusCancelled = "cancelled"
 )
 
 type ContextAgentRun struct {
@@ -116,6 +117,7 @@ func (s *Store) RunContextAgent(ctx context.Context, runID int64, client *http.C
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
 	run, err := s.GetContextAgentRun(runID)
 	if err != nil {
 		return ContextAgentRun{}, err
@@ -124,18 +126,44 @@ func (s *Store) RunContextAgent(ctx context.Context, runID int64, client *http.C
 		return run, nil
 	}
 
-	factsCreated := 0
-	claimsCreated := 0
+	factsCreated := run.FactsCreated
+	claimsCreated := run.ClaimsCreated
 
 	fail := func(stage string, err error) (ContextAgentRun, error) {
+		if errors.Is(err, context.Canceled) {
+			return s.cancelContextAgentFromWorker(runID, stage, factsCreated, claimsCreated)
+		}
+
 		_ = s.recordContextAgentStep(runID, stage, "failed", err.Error())
 		_ = s.finishContextAgentRun(runID, contextAgentStatusFailed, err.Error(), factsCreated, claimsCreated)
 		_ = s.LogEvent("error", "context agent failed: "+err.Error())
+
 		finished, getErr := s.GetContextAgentRun(runID)
 		if getErr != nil {
 			return ContextAgentRun{}, getErr
 		}
 		return finished, err
+	}
+
+	checkCancelled := func(stage string) (ContextAgentRun, bool, error) {
+		if ctx.Err() != nil {
+			cancelled, cancelErr := s.cancelContextAgentFromWorker(runID, stage, factsCreated, claimsCreated)
+			return cancelled, true, cancelErr
+		}
+
+		current, err := s.GetContextAgentRun(runID)
+		if err != nil {
+			return ContextAgentRun{}, false, err
+		}
+		if current.Status == contextAgentStatusCancelled {
+			return current, true, context.Canceled
+		}
+
+		return ContextAgentRun{}, false, nil
+	}
+
+	if cancelled, stopped, err := checkCancelled("source_preprocess"); stopped || err != nil {
+		return cancelled, err
 	}
 
 	_ = s.recordContextAgentStep(runID, "source_preprocess", "ok", "source normalized")
@@ -144,9 +172,18 @@ func (s *Store) RunContextAgent(ctx context.Context, runID int64, client *http.C
 	if err != nil {
 		return fail("section_detect", err)
 	}
+
+	if cancelled, stopped, err := checkCancelled("section_detect"); stopped || err != nil {
+		return cancelled, err
+	}
+
 	_ = s.recordContextAgentStep(runID, "section_detect", "ok", pluralCount(len(sections), "section"))
 
 	for _, section := range sections {
+		if cancelled, stopped, err := checkCancelled("fact_extract"); stopped || err != nil {
+			return cancelled, err
+		}
+
 		facts, err := s.ExtractEvidenceFacts(ctx, ExtractEvidenceFactsInput{
 			SourceID:  run.SourceID,
 			SectionID: section.ID,
@@ -154,10 +191,25 @@ func (s *Store) RunContextAgent(ctx context.Context, runID int64, client *http.C
 		if err != nil {
 			return fail("fact_extract", err)
 		}
+
 		factsCreated += len(facts)
+
+		if cancelled, stopped, err := checkCancelled("fact_extract"); stopped || err != nil {
+			return cancelled, err
+		}
+
 		_ = s.recordContextAgentStep(runID, "fact_extract", "ok", section.Heading+": "+pluralCount(len(facts), "fact"))
 	}
+
+	if cancelled, stopped, err := checkCancelled("fact_compact"); stopped || err != nil {
+		return cancelled, err
+	}
+
 	_ = s.recordContextAgentStep(runID, "fact_compact", "ok", pluralCount(factsCreated, "fact")+" compacted")
+
+	if cancelled, stopped, err := checkCancelled("profile_draft"); stopped || err != nil {
+		return cancelled, err
+	}
 
 	profile, err := s.DraftCandidateProfileFromSource(run.SourceID)
 	if err != nil {
@@ -166,22 +218,53 @@ func (s *Store) RunContextAgent(ctx context.Context, runID int64, client *http.C
 	if err := s.mergeAndSaveCandidateProfile(profile); err != nil {
 		return fail("profile_draft", err)
 	}
+
+	if cancelled, stopped, err := checkCancelled("profile_draft"); stopped || err != nil {
+		return cancelled, err
+	}
+
 	_ = s.recordContextAgentStep(runID, "profile_draft", "ok", "candidate profile draft merged")
+
+	if cancelled, stopped, err := checkCancelled("claim_generate"); stopped || err != nil {
+		return cancelled, err
+	}
 
 	claims, err := s.GenerateCandidateClaims(ctx, client)
 	if err != nil {
 		return fail("claim_generate", err)
 	}
+
 	claimsCreated = len(claims)
+
+	if cancelled, stopped, err := checkCancelled("claim_generate"); stopped || err != nil {
+		return cancelled, err
+	}
+
 	_ = s.recordContextAgentStep(runID, "claim_generate", "ok", pluralCount(claimsCreated, "claim"))
+
+	if cancelled, stopped, err := checkCancelled("claim_compact"); stopped || err != nil {
+		return cancelled, err
+	}
+
 	_ = s.recordContextAgentStep(runID, "claim_compact", "ok", "claim atoms compacted")
+
+	if cancelled, stopped, err := checkCancelled("dedupe"); stopped || err != nil {
+		return cancelled, err
+	}
+
 	_ = s.recordContextAgentStep(runID, "dedupe", "ok", "similarity keys applied")
+
+	if cancelled, stopped, err := checkCancelled("done"); stopped || err != nil {
+		return cancelled, err
+	}
 
 	if err := s.finishContextAgentRun(runID, contextAgentStatusComplete, "", factsCreated, claimsCreated); err != nil {
 		return ContextAgentRun{}, err
 	}
+
 	_ = s.recordContextAgentStep(runID, "done", "ok", "context agent complete")
 	_ = s.LogEvent("info", "context agent complete")
+
 	return s.GetContextAgentRun(runID)
 }
 
@@ -220,6 +303,70 @@ func (s *Store) GetContextAgentRun(runID int64) (ContextAgentRun, error) {
 		return ContextAgentRun{}, sql.ErrNoRows
 	}
 	return runs[0], nil
+}
+
+func (s *Store) CancelContextAgentRun(runID int64, message string) (ContextAgentRun, error) {
+	if runID <= 0 {
+		return ContextAgentRun{}, errors.New("run id is required")
+	}
+
+	run, err := s.GetContextAgentRun(runID)
+	if err != nil {
+		return ContextAgentRun{}, err
+	}
+
+	if run.Status != contextAgentStatusRunning {
+		return run, nil
+	}
+
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "cancelled"
+	}
+
+	_ = s.recordContextAgentStep(runID, "cancelled", "cancelled", message)
+
+	if err := s.finishContextAgentRun(
+		runID,
+		contextAgentStatusCancelled,
+		message,
+		run.FactsCreated,
+		run.ClaimsCreated,
+	); err != nil {
+		return ContextAgentRun{}, err
+	}
+
+	_ = s.LogEvent("info", "context agent cancelled")
+
+	return s.GetContextAgentRun(runID)
+}
+
+func (s *Store) cancelContextAgentFromWorker(runID int64, stage string, factsCreated int, claimsCreated int) (ContextAgentRun, error) {
+	stage = strings.TrimSpace(stage)
+	if stage == "" {
+		stage = "cancelled"
+	}
+
+	_ = s.recordContextAgentStep(runID, stage, "cancelled", "context agent cancelled")
+
+	if err := s.finishContextAgentRun(
+		runID,
+		contextAgentStatusCancelled,
+		"context agent cancelled",
+		factsCreated,
+		claimsCreated,
+	); err != nil {
+		return ContextAgentRun{}, err
+	}
+
+	_ = s.LogEvent("info", "context agent cancelled")
+
+	finished, err := s.GetContextAgentRun(runID)
+	if err != nil {
+		return ContextAgentRun{}, err
+	}
+
+	return finished, context.Canceled
 }
 
 func (s *Store) ListContextAgentSteps(runID int64) ([]ContextAgentStep, error) {
@@ -373,17 +520,34 @@ func (s *Store) recordContextAgentStep(runID int64, stage, status, message strin
 }
 
 func (s *Store) finishContextAgentRun(runID int64, status, message string, factsCreated int, claimsCreated int) error {
+	if status == contextAgentStatusCancelled {
+		_, err := s.db.ExecContext(
+			context.Background(),
+			`UPDATE context_agent_runs
+			SET status = ?, finished_at = ?, error = ?, facts_created = ?, claims_created = ?
+			WHERE id = ?`,
+			status,
+			time.Now().UTC().Format(time.RFC3339),
+			strings.TrimSpace(message),
+			factsCreated,
+			claimsCreated,
+			runID,
+		)
+		return err
+	}
+
 	_, err := s.db.ExecContext(
 		context.Background(),
 		`UPDATE context_agent_runs
 		SET status = ?, finished_at = ?, error = ?, facts_created = ?, claims_created = ?
-		WHERE id = ?`,
+		WHERE id = ? AND status != ?`,
 		status,
 		time.Now().UTC().Format(time.RFC3339),
 		strings.TrimSpace(message),
 		factsCreated,
 		claimsCreated,
 		runID,
+		contextAgentStatusCancelled,
 	)
 	return err
 }

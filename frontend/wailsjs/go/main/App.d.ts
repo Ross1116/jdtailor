@@ -112,6 +112,8 @@ export function SelectTailoredBulletDraft(arg1:main.SelectTailoredBulletDraftInp
 
 export function StartContextAgent(arg1:number):Promise<main.ContextAgentRun>;
 
+export function StopContextAgent(arg1:number):Promise<main.ContextAgentRun>;
+
 export function TestLLM():Promise<main.LLMTestResult>;
 
 export function UpdateBlockedClaim(arg1:main.UpdateBlockedClaimInput):Promise<main.BlockedClaim>;

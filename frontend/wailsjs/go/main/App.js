@@ -222,6 +222,10 @@ export function StartContextAgent(arg1) {
   return window['go']['main']['App']['StartContextAgent'](arg1);
 }
 
+export function StopContextAgent(arg1) {
+  return window['go']['main']['App']['StopContextAgent'](arg1);
+}
+
 export function TestLLM() {
   return window['go']['main']['App']['TestLLM']();
 }

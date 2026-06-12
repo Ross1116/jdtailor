@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
 
@@ -12,12 +13,11 @@ type App struct {
 	ctx                 context.Context
 	store               *Store
 	contextAgentMu      sync.Mutex
-	contextAgentWorkers map[int64]bool
+	contextAgentWorkers map[int64]context.CancelFunc
 }
 
-// NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{contextAgentWorkers: make(map[int64]bool)}
+	return &App{contextAgentWorkers: make(map[int64]context.CancelFunc)}
 }
 
 // startup is called when the app starts. The context is saved
@@ -37,6 +37,13 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	a.contextAgentMu.Lock()
+	for runID, cancel := range a.contextAgentWorkers {
+		cancel()
+		delete(a.contextAgentWorkers, runID)
+	}
+	a.contextAgentMu.Unlock()
+
 	if a.store != nil {
 		if err := a.store.Close(); err != nil {
 			println("shutdown error:", err.Error())
@@ -252,42 +259,56 @@ func (a *App) StartContextAgent(sourceID int64) (ContextAgentRun, error) {
 	if err != nil {
 		return ContextAgentRun{}, err
 	}
-	a.contextAgentMu.Lock()
-	if a.contextAgentWorkers == nil {
-		a.contextAgentWorkers = make(map[int64]bool)
+	a.startContextAgentWorker(run)
+	return run, nil
+}
+
+func (a *App) StopContextAgent(runID int64) (ContextAgentRun, error) {
+	if err := a.ensureStore(); err != nil {
+		return ContextAgentRun{}, err
 	}
-	shouldStartWorker := run.Status == contextAgentStatusRunning && !a.contextAgentWorkers[run.ID]
-	if shouldStartWorker {
-		a.contextAgentWorkers[run.ID] = true
+	if runID <= 0 {
+		return ContextAgentRun{}, errors.New("run id is required")
+	}
+
+	a.contextAgentMu.Lock()
+	cancel := a.contextAgentWorkers[runID]
+	if cancel != nil {
+		delete(a.contextAgentWorkers, runID)
 	}
 	a.contextAgentMu.Unlock()
-	if shouldStartWorker {
-		go func(runID int64) {
-			defer func() {
-				a.contextAgentMu.Lock()
-				delete(a.contextAgentWorkers, runID)
-				a.contextAgentMu.Unlock()
-			}()
-			if _, err := a.store.RunContextAgent(a.ctx, runID, nil); err != nil {
-				a.store.Logger().Error("context agent failed", "run_id", runID, "error", err)
-			}
-		}(run.ID)
+
+	if cancel != nil {
+		cancel()
 	}
-	return run, nil
+
+	return a.store.CancelContextAgentRun(runID, "cancelled by user")
 }
 
 func (a *App) GetContextAgentRun(runID int64) (ContextAgentRun, error) {
 	if err := a.ensureStore(); err != nil {
 		return ContextAgentRun{}, err
 	}
-	return a.store.GetContextAgentRun(runID)
+	run, err := a.store.GetContextAgentRun(runID)
+	if err != nil {
+		return ContextAgentRun{}, err
+	}
+	a.startContextAgentWorker(run)
+	return run, nil
 }
 
 func (a *App) ListContextAgentRuns(sourceID int64) ([]ContextAgentRun, error) {
 	if err := a.ensureStore(); err != nil {
 		return nil, err
 	}
-	return a.store.ListContextAgentRuns(sourceID)
+	runs, err := a.store.ListContextAgentRuns(sourceID)
+	if err != nil {
+		return nil, err
+	}
+	for _, run := range runs {
+		a.startContextAgentWorker(run)
+	}
+	return runs, nil
 }
 
 func (a *App) ListContextAgentSteps(runID int64) ([]ContextAgentStep, error) {
@@ -302,6 +323,45 @@ func (a *App) BuildResumeContext(sourceID int64) (ResumeContext, error) {
 		return ResumeContext{}, err
 	}
 	return a.store.BuildResumeContext(sourceID)
+}
+
+func (a *App) startContextAgentWorker(run ContextAgentRun) {
+	if run.Status != contextAgentStatusRunning {
+		return
+	}
+
+	a.contextAgentMu.Lock()
+	if a.contextAgentWorkers == nil {
+		a.contextAgentWorkers = make(map[int64]context.CancelFunc)
+	}
+	if _, exists := a.contextAgentWorkers[run.ID]; exists {
+		a.contextAgentMu.Unlock()
+		return
+	}
+
+	baseCtx := a.ctx
+	if baseCtx == nil {
+		baseCtx = context.Background()
+	}
+
+	ctx, cancel := context.WithCancel(baseCtx)
+	a.contextAgentWorkers[run.ID] = cancel
+	a.contextAgentMu.Unlock()
+
+	go func(runID int64) {
+		defer func() {
+			a.contextAgentMu.Lock()
+			delete(a.contextAgentWorkers, runID)
+			a.contextAgentMu.Unlock()
+		}()
+
+		if _, err := a.store.RunContextAgent(ctx, runID, nil); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			a.store.Logger().Error("context agent failed", "run_id", runID, "error", err)
+		}
+	}(run.ID)
 }
 
 func (a *App) ListJobDescriptions() ([]JobDescription, error) {
