@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,9 @@ import (
 )
 
 var openAIResponsesURL = "https://api.openai.com/v1/responses"
+var openAIEmbeddingsURL = "https://api.openai.com/v1/embeddings"
 var openRouterChatCompletionsURL = "https://openrouter.ai/api/v1/chat/completions"
+var openRouterEmbeddingsURL = "https://openrouter.ai/api/v1/embeddings"
 
 type ToolStatus struct {
 	APIKeyConfigured bool   `json:"api_key_configured"`
@@ -47,6 +50,23 @@ type openAIResponsesRequest struct {
 	Instructions    string `json:"instructions,omitempty"`
 	MaxOutputTokens int    `json:"max_output_tokens,omitempty"`
 	Store           bool   `json:"store"`
+}
+
+type embeddingsRequest struct {
+	Model      string `json:"model"`
+	Input      any    `json:"input"`
+	Dimensions int    `json:"dimensions,omitempty"`
+}
+
+type embeddingsResponse struct {
+	Data []struct {
+		Embedding []float64 `json:"embedding"`
+		Index     int       `json:"index"`
+	} `json:"data"`
+	Model string `json:"model"`
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 type openAIResponsesResponse struct {
@@ -279,6 +299,74 @@ func (s *Store) GenerateLLMText(ctx context.Context, client *http.Client, system
 	}
 }
 
+func (s *Store) GenerateEmbedding(ctx context.Context, client *http.Client, input string) ([]float64, string, string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil, "", "", errors.New("embedding input is empty")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	settings, err := s.GetSettings()
+	if err != nil {
+		return nil, "", "", err
+	}
+	provider := configuredProvider(settings.Provider)
+	model := configuredEmbeddingModel(provider, settings.EmbeddingModel)
+	key, _ := s.APIKeyForProvider(provider)
+	if key == "" {
+		return nil, provider, model, errors.New(apiKeyEnvName(provider) + " is missing")
+	}
+	client = llmClientWithMinTimeout(client, 30*time.Second)
+	body, err := json.Marshal(embeddingsRequest{
+		Model: model,
+		Input: input,
+	})
+	if err != nil {
+		return nil, provider, model, err
+	}
+	url := openRouterEmbeddingsURL
+	if provider == "openai" {
+		url = openAIEmbeddingsURL
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, provider, model, err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	if provider == "openrouter" {
+		req.Header.Set("X-OpenRouter-Title", "JD Tailor")
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, provider, model, err
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, provider, model, err
+	}
+	var parsed embeddingsResponse
+	if err := json.Unmarshal(responseBody, &parsed); err != nil {
+		return nil, provider, model, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		message := fmt.Sprintf("%s embeddings returned HTTP %d", provider, resp.StatusCode)
+		if parsed.Error != nil && strings.TrimSpace(parsed.Error.Message) != "" {
+			message = parsed.Error.Message
+		}
+		return nil, provider, model, errors.New(message)
+	}
+	if parsed.Error != nil && strings.TrimSpace(parsed.Error.Message) != "" {
+		return nil, provider, model, errors.New(parsed.Error.Message)
+	}
+	if len(parsed.Data) == 0 || len(parsed.Data[0].Embedding) == 0 {
+		return nil, provider, model, errors.New("embedding response was empty")
+	}
+	return parsed.Data[0].Embedding, provider, model, nil
+}
+
 func llmClientWithMinTimeout(client *http.Client, minTimeout time.Duration) *http.Client {
 	if client == nil {
 		return &http.Client{Timeout: minTimeout}
@@ -416,6 +504,22 @@ func configuredModel(provider string, model string) string {
 		return "gpt-5.4-mini"
 	}
 	return defaultModel
+}
+
+func configuredEmbeddingModel(provider string, model string) string {
+	model = strings.TrimSpace(model)
+	if model != "" {
+		return model
+	}
+	if configuredProvider(provider) == "openai" {
+		return defaultOpenAIEmbeddingModel
+	}
+	return defaultOpenRouterEmbedding
+}
+
+func embeddingInputHash(provider string, model string, input string) string {
+	sum := sha256.Sum256([]byte(configuredProvider(provider) + "\x00" + strings.TrimSpace(model) + "\x00" + strings.TrimSpace(input)))
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func apiKeyEnvName(provider string) string {

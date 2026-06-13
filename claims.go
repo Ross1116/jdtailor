@@ -163,7 +163,8 @@ Generate atom-first candidate profile records from evidence facts.
 # Rules
 - Use only IDs from <evidence_facts_json>.
 - label must be a short searchable label, not a resume bullet and not a full sentence.
-- Store reusable keywords/phrases in atom arrays. Keep each atom short.
+- Store reusable keywords/phrases in atom arrays. Keep each atom short and atomic: one action, artifact, tool, metric, scope, or outcome per array item.
+- Combine multiple source_fact_ids only when the facts share the same origin and support one coherent future resume insight.
 - Do not output polished resume bullets, marketing phrasing, or complete achievement sentences.
 - Do not add tools, metrics, leadership, seniority, cloud ownership, ML research, Kubernetes ownership, production scope, or domain claims unless facts prove them.
 - Prefer records that can later support resume bullets, summary lines, or skills entries.
@@ -733,15 +734,15 @@ func atomsFromFact(fact factPromptContext) claimAtoms {
 func enrichClaimAtoms(claim parsedCandidateClaim, facts []factPromptContext) parsedCandidateClaim {
 	for _, fact := range facts {
 		atoms := atomsFromFact(fact)
-		claim.Actions = firstNonEmptyList(claim.Actions, atoms.Actions)
-		claim.Capabilities = firstNonEmptyList(claim.Capabilities, atoms.Capabilities)
-		claim.Objects = firstNonEmptyList(claim.Objects, atoms.Objects)
-		claim.Technologies = firstNonEmptyList(claim.Technologies, atoms.Technologies)
-		claim.Domains = firstNonEmptyList(claim.Domains, atoms.Domains)
-		claim.Artifacts = firstNonEmptyList(claim.Artifacts, atoms.Artifacts)
-		claim.Scope = firstNonEmptyList(claim.Scope, atoms.Scope)
-		claim.Metrics = firstNonEmptyList(claim.Metrics, atoms.Metrics)
-		claim.Outcomes = firstNonEmptyList(claim.Outcomes, atoms.Outcomes)
+		claim.Actions = normalizeStringList(append(claim.Actions, atoms.Actions...))
+		claim.Capabilities = normalizeStringList(append(claim.Capabilities, atoms.Capabilities...))
+		claim.Objects = normalizeStringList(append(claim.Objects, atoms.Objects...))
+		claim.Technologies = normalizeStringList(append(claim.Technologies, atoms.Technologies...))
+		claim.Domains = normalizeStringList(append(claim.Domains, atoms.Domains...))
+		claim.Artifacts = normalizeStringList(append(claim.Artifacts, atoms.Artifacts...))
+		claim.Scope = normalizeStringList(append(claim.Scope, atoms.Scope...))
+		claim.Metrics = normalizeStringList(append(claim.Metrics, atoms.Metrics...))
+		claim.Outcomes = normalizeStringList(append(claim.Outcomes, atoms.Outcomes...))
 		claim.ProfileContext = normalizeStringList(append(claim.ProfileContext, atoms.ProfileContext...))
 		if claim.EvidenceStrength == "" {
 			claim.EvidenceStrength = inferEvidenceStrengthFromFact(fact)

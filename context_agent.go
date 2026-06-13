@@ -125,6 +125,9 @@ func (s *Store) RunContextAgent(ctx context.Context, runID int64, client *http.C
 	if run.Status != contextAgentStatusRunning {
 		return run, nil
 	}
+	if recovered, ok, err := s.recoverCompletedContextAgentRun(run); ok || err != nil {
+		return recovered, err
+	}
 
 	factsCreated := run.FactsCreated
 	claimsCreated := run.ClaimsCreated
@@ -167,6 +170,7 @@ func (s *Store) RunContextAgent(ctx context.Context, runID int64, client *http.C
 	}
 
 	_ = s.recordContextAgentStep(runID, "source_preprocess", "ok", "source normalized")
+	_ = s.recordContextAgentStep(runID, "section_detect", "running", "detecting source sections")
 
 	sections, err := s.DetectSourceSections(run.SourceID)
 	if err != nil {
@@ -179,20 +183,34 @@ func (s *Store) RunContextAgent(ctx context.Context, runID int64, client *http.C
 
 	_ = s.recordContextAgentStep(runID, "section_detect", "ok", pluralCount(len(sections), "section"))
 
-	for _, section := range sections {
+	for index, section := range sections {
 		if cancelled, stopped, err := checkCancelled("fact_extract"); stopped || err != nil {
 			return cancelled, err
 		}
+
+		_ = s.recordContextAgentStep(
+			runID,
+			"fact_extract",
+			"running",
+			"extracting "+section.Heading+" ("+strconv.Itoa(index+1)+"/"+strconv.Itoa(len(sections))+")",
+		)
 
 		facts, err := s.ExtractEvidenceFacts(ctx, ExtractEvidenceFactsInput{
 			SourceID:  run.SourceID,
 			SectionID: section.ID,
 		}, client)
 		if err != nil {
+			if isNoExtractableFactsError(err) {
+				_ = s.recordContextAgentStep(runID, "fact_extract", "skipped", section.Heading+": no reusable facts")
+				continue
+			}
 			return fail("fact_extract", err)
 		}
 
 		factsCreated += len(facts)
+		if err := s.updateContextAgentRunCounts(runID, factsCreated, claimsCreated); err != nil {
+			return fail("fact_extract", err)
+		}
 
 		if cancelled, stopped, err := checkCancelled("fact_extract"); stopped || err != nil {
 			return cancelled, err
@@ -229,12 +247,17 @@ func (s *Store) RunContextAgent(ctx context.Context, runID int64, client *http.C
 		return cancelled, err
 	}
 
+	_ = s.recordContextAgentStep(runID, "claim_generate", "running", "generating profile-bank claims")
+
 	claims, err := s.GenerateCandidateClaims(ctx, client)
 	if err != nil {
 		return fail("claim_generate", err)
 	}
 
 	claimsCreated = len(claims)
+	if err := s.updateContextAgentRunCounts(runID, factsCreated, claimsCreated); err != nil {
+		return fail("claim_generate", err)
+	}
 
 	if cancelled, stopped, err := checkCancelled("claim_generate"); stopped || err != nil {
 		return cancelled, err
@@ -282,6 +305,66 @@ func (s *Store) ListContextAgentRuns(sourceID int64) ([]ContextAgentRun, error) 
 	}
 	defer rows.Close()
 	return scanContextAgentRuns(rows)
+}
+
+func (s *Store) recoverCompletedContextAgentRun(run ContextAgentRun) (ContextAgentRun, bool, error) {
+	steps, err := s.ListContextAgentSteps(run.ID)
+	if err != nil {
+		return ContextAgentRun{}, false, err
+	}
+	hasGeneratedClaims := false
+	for _, step := range steps {
+		if step.Stage == "claim_generate" && step.Status == "ok" {
+			hasGeneratedClaims = true
+			break
+		}
+		if step.Stage == "claim_compact" || step.Stage == "dedupe" || step.Stage == "done" {
+			hasGeneratedClaims = true
+			break
+		}
+	}
+	if !hasGeneratedClaims {
+		return ContextAgentRun{}, false, nil
+	}
+
+	facts, err := s.listResumeContextFacts(run.SourceID)
+	if err != nil {
+		return ContextAgentRun{}, false, err
+	}
+	factIDs := map[int64]bool{}
+	for _, fact := range facts {
+		if fact.Status == factStatusRejected || fact.DuplicateOfID > 0 {
+			continue
+		}
+		factIDs[fact.ID] = true
+	}
+	claims, err := s.ListCandidateClaims("all")
+	if err != nil {
+		return ContextAgentRun{}, false, err
+	}
+	claimCount := 0
+	for _, claim := range claims {
+		if claim.Status == claimStatusRejected || claim.Status == claimStatusBlocked {
+			continue
+		}
+		if claimIntersectsFacts(claim, factIDs) {
+			claimCount++
+		}
+	}
+	if len(factIDs) == 0 || claimCount == 0 {
+		return ContextAgentRun{}, false, nil
+	}
+
+	if err := s.finishContextAgentRun(run.ID, contextAgentStatusComplete, "", len(factIDs), claimCount); err != nil {
+		return ContextAgentRun{}, false, err
+	}
+	_ = s.recordContextAgentStep(run.ID, "done", "ok", "context agent complete")
+	_ = s.LogEvent("info", "context agent complete")
+	finished, err := s.GetContextAgentRun(run.ID)
+	if err != nil {
+		return ContextAgentRun{}, false, err
+	}
+	return finished, true, nil
 }
 
 func (s *Store) GetContextAgentRun(runID int64) (ContextAgentRun, error) {
@@ -552,6 +635,20 @@ func (s *Store) finishContextAgentRun(runID int64, status, message string, facts
 	return err
 }
 
+func (s *Store) updateContextAgentRunCounts(runID int64, factsCreated int, claimsCreated int) error {
+	_, err := s.db.ExecContext(
+		context.Background(),
+		`UPDATE context_agent_runs
+		SET facts_created = ?, claims_created = ?
+		WHERE id = ? AND status = ?`,
+		factsCreated,
+		claimsCreated,
+		runID,
+		contextAgentStatusRunning,
+	)
+	return err
+}
+
 func (s *Store) mergeAndSaveCandidateProfile(draft CandidateProfile) error {
 	current, err := s.GetCandidateProfile()
 	if err != nil {
@@ -684,4 +781,13 @@ func pluralCount(count int, noun string) string {
 		return "1 " + noun
 	}
 	return strconv.Itoa(count) + " " + noun + "s"
+}
+
+func isNoExtractableFactsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no local facts could be extracted") ||
+		strings.Contains(message, "llm returned no facts")
 }

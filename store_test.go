@@ -84,9 +84,14 @@ func TestMigrationAddsAtomBankAndDraftSelectionColumns(t *testing.T) {
 			t.Fatalf("candidate_claims missing %s", column)
 		}
 	}
-	for _, column := range []string{"claim_ids_json", "origin_heading", "origin_type", "selection_score", "selected_for_resume"} {
+	for _, column := range []string{"claim_ids_json", "origin_heading", "origin_type", "selection_score", "selected_for_resume", "value_theme", "display_order"} {
 		if !tableHasColumn(t, store, "tailored_bullet_drafts", column) {
 			t.Fatalf("tailored_bullet_drafts missing %s", column)
+		}
+	}
+	for _, column := range []string{"entity_type", "entity_id", "provider", "model", "input_hash", "dimensions", "vector_json"} {
+		if !tableHasColumn(t, store, "semantic_embeddings", column) {
+			t.Fatalf("semantic_embeddings missing %s", column)
 		}
 	}
 	for _, column := range []string{"source_id", "status", "started_at", "finished_at", "error", "facts_created", "claims_created"} {
@@ -320,6 +325,129 @@ func TestGenerateLLMTextUsesJSONModeAndDetectsLength(t *testing.T) {
 	}
 }
 
+func TestEmbeddingClientCachesSameProviderVectors(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	t.Setenv("OPENROUTER_API_KEY", "sk-test")
+	if _, err := store.SaveSettings(SaveSettingsInput{Provider: "openrouter", EmbeddingModel: "openai/text-embedding-3-small"}); err != nil {
+		t.Fatalf("SaveSettings() error = %v", err)
+	}
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/api/v1/embeddings" {
+			t.Fatalf("path = %s, want /api/v1/embeddings", r.URL.Path)
+		}
+		if r.Header.Get("Authorization") != "Bearer sk-test" {
+			t.Fatalf("authorization header missing")
+		}
+		var request embeddingsRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.Model != "openai/text-embedding-3-small" || request.Input != "same text" {
+			t.Fatalf("request = %+v", request)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3],"index":0}],"model":"openai/text-embedding-3-small"}`))
+	}))
+	defer server.Close()
+	restore := openRouterEmbeddingsURLForTest(server.URL + "/api/v1/embeddings")
+	defer restore()
+
+	first, err := store.embeddingForEntity(t.Context(), server.Client(), "test", 1, "same text")
+	if err != nil {
+		t.Fatalf("embeddingForEntity() first error = %v", err)
+	}
+	second, err := store.embeddingForEntity(t.Context(), server.Client(), "test", 1, "same text")
+	if err != nil {
+		t.Fatalf("embeddingForEntity() second error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("embedding calls = %d, want cache hit after first call", calls)
+	}
+	if len(first) != 3 || len(second) != 3 || first[0] != second[0] {
+		t.Fatalf("vectors = %+v %+v", first, second)
+	}
+}
+
+func TestAutoSelectFallsBackWhenEmbeddingsFail(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	t.Setenv("OPENROUTER_API_KEY", "sk-test")
+	if _, err := store.SaveSettings(SaveSettingsInput{Provider: "openrouter", EmbeddingModel: "openai/text-embedding-3-small"}); err != nil {
+		t.Fatalf("SaveSettings() error = %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"embedding unavailable"}}`, http.StatusBadGateway)
+	}))
+	defer server.Close()
+	restore := openRouterEmbeddingsURLForTest(server.URL)
+	defer restore()
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{Company: "Acme", Title: "Backend Engineer", RawText: "Build APIs."})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	requirements, err := store.replaceJobRequirements(job, []parsedJobRequirement{{
+		Category:        "responsibility",
+		RequirementText: "Build APIs.",
+		Keywords:        []string{"API"},
+		Priority:        "high",
+		SourceQuote:     "Build APIs.",
+	}})
+	if err != nil {
+		t.Fatalf("replaceJobRequirements() error = %v", err)
+	}
+	facts := []factPromptContext{
+		{ID: 1, Status: "approved", SectionHeading: "Acme", SectionType: "experience"},
+		{ID: 2, Status: "approved", SectionHeading: "Acme", SectionType: "experience"},
+	}
+	claims := testClaimsForPromptFacts(facts)
+	drafts, err := store.replaceBulletDrafts(job.ID, []parsedBulletDraft{
+		{RequirementID: requirements[0].ID, ClaimIDs: []int64{1}, FactIDs: []int64{1}, ValueTheme: "product_platform_delivery", DraftText: "Built backend APIs for planning workflows, turning requirements into usable platform capabilities."},
+		{RequirementID: requirements[0].ID, ClaimIDs: []int64{2}, FactIDs: []int64{2}, ValueTheme: "technical_design", DraftText: "Designed backend integration flows with clear service boundaries and reliable API behavior."},
+	}, requirements, facts, claims)
+	if err != nil {
+		t.Fatalf("replaceBulletDrafts() error = %v", err)
+	}
+	if len(drafts) != 2 {
+		t.Fatalf("drafts = %+v", drafts)
+	}
+	selected, err := store.AutoSelectResumeBullets(job.ID)
+	if err != nil {
+		t.Fatalf("AutoSelectResumeBullets() error = %v", err)
+	}
+	selectedCount := 0
+	for _, draft := range selected {
+		if draft.SelectedForResume {
+			selectedCount++
+		}
+	}
+	if selectedCount == 0 {
+		t.Fatalf("selected = %+v, want fallback selection", selected)
+	}
+	events, err := store.ListBulletGenerationEvents(job.ID)
+	if err != nil {
+		t.Fatalf("ListBulletGenerationEvents() error = %v", err)
+	}
+	foundFallback := false
+	for _, event := range events {
+		if event.Stage == "embedding_fallback" {
+			foundFallback = true
+		}
+	}
+	if !foundFallback {
+		t.Fatalf("events = %+v, want embedding fallback diagnostic", events)
+	}
+}
+
 func TestEventLogging(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
@@ -439,6 +567,68 @@ func TestCandidateSourceAndSectionDetection(t *testing.T) {
 	}
 	if updated.Content != "Built backend APIs." {
 		t.Fatalf("updated content = %q", updated.Content)
+	}
+}
+
+func TestDetectSourceSectionsPreservesClaimsWhenUnchanged(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	source, err := store.CreateCandidateSource(CreateCandidateSourceInput{
+		Title:      "Resume",
+		SourceType: "current_resume",
+		RawText: `PROJECTS
+- Built FastAPI APIs for planning workflows.
+- Added PostgreSQL persistence for project records.`,
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidateSource() error = %v", err)
+	}
+	sections, err := store.DetectSourceSections(source.ID)
+	if err != nil {
+		t.Fatalf("DetectSourceSections() first error = %v", err)
+	}
+	facts, err := store.insertExtractedFacts(sections[0], []extractedFact{{
+		FactText:      "Built FastAPI APIs for planning workflows.",
+		EvidenceQuote: "Built FastAPI APIs for planning workflows.",
+		Technologies:  []string{"FastAPI"},
+		Confidence:    "high",
+		Context:       []string{"planning workflows"},
+	}})
+	if err != nil {
+		t.Fatalf("insertExtractedFacts() error = %v", err)
+	}
+	createdClaims, err := store.replaceCandidateClaims([]parsedCandidateClaim{{
+		ClaimText:     "FastAPI APIs for planning workflows",
+		ClaimType:     "project",
+		SourceFactIDs: []int64{facts[0].ID},
+		Actions:       []string{"built"},
+		Artifacts:     []string{"FastAPI APIs"},
+		Domains:       []string{"planning workflows"},
+	}}, factsToPromptContext(facts))
+	if err != nil {
+		t.Fatalf("replaceCandidateClaims() error = %v", err)
+	}
+	if len(createdClaims) != 1 {
+		t.Fatalf("created claims len = %d, want 1", len(createdClaims))
+	}
+
+	redetected, err := store.DetectSourceSections(source.ID)
+	if err != nil {
+		t.Fatalf("DetectSourceSections() second error = %v", err)
+	}
+	if len(redetected) != len(sections) || redetected[0].ID != sections[0].ID {
+		t.Fatalf("redetected sections = %+v, want existing sections %+v", redetected, sections)
+	}
+	claims, err := store.ListCandidateClaims("all")
+	if err != nil {
+		t.Fatalf("ListCandidateClaims() error = %v", err)
+	}
+	if len(claims) != 1 || claims[0].ID != createdClaims[0].ID {
+		t.Fatalf("claims after redetect = %+v, want original claim", claims)
 	}
 }
 
@@ -778,6 +968,24 @@ func TestParseExtractedFactsRequiresEvidenceQuotes(t *testing.T) {
 	}
 }
 
+func TestParseExtractedFactsAcceptsFlexibleAtomLists(t *testing.T) {
+	facts, err := parseExtractedFacts(`{"facts":[{"fact_text":"actions=built; artifact=APIs; tools=FastAPI","evidence_quote":"Built FastAPI APIs.","technologies":"FastAPI, PostgreSQL","confidence":"high","risk_flags":"unclear_metric","context":{"organization":"Acme","role":"Backend Engineer"}}]}`)
+	if err != nil {
+		t.Fatalf("parseExtractedFacts() error = %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("facts len = %d", len(facts))
+	}
+	if !listContains(facts[0].Technologies, "FastAPI") || !listContains(facts[0].Technologies, "PostgreSQL") {
+		t.Fatalf("technologies = %+v, want split list", facts[0].Technologies)
+	}
+	if !listContains(facts[0].RiskFlags, "unclear_metric") ||
+		!listContains(facts[0].Context, "organization=Acme") ||
+		!listContains(facts[0].Context, "role=Backend Engineer") {
+		t.Fatalf("flexible fields not normalized: %+v", facts[0])
+	}
+}
+
 func TestExtractEvidenceFactsFallsBackOnEmptyLLMResponse(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
@@ -1083,6 +1291,85 @@ FastAPI, PostgreSQL, React`,
 	}
 }
 
+func TestContextAgentRecoveryDoesNotRegenerateAfterClaimStep(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "")
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	source, err := store.CreateCandidateSource(CreateCandidateSourceInput{
+		Title:      "Resume",
+		SourceType: "current_resume",
+		RawText: `PROJECTS
+- Built FastAPI APIs for planning workflows.
+- Added PostgreSQL persistence for project records.`,
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidateSource() error = %v", err)
+	}
+	sections, err := store.DetectSourceSections(source.ID)
+	if err != nil {
+		t.Fatalf("DetectSourceSections() error = %v", err)
+	}
+	facts, err := store.insertExtractedFacts(sections[0], []extractedFact{{
+		FactText:      "Built FastAPI APIs for planning workflows.",
+		EvidenceQuote: "Built FastAPI APIs for planning workflows.",
+		Technologies:  []string{"FastAPI"},
+		Confidence:    "high",
+		Context:       []string{"planning workflows"},
+	}})
+	if err != nil {
+		t.Fatalf("insertExtractedFacts() error = %v", err)
+	}
+	createdClaims, err := store.replaceCandidateClaims([]parsedCandidateClaim{{
+		ClaimText:     "FastAPI APIs for planning workflows",
+		ClaimType:     "project",
+		SourceFactIDs: []int64{facts[0].ID},
+		Actions:       []string{"built"},
+		Artifacts:     []string{"FastAPI APIs"},
+		Domains:       []string{"planning workflows"},
+	}}, factsToPromptContext(facts))
+	if err != nil {
+		t.Fatalf("replaceCandidateClaims() error = %v", err)
+	}
+	if len(createdClaims) != 1 {
+		t.Fatalf("created claims len = %d, want 1", len(createdClaims))
+	}
+	run, err := store.StartContextAgent(source.ID)
+	if err != nil {
+		t.Fatalf("StartContextAgent() error = %v", err)
+	}
+	if err := store.recordContextAgentStep(run.ID, "claim_generate", "ok", "1 claim"); err != nil {
+		t.Fatalf("recordContextAgentStep() error = %v", err)
+	}
+
+	finished, err := store.RunContextAgent(t.Context(), run.ID, nil)
+	if err != nil {
+		t.Fatalf("RunContextAgent() error = %v", err)
+	}
+	if finished.Status != contextAgentStatusComplete || finished.FactsCreated != 1 || finished.ClaimsCreated != 1 {
+		t.Fatalf("finished = %+v, want recovered complete counts", finished)
+	}
+	claims, err := store.ListCandidateClaims("all")
+	if err != nil {
+		t.Fatalf("ListCandidateClaims() error = %v", err)
+	}
+	if len(claims) != 1 || claims[0].ID != createdClaims[0].ID {
+		t.Fatalf("claims after recovery = %+v, want original claim", claims)
+	}
+	steps, err := store.ListContextAgentSteps(run.ID)
+	if err != nil {
+		t.Fatalf("ListContextAgentSteps() error = %v", err)
+	}
+	for _, step := range steps {
+		if step.Stage == "fact_extract" {
+			t.Fatalf("steps = %+v, recovery should not rerun fact extraction", steps)
+		}
+	}
+}
+
 func TestContextAgentBuildsCompactResumeContext(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "")
 	store, err := NewStore(t.TempDir())
@@ -1172,6 +1459,58 @@ FastAPI, PostgreSQL, React, TypeScript`,
 				t.Fatalf("empty fact atoms: %+v", fact)
 			}
 		}
+	}
+}
+
+func TestContextAgentSkipsEmptySectionsAndPublishesProgress(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "")
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	source, err := store.CreateCandidateSource(CreateCandidateSourceInput{
+		SourceType: "current_resume",
+		TrustTier:  "verified",
+		Title:      "Resume",
+		RawText: `SUMMARY
+Hi
+
+PROJECTS
+- Built FastAPI APIs for planning workflows.`,
+	})
+	if err != nil {
+		t.Fatalf("CreateCandidateSource() error = %v", err)
+	}
+	run, err := store.StartContextAgent(source.ID)
+	if err != nil {
+		t.Fatalf("StartContextAgent() error = %v", err)
+	}
+	finished, err := store.RunContextAgent(t.Context(), run.ID, nil)
+	if err != nil {
+		t.Fatalf("RunContextAgent() error = %v", err)
+	}
+	if finished.Status != contextAgentStatusComplete || finished.FactsCreated == 0 || finished.ClaimsCreated == 0 {
+		t.Fatalf("finished = %+v, want complete with generated context", finished)
+	}
+
+	steps, err := store.ListContextAgentSteps(run.ID)
+	if err != nil {
+		t.Fatalf("ListContextAgentSteps() error = %v", err)
+	}
+	hasFactRunning := false
+	hasSkipped := false
+	for _, step := range steps {
+		if step.Stage == "fact_extract" && step.Status == "running" {
+			hasFactRunning = true
+		}
+		if step.Stage == "fact_extract" && step.Status == "skipped" {
+			hasSkipped = true
+		}
+	}
+	if !hasFactRunning || !hasSkipped {
+		t.Fatalf("steps = %+v, want running progress and skipped empty section", steps)
 	}
 }
 
@@ -1469,8 +1808,8 @@ func TestBulletDraftsRespectOriginBudgets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replaceBulletDrafts() error = %v", err)
 	}
-	if len(inserted) != 7 {
-		t.Fatalf("drafts len = %d, want 7: %+v", len(inserted), inserted)
+	if len(inserted) != 8 {
+		t.Fatalf("drafts len = %d, want 8: %+v", len(inserted), inserted)
 	}
 	selected, err := store.AutoSelectResumeBullets(job.ID)
 	if err != nil {
@@ -1482,12 +1821,12 @@ func TestBulletDraftsRespectOriginBudgets(t *testing.T) {
 			selectedCount++
 		}
 	}
-	if selectedCount != 7 {
-		t.Fatalf("selected drafts = %d, want 7: %+v", selectedCount, selected)
+	if selectedCount != 2 {
+		t.Fatalf("selected drafts = %d, want 2 same-theme representatives: %+v", selectedCount, selected)
 	}
 }
 
-func TestBulletDraftsAddHumanStyleRiskFlags(t *testing.T) {
+func TestBulletDraftsRejectNonHumanStyle(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("NewStore() error = %v", err)
@@ -1512,20 +1851,14 @@ func TestBulletDraftsAddHumanStyleRiskFlags(t *testing.T) {
 		t.Fatalf("replaceJobRequirements() error = %v", err)
 	}
 	testClaims := testClaimsForPromptFacts([]factPromptContext{{ID: 1, Status: "approved", SectionHeading: "Acme", SectionType: "experience"}})
-	inserted, err := store.replaceBulletDrafts(job.ID, []parsedBulletDraft{{
+	_, err = store.replaceBulletDrafts(job.ID, []parsedBulletDraft{{
 		RequirementID: requirements[0].ID,
 		ClaimIDs:      []int64{1},
 		FactIDs:       []int64{1},
 		DraftText:     "- Leveraged cutting-edge APIs to enhance efficiency and drive growth across business outcomes with seamless dynamic execution for stakeholder value.",
 	}}, requirements, []factPromptContext{{ID: 1, Status: "approved", SectionHeading: "Acme", SectionType: "experience"}}, testClaims)
-	if err != nil {
-		t.Fatalf("replaceBulletDrafts() error = %v", err)
-	}
-	flags := strings.Join(inserted[0].RiskFlags, " ")
-	for _, want := range []string{"style_buzzword", "style_leading_dash"} {
-		if !strings.Contains(flags, want) {
-			t.Fatalf("risk flags = %+v, missing %s", inserted[0].RiskFlags, want)
-		}
+	if err == nil || !strings.Contains(err.Error(), "no usable same-origin bullet drafts") {
+		t.Fatalf("replaceBulletDrafts() error = %v, want rejected non-human draft", err)
 	}
 }
 
@@ -1602,6 +1935,77 @@ func TestCandidateClaimLedgerWorkflow(t *testing.T) {
 	}
 	if updated.Status != claimStatusApprovedRestricted || !listContains(updated.RiskFlags, "manual_limit") {
 		t.Fatalf("updated = %+v", updated)
+	}
+}
+
+func TestCandidateClaimsAggregateAtomicFactsForBulletUse(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	facts := []factPromptContext{
+		{
+			ID:             101,
+			Status:         factStatusApproved,
+			Confidence:     "high",
+			FactText:       "actions=implemented; artifact=RBAC and audit logging; tools=FastAPI",
+			EvidenceQuote:  "Implemented RBAC and audit logging with FastAPI.",
+			Technologies:   []string{"FastAPI"},
+			SectionHeading: "Sitespace",
+			SectionType:    "experience",
+		},
+		{
+			ID:             102,
+			Status:         factStatusApproved,
+			Confidence:     "high",
+			FactText:       "scope=construction document workflows",
+			EvidenceQuote:  "Covered construction document workflows.",
+			SectionHeading: "Sitespace",
+			SectionType:    "experience",
+		},
+		{
+			ID:             103,
+			Status:         factStatusApproved,
+			Confidence:     "high",
+			FactText:       "outcome=traceable access reviews; metric=25%",
+			EvidenceQuote:  "Improved access review coverage by 25%.",
+			SectionHeading: "Sitespace",
+			SectionType:    "experience",
+		},
+	}
+
+	claims, err := store.replaceCandidateClaims([]parsedCandidateClaim{{
+		Label:         "RBAC audit workflow traceability",
+		ClaimType:     "experience",
+		SourceFactIDs: []int64{101, 102, 103},
+	}}, facts)
+	if err != nil {
+		t.Fatalf("replaceCandidateClaims() error = %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("claims = %+v", claims)
+	}
+	claim := claims[0]
+	if !listContains(claim.Artifacts, "RBAC and audit logging") ||
+		!listContains(claim.Scope, "construction document workflows") ||
+		!listContains(claim.Outcomes, "traceable access reviews") ||
+		!listContains(claim.Metrics, "25%") {
+		t.Fatalf("claim atoms were not aggregated from all facts: %+v", claim)
+	}
+
+	text := fallbackBulletTextFromClaim(claim, JobRequirement{
+		Category:        "responsibility",
+		RequirementText: "Build secure workflow systems.",
+		SourceQuote:     "Build secure workflow systems.",
+	})
+	if !strings.HasPrefix(text, "Implemented ") ||
+		!strings.Contains(text, "RBAC and audit logging") ||
+		!strings.Contains(text, "construction document workflows") ||
+		!strings.Contains(text, "traceable access reviews") ||
+		!strings.Contains(text, "25%") {
+		t.Fatalf("fallback bullet did not synthesize atomic value: %q", text)
 	}
 }
 
@@ -2103,6 +2507,25 @@ func testClaimsForFacts(facts []EvidenceFact) []CandidateClaim {
 	return claims
 }
 
+func factsToPromptContext(facts []EvidenceFact) []factPromptContext {
+	contextFacts := []factPromptContext{}
+	for _, fact := range facts {
+		contextFacts = append(contextFacts, factPromptContext{
+			ID:             fact.ID,
+			Status:         fact.Status,
+			Confidence:     fact.Confidence,
+			RiskFlags:      fact.RiskFlags,
+			FactText:       fact.FactText,
+			EvidenceQuote:  fact.EvidenceQuote,
+			Technologies:   fact.Technologies,
+			SectionHeading: fact.OriginHeading,
+			SectionType:    fact.OriginType,
+			Context:        fact.Context,
+		})
+	}
+	return contextFacts
+}
+
 func testClaimsForPromptFacts(facts []factPromptContext) []CandidateClaim {
 	claims := []CandidateClaim{}
 	for _, fact := range facts {
@@ -2186,5 +2609,13 @@ func openRouterChatCompletionsURLForTest(url string) func() {
 	openRouterChatCompletionsURL = url
 	return func() {
 		openRouterChatCompletionsURL = previous
+	}
+}
+
+func openRouterEmbeddingsURLForTest(url string) func() {
+	previous := openRouterEmbeddingsURL
+	openRouterEmbeddingsURL = url
+	return func() {
+		openRouterEmbeddingsURL = previous
 	}
 }

@@ -993,6 +993,7 @@ export namespace main {
 	export class SaveSettingsInput {
 	    provider: string;
 	    model: string;
+	    embedding_model: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new SaveSettingsInput(source);
@@ -1002,6 +1003,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.provider = source["provider"];
 	        this.model = source["model"];
+	        this.embedding_model = source["embedding_model"];
 	    }
 	}
 	export class SelectTailoredBulletDraftInput {
@@ -1021,6 +1023,7 @@ export namespace main {
 	export class Settings {
 	    provider: string;
 	    model: string;
+	    embedding_model: string;
 	    api_key_configured: boolean;
 	
 	    static createFrom(source: any = {}) {
@@ -1031,6 +1034,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.provider = source["provider"];
 	        this.model = source["model"];
+	        this.embedding_model = source["embedding_model"];
 	        this.api_key_configured = source["api_key_configured"];
 	    }
 	}
@@ -1072,6 +1076,7 @@ export namespace main {
 	    claim_ids: number[];
 	    origin_heading: string;
 	    origin_type: string;
+	    value_theme: string;
 	    draft_text: string;
 	    rationale: string;
 	    status: string;
@@ -1083,6 +1088,7 @@ export namespace main {
 	    risk_penalty: number;
 	    unsupported_context_penalty: number;
 	    selection_reason: string;
+	    display_order: number;
 	    selected_for_resume: boolean;
 	    created_at: string;
 	    updated_at: string;
@@ -1100,6 +1106,7 @@ export namespace main {
 	        this.claim_ids = source["claim_ids"];
 	        this.origin_heading = source["origin_heading"];
 	        this.origin_type = source["origin_type"];
+	        this.value_theme = source["value_theme"];
 	        this.draft_text = source["draft_text"];
 	        this.rationale = source["rationale"];
 	        this.status = source["status"];
@@ -1111,6 +1118,7 @@ export namespace main {
 	        this.risk_penalty = source["risk_penalty"];
 	        this.unsupported_context_penalty = source["unsupported_context_penalty"];
 	        this.selection_reason = source["selection_reason"];
+	        this.display_order = source["display_order"];
 	        this.selected_for_resume = source["selected_for_resume"];
 	        this.created_at = source["created_at"];
 	        this.updated_at = source["updated_at"];

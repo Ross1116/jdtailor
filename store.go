@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,10 +16,13 @@ import (
 )
 
 const (
-	defaultProvider = "openrouter"
-	defaultModel    = "deepseek/deepseek-v4-flash"
-	settingProvider = "llm_provider"
-	settingModel    = "llm_model"
+	defaultProvider             = "openrouter"
+	defaultModel                = "deepseek/deepseek-v4-flash"
+	defaultOpenRouterEmbedding  = "openai/text-embedding-3-small"
+	defaultOpenAIEmbeddingModel = "text-embedding-3-small"
+	settingProvider             = "llm_provider"
+	settingModel                = "llm_model"
+	settingEmbeddingModel       = "embedding_model"
 )
 
 type Health struct {
@@ -33,12 +37,14 @@ type Health struct {
 type Settings struct {
 	Provider         string `json:"provider"`
 	Model            string `json:"model"`
+	EmbeddingModel   string `json:"embedding_model"`
 	APIKeyConfigured bool   `json:"api_key_configured"`
 }
 
 type SaveSettingsInput struct {
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
+	Provider       string `json:"provider"`
+	Model          string `json:"model"`
+	EmbeddingModel string `json:"embedding_model"`
 }
 
 type AppEvent struct {
@@ -59,6 +65,10 @@ type Store struct {
 	logger        *slog.Logger
 }
 
+type sqlExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 func NewStore(root string) (*Store, error) {
 	paths, err := ensureLocalPaths(root)
 	if err != nil {
@@ -74,7 +84,7 @@ func NewStore(root string) (*Store, error) {
 		Level: slog.LevelInfo,
 	}))
 
-	db, err := sql.Open("sqlite", paths.dbPath)
+	db, err := sql.Open("sqlite", sqliteDSN(paths.dbPath))
 	if err != nil {
 		_ = logFile.Close()
 		return nil, err
@@ -97,6 +107,14 @@ func NewStore(root string) (*Store, error) {
 	}
 
 	return store, nil
+}
+
+func sqliteDSN(path string) string {
+	query := url.Values{}
+	query.Add("_pragma", "busy_timeout=10000")
+	query.Add("_pragma", "journal_mode(WAL)")
+	query.Add("_pragma", "foreign_keys(ON)")
+	return path + "?" + query.Encode()
 }
 
 func (s *Store) Logger() *slog.Logger {
@@ -142,6 +160,7 @@ func (s *Store) GetSettings() (Settings, error) {
 		settings.Provider = provider
 	}
 	settings.Model = configuredModel(settings.Provider, values[settingModel])
+	settings.EmbeddingModel = configuredEmbeddingModel(settings.Provider, values[settingEmbeddingModel])
 	settings.APIKeyConfigured = s.APIKeyConfigured(settings.Provider)
 	return settings, nil
 }
@@ -149,6 +168,7 @@ func (s *Store) GetSettings() (Settings, error) {
 func (s *Store) SaveSettings(input SaveSettingsInput) (Settings, error) {
 	provider := configuredProvider(input.Provider)
 	model := strings.TrimSpace(input.Model)
+	embeddingModel := strings.TrimSpace(input.EmbeddingModel)
 
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -162,6 +182,9 @@ func (s *Store) SaveSettings(input SaveSettingsInput) (Settings, error) {
 	if err := upsertSettingTx(tx, settingModel, model); err != nil {
 		return Settings{}, err
 	}
+	if err := upsertSettingTx(tx, settingEmbeddingModel, embeddingModel); err != nil {
+		return Settings{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return Settings{}, err
 	}
@@ -173,11 +196,20 @@ func (s *Store) SaveSettings(input SaveSettingsInput) (Settings, error) {
 	return Settings{
 		Provider:         provider,
 		Model:            configuredModel(provider, model),
+		EmbeddingModel:   configuredEmbeddingModel(provider, embeddingModel),
 		APIKeyConfigured: s.APIKeyConfigured(provider),
 	}, nil
 }
 
 func (s *Store) LogEvent(level string, message string) error {
+	return s.logEventWith(s.db, level, message)
+}
+
+func (s *Store) logEventTx(tx *sql.Tx, level string, message string) error {
+	return s.logEventWith(tx, level, message)
+}
+
+func (s *Store) logEventWith(exec sqlExecutor, level string, message string) error {
 	level = strings.TrimSpace(strings.ToLower(level))
 	if level == "" {
 		level = "info"
@@ -188,7 +220,7 @@ func (s *Store) LogEvent(level string, message string) error {
 	}
 
 	s.Logger().Info(message, "level", level)
-	_, err := s.db.ExecContext(
+	_, err := exec.ExecContext(
 		context.Background(),
 		`INSERT INTO app_events (level, message, created_at) VALUES (?, ?, ?)`,
 		level,
@@ -637,6 +669,31 @@ func (s *Store) migrate(ctx context.Context) error {
 				);
 			`,
 		},
+		{
+			version: 13,
+			sql: `
+				INSERT INTO settings (key, value, updated_at)
+				VALUES ('embedding_model', '', strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+				ON CONFLICT(key) DO NOTHING;
+
+				CREATE TABLE IF NOT EXISTS semantic_embeddings (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					entity_type TEXT NOT NULL,
+					entity_id INTEGER NOT NULL,
+					provider TEXT NOT NULL,
+					model TEXT NOT NULL,
+					input_hash TEXT NOT NULL,
+					dimensions INTEGER NOT NULL,
+					vector_json TEXT NOT NULL,
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL,
+					UNIQUE(entity_type, entity_id, provider, model, input_hash)
+				);
+
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN value_theme TEXT NOT NULL DEFAULT '';
+				ALTER TABLE tailored_bullet_drafts ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;
+			`,
+		},
 	}
 
 	for _, migration := range migrations {
@@ -711,6 +768,9 @@ func (s *Store) ensureDefaultSettings(ctx context.Context) error {
 		return err
 	}
 	if err := ensureSettingTx(tx, settingModel, ""); err != nil {
+		return err
+	}
+	if err := ensureSettingTx(tx, settingEmbeddingModel, ""); err != nil {
 		return err
 	}
 

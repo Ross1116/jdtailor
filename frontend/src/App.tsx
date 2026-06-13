@@ -1,4 +1,4 @@
-import {FormEvent, useEffect, useMemo, useState} from 'react';
+import {FormEvent, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Activity,
   AlertCircle,
@@ -123,6 +123,7 @@ type Health = {
 type Settings = {
   provider: string;
   model: string;
+  embedding_model: string;
   api_key_configured: boolean;
 };
 
@@ -196,6 +197,7 @@ function App() {
   const [settings, setSettings] = useState<Settings>({
     provider: 'openrouter',
     model: '',
+    embedding_model: '',
     api_key_configured: false,
   });
   const [toolStatus, setToolStatus] = useState<ToolStatus | null>(null);
@@ -237,6 +239,7 @@ function App() {
   const [llmResult, setLLMResult] = useState<LLMTestResult | null>(null);
   const [pdfResult, setPDFResult] = useState<RenderPDFResult | null>(null);
   const [busyAction, setBusyAction] = useState('');
+  const pollingContextRunIDs = useRef<Set<number>>(new Set());
 
   const selectedSource = sources.find((source) => source.id === selectedSourceID);
   const selectedSection = sections.find((section) => section.id === selectedSectionID);
@@ -407,55 +410,83 @@ function App() {
     const steps = (await ListContextAgentSteps(run.id)) as ContextAgentStep[];
     setContextSteps((previous) => normalizeContextSteps([...previous.filter((step) => step.run_id !== run.id), ...steps]));
     if (run.status === 'running') {
-      void pollContextAgent(run.id, sourceID);
+      ensureContextAgentPolling(run.id, sourceID);
     }
     return run;
   }
 
-  async function pollContextAgent(runID: number, sourceID: number) {
-  for (let attempt = 0; attempt < 90; attempt++) {
-    await delay(1000);
-
-    const [run, steps] = await Promise.all([
-      GetContextAgentRun(runID),
-      ListContextAgentSteps(runID),
-    ]);
-
-    const normalizedRun = normalizeContextRun(run as ContextAgentRun);
-
-    setContextRuns((previous) =>
-      normalizeContextRuns([
-        normalizedRun,
-        ...previous.filter((item) => item.id !== normalizedRun.id),
-      ]),
-    );
-
-    setContextSteps((previous) =>
-      normalizeContextSteps([
-        ...previous.filter((step) => step.run_id !== runID),
-        ...(steps as ContextAgentStep[]),
-      ]),
-    );
-
-    if (normalizedRun.status !== 'running') {
-      await refreshWorkflow();
-
-      if (normalizedRun.status === 'complete') {
-        const sourceSections = (await ListSourceSections(sourceID)) as SourceSection[];
-        if (sourceSections[0]) {
-          setSelectedSectionID(sourceSections[0].id);
-        }
-
-        const nextProfile = (await GetCandidateProfile()) as CandidateProfile;
-        setProfile(normalizeProfile(nextProfile));
-
-        await BuildResumeContext(sourceID).catch(() => null);
-      }
-
+  function ensureContextAgentPolling(runID: number, sourceID: number) {
+    if (!runID || pollingContextRunIDs.current.has(runID)) {
       return;
     }
+    pollingContextRunIDs.current.add(runID);
+    void pollContextAgent(runID, sourceID).finally(() => {
+      pollingContextRunIDs.current.delete(runID);
+    });
   }
-}
+
+  async function pollContextAgent(runID: number, sourceID: number) {
+    let waitMS = 1000;
+
+    for (;;) {
+      await delay(waitMS);
+
+      let normalizedRun: ContextAgentRun;
+      let steps: ContextAgentStep[];
+
+      try {
+        const [run, nextSteps] = await Promise.all([
+          GetContextAgentRun(runID),
+          ListContextAgentSteps(runID),
+        ]);
+
+        normalizedRun = normalizeContextRun(run as ContextAgentRun);
+        steps = normalizeContextSteps(nextSteps as ContextAgentStep[]);
+      } catch (err) {
+        setLoadState('error');
+        setError(err instanceof Error ? err.message : String(err));
+        return;
+      }
+
+      setContextRuns((previous) =>
+        normalizeContextRuns([
+          normalizedRun,
+          ...previous.filter((item) => item.id !== normalizedRun.id),
+        ]),
+      );
+
+      setContextSteps((previous) =>
+        normalizeContextSteps([
+          ...previous.filter((step) => step.run_id !== runID),
+          ...steps,
+        ]),
+      );
+
+      if (normalizedRun.status !== 'running') {
+        await refreshWorkflow();
+
+        if (normalizedRun.status === 'complete') {
+          const completedSourceID = sourceID || normalizedRun.source_id;
+          const sourceSections = (await ListSourceSections(completedSourceID)) as SourceSection[];
+          if (sourceSections[0]) {
+            setSelectedSectionID(sourceSections[0].id);
+          }
+
+          const nextProfile = (await GetCandidateProfile()) as CandidateProfile;
+          setProfile(normalizeProfile(nextProfile));
+
+          await BuildResumeContext(completedSourceID).catch(() => null);
+        } else if (normalizedRun.status === 'failed' && normalizedRun.error) {
+          setLoadState('error');
+          setError(normalizedRun.error);
+        }
+
+        return;
+      }
+
+      waitMS = Math.min(3000, waitMS + 500);
+    }
+  }
 
   async function refreshWorkflow() {
     const [nextSources, nextSections, nextFacts, nextClaims, nextRuns, nextJobs] = await Promise.all([
@@ -980,6 +1011,7 @@ function App() {
       const nextSettings = await SaveSettings({
         provider: settings.provider,
         model: settings.model,
+        embedding_model: settings.embedding_model,
       });
       setSettings(nextSettings as Settings);
       await load();
@@ -1035,6 +1067,12 @@ function App() {
   useEffect(() => {
     load();
   }, []);
+
+  useEffect(() => {
+    for (const run of runningContextRuns) {
+      ensureContextAgentPolling(run.id, run.source_id);
+    }
+  }, [contextRuns]);
 
   return (
     <main className="min-h-screen bg-[#f6f8fb]">
@@ -1746,6 +1784,7 @@ function JobsView({
                     {item.unsupported_context_penalty > 0 && <StatusBadge text={`${Math.round(item.unsupported_context_penalty * 100)} unsupported`} />}
                     <StatusBadge text={item.origin_type || 'unknown origin'} />
                     {item.origin_heading && <StatusBadge text={item.origin_heading} />}
+                    {item.value_theme && <StatusBadge text={item.value_theme.replaceAll('_', ' ')} />}
                     <StatusBadge text={requirementLabel(item.requirement_id)} />
                     {item.claim_ids.length > 0 && <StatusBadge text={`claims ${item.claim_ids.join(', ')}`} />}
                     {item.fact_ids.length > 0 && <StatusBadge text={`facts ${item.fact_ids.join(', ')}`} />}
@@ -2353,6 +2392,12 @@ function SettingsView({
               value={settings.model}
               placeholder={modelPlaceholder(settings.provider)}
               onChange={(value) => setSettings({...settings, model: value})}
+            />
+            <TextInput
+              label="Embedding model"
+              value={settings.embedding_model}
+              placeholder={embeddingModelPlaceholder(settings.provider)}
+              onChange={(value) => setSettings({...settings, embedding_model: value})}
             />
             <IconButton label="Save settings" submit full disabled={busyAction === 'save-settings'}>
               <Save size={16} />
@@ -3026,6 +3071,7 @@ function normalizeDrafts(value?: TailoredBulletDraft[] | null) {
     claim_ids: asArray(draft.claim_ids),
     origin_heading: draft.origin_heading || '',
     origin_type: draft.origin_type || '',
+    value_theme: draft.value_theme || '',
     risk_flags: asStringArray(draft.risk_flags),
     selection_score: Number(draft.selection_score ?? 0),
     resume_value_score: Number(draft.resume_value_score ?? 0),
@@ -3034,6 +3080,7 @@ function normalizeDrafts(value?: TailoredBulletDraft[] | null) {
     risk_penalty: Number(draft.risk_penalty ?? 0),
     unsupported_context_penalty: Number(draft.unsupported_context_penalty ?? 0),
     selection_reason: draft.selection_reason || '',
+    display_order: Number(draft.display_order ?? 0),
     selected_for_resume: Boolean(draft.selected_for_resume),
   }));
 }
@@ -3277,6 +3324,10 @@ function recordTypeLabel(value: string) {
 
 function modelPlaceholder(provider: string) {
   return provider === 'openai' ? 'gpt-5.4-mini' : 'deepseek/deepseek-v4-flash';
+}
+
+function embeddingModelPlaceholder(provider: string) {
+  return provider === 'openai' ? 'text-embedding-3-small' : 'openai/text-embedding-3-small';
 }
 
 function apiKeyPlaceholder(provider: string) {

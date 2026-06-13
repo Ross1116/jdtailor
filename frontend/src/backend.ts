@@ -189,6 +189,7 @@ export type TailoredBulletDraft = {
   claim_ids: number[];
   origin_heading: string;
   origin_type: string;
+  value_theme: string;
   draft_text: string;
   rationale: string;
   status: string;
@@ -200,6 +201,7 @@ export type TailoredBulletDraft = {
   risk_penalty: number;
   unsupported_context_penalty: number;
   selection_reason: string;
+  display_order: number;
   selected_for_resume: boolean;
   created_at: string;
   updated_at: string;
@@ -413,6 +415,7 @@ const now = () => new Date().toISOString();
 const mockSettings = {
   provider: 'openrouter',
   model: 'deepseek/deepseek-v4-flash',
+  embedding_model: 'openai/text-embedding-3-small',
   api_key_configured: false,
 };
 
@@ -481,12 +484,13 @@ export async function GetSettings() {
   return mockSettings;
 }
 
-export async function SaveSettings(input: {provider: string; model: string}) {
+export async function SaveSettings(input: {provider: string; model: string; embedding_model: string}) {
   if (hasWailsBackend()) {
     return WailsSaveSettings(input);
   }
   mockSettings.provider = input.provider;
   mockSettings.model = input.model || modelDefault(input.provider);
+  mockSettings.embedding_model = input.embedding_model || embeddingModelDefault(input.provider);
   mockEvents.unshift(mockEvent('info', 'mock settings saved'));
   return mockSettings;
 }
@@ -1206,7 +1210,7 @@ export async function GenerateTailoredBulletDrafts(jobID: number) {
     if (!matchedClaims.length) return;
     const claim = matchedClaims[0];
     const originKey = `${claim.origin_type}|${claim.origin_heading}`;
-    const budget = claim.origin_type === 'experience' ? 5 : claim.origin_type === 'project' ? 2 : claim.origin_type === 'education' || claim.origin_type === 'certification' ? 1 : 2;
+    const budget = claim.origin_type === 'experience' ? 5 : claim.origin_type === 'project' ? 3 : claim.origin_type === 'education' || claim.origin_type === 'certification' ? 1 : 2;
     if ((originCounts.get(originKey) ?? 0) >= budget) return;
     const risky = matchedClaims.flatMap((item) => item.status === 'approved' ? item.risk_flags : [item.status, ...item.risk_flags]);
     if (risky.some((flag) => ['blocked_claim', 'blocked_context', 'unsupported_metric', 'unsupported_tool'].includes(flag))) return;
@@ -1219,6 +1223,7 @@ export async function GenerateTailoredBulletDrafts(jobID: number) {
       claim_ids: matchedClaims.map((item) => item.id),
       origin_heading: claim.origin_heading,
       origin_type: claim.origin_type,
+      value_theme: mockClaimValueTheme(claim),
       draft_text: draftText,
       rationale: topMatches.map((match) => match.rationale).join('; '),
       status: 'needs_review',
@@ -1230,6 +1235,7 @@ export async function GenerateTailoredBulletDrafts(jobID: number) {
       risk_penalty: risky.length * 0.03,
       unsupported_context_penalty: 0,
       selection_reason: `resume ${Math.round((0.55 + matchedClaims.length * 0.08) * 100)}%; JD ${Math.round((topMatches[0]?.score ?? 0) * 100)}%; origin ${claim.origin_type}`,
+      display_order: mockThemeOrder(mockClaimValueTheme(claim)),
       selected_for_resume: false,
       created_at: timestamp,
       updated_at: timestamp,
@@ -1298,7 +1304,7 @@ export async function AutoSelectResumeBullets(jobID: number) {
     .sort((a, b) => b.selection_score - a.selection_score)
     .forEach((draft) => {
       const key = `${draft.origin_type}|${draft.origin_heading}`;
-      const budget = draft.origin_type === 'experience' ? 5 : draft.origin_type === 'project' ? 2 : draft.origin_type === 'education' || draft.origin_type === 'certification' ? 1 : 2;
+      const budget = draft.origin_type === 'experience' ? 5 : draft.origin_type === 'project' ? 3 : draft.origin_type === 'education' || draft.origin_type === 'certification' ? 1 : 2;
       if ((counts.get(key) ?? 0) >= budget) return;
       selected.add(draft.id);
       counts.set(key, (counts.get(key) ?? 0) + 1);
@@ -1576,6 +1582,10 @@ function mockContextStep(runID: number, stage: string, status: string, message: 
 
 function modelDefault(provider: string) {
   return provider === 'openai' ? 'gpt-5.4-mini' : 'deepseek/deepseek-v4-flash';
+}
+
+function embeddingModelDefault(provider: string) {
+  return provider === 'openai' ? 'text-embedding-3-small' : 'openai/text-embedding-3-small';
 }
 
 function normalizeRawSourceText(rawText: string) {
@@ -2435,6 +2445,37 @@ function mockBulletFromClaim(claim: CandidateClaim) {
     scope && !capability.toLowerCase().includes(scope.toLowerCase()) ? `across ${scope}` : '',
     outcome ? `to support ${outcome}` : '',
   ].filter(Boolean).join(' ').replace(/\s+/g, ' ').replace(/\.$/, '') + '.';
+}
+
+function mockClaimValueTheme(claim: CandidateClaim) {
+  const text = [
+    claim.claim_text,
+    ...claim.actions,
+    ...claim.capabilities,
+    ...claim.objects,
+    ...claim.artifacts,
+    ...claim.scope,
+    ...claim.outcomes,
+  ].join(' ').toLowerCase();
+  if (/(audit|rbac|access|security|integrity)/.test(text)) return 'security_traceability';
+  if (/(ai|llm|extract|token|automation)/.test(text)) return 'automation_ai';
+  if (/(react|ui|frontend|dashboard)/.test(text)) return 'frontend_product';
+  if (/(architecture|design|data model|maintainable)/.test(text)) return 'technical_design';
+  if (/(debug|reliability|observability|validation|recovery)/.test(text)) return 'reliability_quality';
+  if (/(booking|scheduling|workflow|api|backend|platform)/.test(text)) return 'product_platform_delivery';
+  return 'engineering_delivery';
+}
+
+function mockThemeOrder(theme: string) {
+  const order: Record<string, number> = {
+    product_platform_delivery: 10,
+    technical_design: 20,
+    reliability_quality: 30,
+    security_traceability: 30,
+    automation_ai: 40,
+    frontend_product: 50,
+  };
+  return order[theme] ?? 60;
 }
 
 function defaultTrustTier(sourceType: string) {

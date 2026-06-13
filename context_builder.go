@@ -153,6 +153,28 @@ type extractedFact struct {
 	Context       []string `json:"context"`
 }
 
+func (f *extractedFact) UnmarshalJSON(data []byte) error {
+	type rawExtractedFact struct {
+		FactText      string `json:"fact_text"`
+		EvidenceQuote string `json:"evidence_quote"`
+		Technologies  any    `json:"technologies"`
+		Confidence    string `json:"confidence"`
+		RiskFlags     any    `json:"risk_flags"`
+		Context       any    `json:"context"`
+	}
+	var raw rawExtractedFact
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	f.FactText = raw.FactText
+	f.EvidenceQuote = raw.EvidenceQuote
+	f.Technologies = flexibleStringList(raw.Technologies)
+	f.Confidence = raw.Confidence
+	f.RiskFlags = flexibleStringList(raw.RiskFlags)
+	f.Context = flexibleStringList(raw.Context)
+	return nil
+}
+
 func (s *Store) GetCandidateProfile() (CandidateProfile, error) {
 	var profile CandidateProfile
 	var linksJSON string
@@ -419,6 +441,14 @@ func (s *Store) DetectSourceSections(sourceID int64) ([]SourceSection, error) {
 		return nil, err
 	}
 	sections := detectSections(source.RawText)
+	existing, err := s.ListSourceSections(sourceID)
+	if err != nil {
+		return nil, err
+	}
+	if sourceSectionsEquivalent(existing, sections) {
+		return existing, nil
+	}
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -453,6 +483,24 @@ func (s *Store) DetectSourceSections(sourceID int64) ([]SourceSection, error) {
 	_, _ = s.db.ExecContext(context.Background(), `DELETE FROM candidate_claims`)
 	_ = s.LogEvent("info", "source sections detected")
 	return s.ListSourceSections(sourceID)
+}
+
+func sourceSectionsEquivalent(existing []SourceSection, detected []SourceSection) bool {
+	if len(existing) == 0 || len(existing) != len(detected) {
+		return false
+	}
+	for index := range existing {
+		left := existing[index]
+		right := detected[index]
+		if strings.TrimSpace(left.Heading) != strings.TrimSpace(right.Heading) ||
+			normalizeSectionType(left.SectionType, left.Heading) != normalizeSectionType(right.SectionType, right.Heading) ||
+			strings.TrimSpace(left.Content) != strings.TrimSpace(right.Content) ||
+			left.StartChar != right.StartChar ||
+			left.EndChar != right.EndChar {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) UpdateSourceSection(input UpdateSourceSectionInput) (SourceSection, error) {
@@ -1286,6 +1334,9 @@ func metadataContentLineCount(section SourceSection) int {
 	case "experience", "education":
 		return minInt(2, len(lines))
 	case "project":
+		if len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[0]), "- ") {
+			return 0
+		}
 		return minInt(1, len(lines))
 	default:
 		return 0
@@ -1705,6 +1756,62 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func flexibleStringList(value any) []string {
+	switch typed := value.(type) {
+	case nil:
+		return nil
+	case string:
+		return splitFlexibleListText(typed)
+	case []string:
+		return normalizeStringList(typed)
+	case []any:
+		values := []string{}
+		for _, item := range typed {
+			values = append(values, flexibleStringList(item)...)
+		}
+		return normalizeStringList(values)
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		values := []string{}
+		for _, key := range keys {
+			rendered := strings.TrimSpace(fmt.Sprint(typed[key]))
+			if rendered == "" {
+				continue
+			}
+			values = append(values, strings.TrimSpace(key)+"="+rendered)
+		}
+		return normalizeStringList(values)
+	default:
+		text := strings.TrimSpace(fmt.Sprint(typed))
+		if text == "" {
+			return nil
+		}
+		return []string{text}
+	}
+}
+
+func splitFlexibleListText(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == ';' || r == '|' || r == '\n'
+	})
+	values := []string{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			values = append(values, part)
+		}
+	}
+	return normalizeStringList(values)
 }
 
 func reviewStatus(confidence string, riskFlags []string) (string, bool) {
