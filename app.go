@@ -293,6 +293,10 @@ func (a *App) GetContextAgentRun(runID int64) (ContextAgentRun, error) {
 	if err != nil {
 		return ContextAgentRun{}, err
 	}
+	// Start/revive the background worker for this run. This is idempotent:
+	// startContextAgentWorker uses a mutexed contextAgentWorkers map to prevent
+	// duplicate goroutines. If the run is already complete/cancelled this is a
+	// no-op. See TestAppRevivesQueuedTest and recoverCompletedContextAgentRun.
 	a.startContextAgentWorker(run)
 	return run, nil
 }
@@ -305,6 +309,9 @@ func (a *App) ListContextAgentRuns(sourceID int64) ([]ContextAgentRun, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Start/revive background workers for each returned run. This is idempotent:
+	// startContextAgentWorker uses a mutexed contextAgentWorkers map to prevent
+	// duplicate goroutines. Already-complete/cancelled runs are no-ops.
 	for _, run := range runs {
 		a.startContextAgentWorker(run)
 	}
