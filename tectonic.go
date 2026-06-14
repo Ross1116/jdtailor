@@ -235,5 +235,9 @@ func tectonicDownloadURL(ctx context.Context, client *http.Client) (string, erro
 }
 
 func (s *Store) tectonicPath() string {
-	return filepath.Join(s.root, "tools", "tectonic", "tectonic.exe")
+	name := "tectonic"
+	if runtime.GOOS == "windows" {
+		name = "tectonic.exe"
+	}
+	return filepath.Join(s.root, "tools", "tectonic", name)
 }
