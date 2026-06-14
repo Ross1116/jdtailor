@@ -279,6 +279,7 @@ function App() {
   const [applications, setApplications] = useState<Application[]>([]);
   const [resumeVersions, setResumeVersions] = useState<ResumeVersion[]>([]);
   const [activeResume, setActiveResume] = useState<ResumeJSON | null>(null);
+  const [editingResume, setEditingResume] = useState<ResumeJSON | null>(null);
   const [activeValidation, setActiveValidation] = useState<ValidationResult | null>(null);
   const [selectedApplicationID, setSelectedApplicationID] = useState<number>(0);
   const [applicationNotes, setApplicationNotes] = useState('');
@@ -462,24 +463,117 @@ function App() {
         job_id: selectedJobID,
         selected_bullet_ids: bulletDrafts.filter((d) => d.selected_for_resume).map((d) => d.id),
       };
-      const resume = (await GenerateResumeJSON(input)) as ResumeJSON;
+      const resume = normalizeResumeJSON((await GenerateResumeJSON(input)) as ResumeJSON | null | undefined);
       setActiveResume(resume);
-      const validation = (await ValidateResumeJSON(resume, selectedJobID)) as ValidationResult;
+      const validation = normalizeValidationResult((await ValidateResumeJSON(resume, selectedJobID)) as ValidationResult | null | undefined);
       setActiveValidation(validation);
       const version = (await SaveResumeVersion({
         job_id: selectedJobID, resume_json: resume, tex_source: '', pdf_path: '', validation_result: validation,
       })) as ResumeVersion;
-      setResumeVersions((prev) => [version, ...prev]);
+      setResumeVersions((prev) => [normalizeResumeVersion(version), ...prev]);
       setPipelineStep('resume');
     });
+  }
+
+  function startEditingResume() {
+    if (!activeResume) return;
+    setEditingResume(JSON.parse(JSON.stringify(activeResume)));
+  }
+
+  function cancelEditingResume() {
+    setEditingResume(null);
+  }
+
+  async function saveEditedResume() {
+    if (!editingResume) return;
+    const cleaned = normalizeResumeJSON(editingResume);
+    setActiveResume(cleaned);
+    setEditingResume(null);
+    const validation = normalizeValidationResult((await ValidateResumeJSON(cleaned, selectedJobID)) as ValidationResult | null | undefined);
+    setActiveValidation(validation);
+    const version = (await SaveResumeVersion({
+      job_id: selectedJobID, resume_json: cleaned, tex_source: '', pdf_path: '', validation_result: validation,
+    })) as ResumeVersion;
+    setResumeVersions((prev) => [normalizeResumeVersion(version), ...prev]);
+  }
+
+  function updateEditingField(field: string, value: string) {
+    if (!editingResume) return;
+    setEditingResume({ ...editingResume, [field]: value });
+  }
+
+  function updateEditingSkill(catIdx: number, itemsStr: string) {
+    if (!editingResume) return;
+    const skills = [...editingResume.skills];
+    skills[catIdx] = { ...skills[catIdx], items: itemsStr.split(',').map(s => s.trim()).filter(Boolean) };
+    setEditingResume({ ...editingResume, skills });
+  }
+
+  function updateEditingEntry(section: 'experience' | 'projects' | 'education', idx: number, field: string, value: string) {
+    if (!editingResume) return;
+    const entries = [...editingResume[section]];
+    entries[idx] = { ...entries[idx], [field]: value };
+    setEditingResume({ ...editingResume, [section]: entries });
+  }
+
+  function updateEditingBullet(section: 'experience' | 'projects', entryIdx: number, bulletIdx: number, value: string) {
+    if (!editingResume) return;
+    const entries = [...editingResume[section]];
+    const bullets = [...entries[entryIdx].bullets];
+    bullets[bulletIdx] = value;
+    entries[entryIdx] = { ...entries[entryIdx], bullets };
+    setEditingResume({ ...editingResume, [section]: entries });
+  }
+
+  function addEditingBullet(section: 'experience' | 'projects', entryIdx: number) {
+    if (!editingResume) return;
+    const entries = [...editingResume[section]];
+    entries[entryIdx] = { ...entries[entryIdx], bullets: [...entries[entryIdx].bullets, ''] };
+    setEditingResume({ ...editingResume, [section]: entries });
+  }
+
+  function removeEditingBullet(section: 'experience' | 'projects', entryIdx: number, bulletIdx: number) {
+    if (!editingResume) return;
+    const entries = [...editingResume[section]];
+    const bullets = entries[entryIdx].bullets.filter((_, i) => i !== bulletIdx);
+    entries[entryIdx] = { ...entries[entryIdx], bullets };
+    setEditingResume({ ...editingResume, [section]: entries });
+  }
+
+  function addEditingSkillCategory() {
+    if (!editingResume) return;
+    setEditingResume({ ...editingResume, skills: [...editingResume.skills, { category: 'New Category', items: [] }] });
+  }
+
+  function removeEditingSkillCategory(catIdx: number) {
+    if (!editingResume) return;
+    setEditingResume({ ...editingResume, skills: editingResume.skills.filter((_, i) => i !== catIdx) });
+  }
+
+  function addEditingEntry(section: 'experience' | 'projects' | 'education') {
+    if (!editingResume) return;
+    const newEntry = section === 'education'
+      ? { organization: '', degree: '', location: '', end_date: '', start_date: '', bullets: [], claim_ids: [], bullet_ids: [] }
+      : { company: '', title: '', location: '', start_date: '', end_date: '', bullets: [''], claim_ids: [], bullet_ids: [], url: '' };
+    setEditingResume({ ...editingResume, [section]: [...editingResume[section], newEntry] });
+  }
+
+  function removeEditingEntry(section: 'experience' | 'projects' | 'education', idx: number) {
+    if (!editingResume) return;
+    setEditingResume({ ...editingResume, [section]: editingResume[section].filter((_, i) => i !== idx) });
   }
 
   async function exportResumeJSON() {
     if (!activeResume) return;
     const blob = new Blob([JSON.stringify(activeResume, null, 2)], {type: 'application/json'});
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'resume.json'; a.click(); URL.revokeObjectURL(url);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `resume-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   }
 
   async function renderPDF() {
@@ -742,6 +836,16 @@ function App() {
             <div className="flex items-center gap-1">
               <span className={`inline-block h-2 w-2 rounded-full ${loadState === 'ready' ? 'bg-green-500' : loadState === 'error' ? 'bg-red-500' : 'bg-amber-400'}`} />
               <span className="text-xs text-slate-400">{statusText}</span>
+              <button
+                type="button"
+                onClick={load}
+                disabled={busyAction !== '' || loadState === 'loading'}
+                className="ml-1 inline-flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-800 active:translate-y-px disabled:pointer-events-none disabled:opacity-40"
+                title="Refresh"
+                aria-label="Refresh app data"
+              >
+                <RefreshCcw size={13} className={loadState === 'loading' ? 'animate-spin' : ''} />
+              </button>
             </div>
           </div>
         </div>
@@ -1067,46 +1171,191 @@ function App() {
                       </div>
                     ) : (
                       <>
-                        <div className="rounded-lg border border-slate-200 bg-white p-5">
-                          <h3 className="text-base font-semibold text-slate-950">{activeResume.headline}</h3>
-                          <p className="mt-1 text-xs text-slate-500">{activeResume.summary}</p>
-                          {activeResume.experience.length > 0 && (
-                            <div className="mt-4">
-                              <CollapsibleSection label={`Experience (${activeResume.experience.length})`} defaultOpen>
-                                <div className="space-y-3">
-                                  {activeResume.experience.map((e, i) => (
-                                    <div key={i}>
-                                      <p className="text-xs font-semibold text-slate-900">{e.title}</p>
-                                      {e.bullets.map((b, bi) => <p key={bi} className="mt-0.5 text-xs text-slate-600">• {b}</p>)}
-                                    </div>
-                                  ))}
+                        <div className="rounded-lg border border-slate-200 bg-white p-5 space-y-4">
+                          {editingResume ? (
+                            <>
+                              <div className="flex items-center justify-between">
+                                <span className="text-xs font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded">Editing Resume</span>
+                                <div className="flex gap-1">
+                                  <SecondaryButton label="Save" onClick={saveEditedResume} variant="green" />
+                                  <SecondaryButton label="Cancel" onClick={cancelEditingResume} variant="red" />
                                 </div>
-                              </CollapsibleSection>
-                            </div>
-                          )}
-                          {activeResume.projects.length > 0 && (
-                            <div className="mt-3">
-                              <CollapsibleSection label={`Projects (${activeResume.projects.length})`}>
-                                <div className="space-y-3">
-                                  {activeResume.projects.map((e, i) => (
-                                    <div key={i}>
-                                      <p className="text-xs font-semibold text-slate-900">{e.title}</p>
-                                      {e.bullets.map((b, bi) => <p key={bi} className="mt-0.5 text-xs text-slate-600">• {b}</p>)}
-                                    </div>
-                                  ))}
+                              </div>
+                              <div>
+                                <label className="text-[10px] font-medium text-slate-500 uppercase">Headline</label>
+                                <input className="mt-0.5 w-full rounded border border-slate-200 px-2 py-1 text-xs" value={editingResume.headline} onChange={e => updateEditingField('headline', e.target.value)} />
+                              </div>
+                              <div>
+                                <label className="text-[10px] font-medium text-slate-500 uppercase">Summary</label>
+                                <textarea className="mt-0.5 w-full rounded border border-slate-200 px-2 py-1 text-xs" rows={3} value={editingResume.summary} onChange={e => updateEditingField('summary', e.target.value)} />
+                              </div>
+                              <div>
+                                <div className="flex items-center justify-between">
+                                  <label className="text-[10px] font-medium text-slate-500 uppercase">Skills</label>
+                                  <button className="text-[10px] text-blue-600 hover:text-blue-800" onClick={addEditingSkillCategory}>+ Add category</button>
                                 </div>
-                              </CollapsibleSection>
-                            </div>
+                                {editingResume.skills.map((s, i) => (
+                                  <div key={i} className="mt-1 flex items-center gap-1">
+                                    <input className="w-24 rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold" value={s.category} onChange={e => updateEditingSkill(i, e.target.value.split(',').map(v => v.trim()).join(', '))} placeholder="Category" />
+                                    <input className="flex-1 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={s.items.join(', ')} onChange={e => updateEditingSkill(i, e.target.value)} placeholder="item1, item2, ..." />
+                                    <button className="text-[10px] text-red-400 hover:text-red-600" onClick={() => removeEditingSkillCategory(i)}>✕</button>
+                                  </div>
+                                ))}
+                              </div>
+                              <div>
+                                <div className="flex items-center justify-between">
+                                  <label className="text-[10px] font-medium text-slate-500 uppercase">Experience</label>
+                                  <button className="text-[10px] text-blue-600 hover:text-blue-800" onClick={() => addEditingEntry('experience')}>+ Add</button>
+                                </div>
+                                {editingResume.experience.map((e, i) => (
+                                  <div key={i} className="mt-2 rounded border border-slate-100 p-2 space-y-1">
+                                    <div className="flex items-center gap-1">
+                                      <input className="flex-1 rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold" value={e.title} onChange={ev => updateEditingEntry('experience', i, 'title', ev.target.value)} placeholder="Title" />
+                                      <input className="w-24 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.company} onChange={ev => updateEditingEntry('experience', i, 'company', ev.target.value)} placeholder="Company" />
+                                      <button className="text-[10px] text-red-400 hover:text-red-600" onClick={() => removeEditingEntry('experience', i)}>✕</button>
+                                    </div>
+                                    <input className="w-full rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.location} onChange={ev => updateEditingEntry('experience', i, 'location', ev.target.value)} placeholder="Location" />
+                                    <div className="flex gap-1">
+                                      <input className="w-20 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.start_date} onChange={ev => updateEditingEntry('experience', i, 'start_date', ev.target.value)} placeholder="Start" />
+                                      <input className="w-20 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.end_date} onChange={ev => updateEditingEntry('experience', i, 'end_date', ev.target.value)} placeholder="End" />
+                                    </div>
+                                    {e.bullets.map((b, bi) => (
+                                      <div key={bi} className="flex items-center gap-1">
+                                        <textarea className="flex-1 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" rows={2} value={b} onChange={ev => updateEditingBullet('experience', i, bi, ev.target.value)} placeholder="Bullet point" />
+                                        <button className="text-[10px] text-red-400 hover:text-red-600 self-start mt-1" onClick={() => removeEditingBullet('experience', i, bi)}>✕</button>
+                                      </div>
+                                    ))}
+                                    <button className="text-[10px] text-blue-600 hover:text-blue-800" onClick={() => addEditingBullet('experience', i)}>+ Add bullet</button>
+                                  </div>
+                                ))}
+                              </div>
+                              <div>
+                                <div className="flex items-center justify-between">
+                                  <label className="text-[10px] font-medium text-slate-500 uppercase">Projects</label>
+                                  <button className="text-[10px] text-blue-600 hover:text-blue-800" onClick={() => addEditingEntry('projects')}>+ Add</button>
+                                </div>
+                                {editingResume.projects.map((e, i) => (
+                                  <div key={i} className="mt-2 rounded border border-slate-100 p-2 space-y-1">
+                                    <div className="flex items-center gap-1">
+                                      <input className="flex-1 rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold" value={e.title} onChange={ev => updateEditingEntry('projects', i, 'title', ev.target.value)} placeholder="Project name" />
+                                      <input className="w-24 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.url} onChange={ev => updateEditingEntry('projects', i, 'url', ev.target.value)} placeholder="URL" />
+                                      <button className="text-[10px] text-red-400 hover:text-red-600" onClick={() => removeEditingEntry('projects', i)}>✕</button>
+                                    </div>
+                                    <input className="w-full rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.company} onChange={ev => updateEditingEntry('projects', i, 'company', ev.target.value)} placeholder="Stack (e.g. Go, React)" />
+                                    <div className="flex gap-1">
+                                      <input className="w-20 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.start_date} onChange={ev => updateEditingEntry('projects', i, 'start_date', ev.target.value)} placeholder="Start" />
+                                      <input className="w-20 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.end_date} onChange={ev => updateEditingEntry('projects', i, 'end_date', ev.target.value)} placeholder="End" />
+                                    </div>
+                                    {e.bullets.map((b, bi) => (
+                                      <div key={bi} className="flex items-center gap-1">
+                                        <textarea className="flex-1 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" rows={2} value={b} onChange={ev => updateEditingBullet('projects', i, bi, ev.target.value)} placeholder="Bullet point" />
+                                        <button className="text-[10px] text-red-400 hover:text-red-600 self-start mt-1" onClick={() => removeEditingBullet('projects', i, bi)}>✕</button>
+                                      </div>
+                                    ))}
+                                    <button className="text-[10px] text-blue-600 hover:text-blue-800" onClick={() => addEditingBullet('projects', i)}>+ Add bullet</button>
+                                  </div>
+                                ))}
+                              </div>
+                              <div>
+                                <div className="flex items-center justify-between">
+                                  <label className="text-[10px] font-medium text-slate-500 uppercase">Education</label>
+                                  <button className="text-[10px] text-blue-600 hover:text-blue-800" onClick={() => addEditingEntry('education')}>+ Add</button>
+                                </div>
+                                {editingResume.education.map((e, i) => (
+                                  <div key={i} className="mt-2 rounded border border-slate-100 p-2 space-y-1">
+                                    <div className="flex items-center gap-1">
+                                      <input className="flex-1 rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold" value={e.organization} onChange={ev => updateEditingEntry('education', i, 'organization', ev.target.value)} placeholder="Institution" />
+                                      <button className="text-[10px] text-red-400 hover:text-red-600" onClick={() => removeEditingEntry('education', i)}>✕</button>
+                                    </div>
+                                    <input className="w-full rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.degree} onChange={ev => updateEditingEntry('education', i, 'degree', ev.target.value)} placeholder="Degree" />
+                                    <div className="flex gap-1">
+                                      <input className="flex-1 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.location} onChange={ev => updateEditingEntry('education', i, 'location', ev.target.value)} placeholder="Location" />
+                                      <input className="w-20 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.end_date} onChange={ev => updateEditingEntry('education', i, 'end_date', ev.target.value)} placeholder="Year" />
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="flex items-start justify-between">
+                                <div className="flex-1">
+                                  <h3 className="text-base font-semibold text-slate-950">{activeResume.headline}</h3>
+                                  <p className="mt-1 text-xs text-slate-500">{activeResume.summary}</p>
+                                </div>
+                                <button className="ml-2 rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600" onClick={startEditingResume} title="Edit resume">
+                                  <Pencil size={14} />
+                                </button>
+                              </div>
+                              {activeResume.skills.length > 0 && (
+                                <div className="mt-4">
+                                  <CollapsibleSection label={`Skills (${activeResume.skills.length})`}>
+                                    <div className="space-y-1">
+                                      {activeResume.skills.map((s, i) => (
+                                        <p key={i} className="text-xs text-slate-600"><span className="font-semibold text-slate-800">{s.category}:</span> {s.items.join(', ')}</p>
+                                      ))}
+                                    </div>
+                                  </CollapsibleSection>
+                                </div>
+                              )}
+                              {activeResume.experience.length > 0 && (
+                                <div className="mt-4">
+                                  <CollapsibleSection label={`Experience (${activeResume.experience.length})`} defaultOpen>
+                                    <div className="space-y-3">
+                                      {activeResume.experience.map((e, i) => (
+                                        <div key={i}>
+                                          <p className="text-xs font-semibold text-slate-900">{e.title}</p>
+                                          {e.company && <p className="text-xs text-slate-500">{e.company}{e.location ? ` · ${e.location}` : ''}</p>}
+                                          {e.bullets.map((b, bi) => <p key={bi} className="mt-0.5 text-xs text-slate-600">• {b}</p>)}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </CollapsibleSection>
+                                </div>
+                              )}
+                              {activeResume.projects.length > 0 && (
+                                <div className="mt-3">
+                                  <CollapsibleSection label={`Projects (${activeResume.projects.length})`}>
+                                    <div className="space-y-3">
+                                      {activeResume.projects.map((e, i) => (
+                                        <div key={i}>
+                                          <p className="text-xs font-semibold text-slate-900">{e.title}</p>
+                                          {e.company && <p className="text-xs text-slate-500">{e.company}</p>}
+                                          {e.bullets.map((b, bi) => <p key={bi} className="mt-0.5 text-xs text-slate-600">• {b}</p>)}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </CollapsibleSection>
+                                </div>
+                              )}
+                              {activeResume.education.length > 0 && (
+                                <div className="mt-3">
+                                  <CollapsibleSection label={`Education (${activeResume.education.length})`}>
+                                    <div className="space-y-2">
+                                      {activeResume.education.map((e, i) => (
+                                        <div key={i}>
+                                          <p className="text-xs font-semibold text-slate-900">{e.organization}</p>
+                                          <p className="text-xs text-slate-600">{e.degree}{e.location ? ` · ${e.location}` : ''}{e.end_date ? ` · ${e.end_date}` : ''}</p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </CollapsibleSection>
+                                </div>
+                              )}
+                            </>
                           )}
                         </div>
                         <div className="flex items-center gap-2">
                           {resumeVersions.length > 1 && (
                             <select className="rounded border border-slate-200 px-2 py-1 text-xs" value={resumeVersions[0]?.id ?? 0} onChange={async (e) => {
                               const v = resumeVersions.find((rv) => rv.id === Number(e.target.value));
-                              if (v) { setActiveResume(v.resume_json); setActiveValidation(v.validation_result); }
+                              if (v) { setActiveResume(normalizeResumeJSON(v.resume_json)); setActiveValidation(normalizeValidationResult(v.validation_result)); }
                             }}>
                               {resumeVersions.map((v) => <option key={v.id} value={v.id}>v{v.id} — {v.created_at?.slice(0, 16)}</option>)}
                             </select>
+                          )}
+                          {activeResume && !editingResume && (
+                            <SecondaryButton label="Edit" onClick={startEditingResume} variant="blue" />
                           )}
                           <IconButton label="Export JSON" onClick={exportResumeJSON}><FileText size={14} /></IconButton>
                           <IconButton label="PDF" onClick={renderPDF}><FilePlus2 size={14} /></IconButton>
@@ -1591,6 +1840,42 @@ function normalizeBulletEvents(v: BulletGenerationEvent[] | null | undefined) { 
 function normalizeJobAnalysis(v: JobAnalysis | null | undefined) { return v ?? null; }
 function normalizeFitAnalysis(v: JobFitAnalysis | null | undefined) { return v ?? null; }
 function normalizeApplicationStrategy(v: ApplicationStrategy | null | undefined) { return v ?? null; }
+
+function normalizeResumeJSON(v: ResumeJSON | null | undefined): ResumeJSON {
+  return {
+    contact: {
+      full_name: v?.contact?.full_name ?? '',
+      email: v?.contact?.email ?? '',
+      phone: v?.contact?.phone ?? '',
+      location: v?.contact?.location ?? '',
+      linkedin: v?.contact?.linkedin ?? '',
+      github: v?.contact?.github ?? '',
+    },
+    headline: v?.headline ?? '',
+    summary: v?.summary ?? '',
+    skills: (v?.skills ?? []).map((s) => ({...s, items: s.items ?? []})),
+    experience: (v?.experience ?? []).map((e) => ({...e, url: e.url ?? '', bullets: e.bullets ?? [], claim_ids: e.claim_ids ?? [], bullet_ids: e.bullet_ids ?? []})),
+    projects: (v?.projects ?? []).map((e) => ({...e, url: e.url ?? '', bullets: e.bullets ?? [], claim_ids: e.claim_ids ?? [], bullet_ids: e.bullet_ids ?? []})),
+    education: v?.education ?? [],
+    generated_at: v?.generated_at ?? '',
+  };
+}
+
+function normalizeValidationResult(v: ValidationResult | null | undefined): ValidationResult {
+  return {
+    passed: Boolean(v?.passed),
+    errors: v?.errors ?? [],
+    warnings: v?.warnings ?? [],
+    factuality_checks: v?.factuality_checks ?? [],
+    style_issues: v?.style_issues ?? [],
+    immutable_issues: v?.immutable_issues ?? [],
+    title_issues: v?.title_issues ?? [],
+  };
+}
+
+function normalizeResumeVersion(v: ResumeVersion): ResumeVersion {
+  return {...v, resume_json: normalizeResumeJSON(v.resume_json), validation_result: normalizeValidationResult(v.validation_result)};
+}
 
 function normalizeProfile(p: CandidateProfile) {
   return {...p, contact: {...p.contact, links: p.contact.links || []}, records: p.records || []};

@@ -428,6 +428,7 @@ export type ResumeSkill = {
 export type ResumeEntry = {
   company: string;
   title: string;
+  url: string;
   location: string;
   start_date: string;
   end_date: string;
@@ -443,7 +444,17 @@ export type ResumeEducation = {
   end_date: string;
 };
 
+export type ResumeContact = {
+  full_name: string;
+  email: string;
+  phone: string;
+  location: string;
+  linkedin: string;
+  github: string;
+};
+
 export type ResumeJSON = {
+  contact: ResumeContact;
   headline: string;
   summary: string;
   skills: ResumeSkill[];
@@ -2960,6 +2971,7 @@ export async function GenerateResumeJSON(input: GenerateResumeJSONInput) {
   const job = mockJobs.find((j) => j.id === input.job_id);
   const title = job?.title || 'Software Engineer';
   const resume: ResumeJSON = {
+    contact: { full_name: 'Roshan Ravikumar', email: '', phone: '', location: 'Melbourne, VIC', linkedin: '', github: '' },
     headline: title,
     summary: 'Candidate — tailored for ' + title + '.',
     skills: [],

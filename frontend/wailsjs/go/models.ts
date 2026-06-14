@@ -1125,10 +1125,13 @@ export namespace main {
 	export class ResumeJSON {
 	    headline: string;
 	    summary: string;
+	    contact_line: string;
+	    skills_line: string;
 	    skills: ResumeSkill[];
 	    experience: ResumeEntry[];
 	    projects: ResumeEntry[];
 	    education: ResumeEducation[];
+	    tex_source: string;
 	    generated_at: string;
 	
 	    static createFrom(source: any = {}) {
@@ -1139,10 +1142,13 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.headline = source["headline"];
 	        this.summary = source["summary"];
+	        this.contact_line = source["contact_line"];
+	        this.skills_line = source["skills_line"];
 	        this.skills = this.convertValues(source["skills"], ResumeSkill);
 	        this.experience = this.convertValues(source["experience"], ResumeEntry);
 	        this.projects = this.convertValues(source["projects"], ResumeEntry);
 	        this.education = this.convertValues(source["education"], ResumeEducation);
+	        this.tex_source = source["tex_source"];
 	        this.generated_at = source["generated_at"];
 	    }
 	

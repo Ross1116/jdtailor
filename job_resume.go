@@ -15,13 +15,16 @@ import (
 )
 
 type ResumeJSON struct {
-	Headline    string           `json:"headline"`
-	Summary     string           `json:"summary"`
-	Skills      []ResumeSkill    `json:"skills"`
-	Experience  []ResumeEntry    `json:"experience"`
-	Projects    []ResumeEntry    `json:"projects"`
+	Headline    string            `json:"headline"`
+	Summary     string            `json:"summary"`
+	ContactLine string            `json:"contact_line"`
+	SkillsLine  string            `json:"skills_line"`
+	Skills      []ResumeSkill     `json:"skills"`
+	Experience  []ResumeEntry     `json:"experience"`
+	Projects    []ResumeEntry     `json:"projects"`
 	Education   []ResumeEducation `json:"education"`
-	GeneratedAt string           `json:"generated_at"`
+	TexSource   string            `json:"tex_source"`
+	GeneratedAt string            `json:"generated_at"`
 }
 
 type ResumeSkill struct {
@@ -131,6 +134,16 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 		return ResumeJSON{}, err
 	}
 
+	sections, err := s.ListSourceSections(0)
+	if err != nil {
+		sections = nil
+	}
+
+	approvedFacts, err := s.ListEvidenceFacts("approved")
+	if err != nil {
+		approvedFacts = nil
+	}
+
 	var selectedDrafts []TailoredBulletDraft
 	if len(input.SelectedBulletIDs) > 0 {
 		allDrafts, err := s.ListTailoredBulletDrafts(input.JobID)
@@ -163,12 +176,10 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 	}
 
 	claimIDs := map[int64]bool{}
-	bulletClaimMap := map[int64][]int64{}
 	for _, draft := range selectedDrafts {
 		for _, cid := range draft.ClaimIDs {
 			claimIDs[cid] = true
 		}
-		bulletClaimMap[draft.ID] = draft.ClaimIDs
 	}
 
 	claims, err := s.ListCandidateClaims("all")
@@ -261,12 +272,36 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 		headline = analysis.RoleTitle
 	}
 
-	resume := ResumeJSON{
+	contactLine := buildContactLine(profile.Contact)
+	skillsLine := buildSkillsLine(skills)
+	education := buildEducationFromSections(sections)
+	texSource := s.generateResumeTex(ctx, buildResumeTexPrompt(resumeTexPromptInput{
 		Headline:    headline,
 		Summary:     buildResumeSummary(profile, analysis, claimIDs, claimsByID),
+		ContactLine: contactLine,
+		SkillsLine:  skillsLine,
 		Skills:      skills,
 		Experience:  experienceEntries,
 		Projects:    projectEntries,
+		Education:   education,
+		Sections:    sections,
+		Facts:       approvedFacts,
+		Claims:      claims,
+		Drafts:      selectedDrafts,
+		Analysis:    analysis,
+		Strategy:    strategy,
+	}))
+
+	resume := ResumeJSON{
+		Headline:    headline,
+		Summary:     buildResumeSummary(profile, analysis, claimIDs, claimsByID),
+		ContactLine: contactLine,
+		SkillsLine:  skillsLine,
+		Skills:      skills,
+		Experience:  experienceEntries,
+		Projects:    projectEntries,
+		Education:   education,
+		TexSource:   texSource,
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 
@@ -441,22 +476,34 @@ func supportedBulletEvidence(bullet string, claimsByID map[int64]CandidateClaim)
 }
 
 func (s *Store) RenderResumePDF(ctx context.Context, resume ResumeJSON) (RenderPDFResult, error) {
-	funcs := template.FuncMap{
-		"join": func(items []string, sep string) string {
-			return strings.Join(items, sep)
-		},
-	}
-	tmpl, err := template.New("resume").Funcs(funcs).Parse(latexResumeTemplate())
-	if err != nil {
-		return RenderPDFResult{}, fmt.Errorf("failed to parse LaTeX template: %w", err)
-	}
+	var texContent string
 
-	var buf bytes.Buffer
-	if err := tmpl.Execute(&buf, resume); err != nil {
-		return RenderPDFResult{}, fmt.Errorf("failed to execute LaTeX template: %w", err)
-	}
+	if strings.TrimSpace(resume.TexSource) != "" {
+		texContent = strings.TrimSpace(resume.TexSource)
+		if strings.HasPrefix(texContent, "```") {
+			texContent = strings.TrimPrefix(texContent, "```latex")
+			texContent = strings.TrimPrefix(texContent, "```")
+			texContent = strings.TrimSuffix(texContent, "```")
+			texContent = strings.TrimSpace(texContent)
+		}
+	} else {
+		funcs := template.FuncMap{
+			"join": func(items []string, sep string) string {
+				return strings.Join(items, sep)
+			},
+		}
+		tmpl, err := template.New("resume").Delims("[[", "]]").Funcs(funcs).Parse(latexResumeTemplate())
+		if err != nil {
+			return RenderPDFResult{}, fmt.Errorf("failed to parse LaTeX template: %w", err)
+		}
 
-	texContent := sanitizeLaTeX(buf.String())
+		var buf bytes.Buffer
+		if err := tmpl.Execute(&buf, resume); err != nil {
+			return RenderPDFResult{}, fmt.Errorf("failed to execute LaTeX template: %w", err)
+		}
+
+		texContent = sanitizeLaTeX(buf.String())
+	}
 
 	outputDir := filepath.Join(s.generatedPath, fmt.Sprintf("resume-%d", time.Now().Unix()))
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
@@ -687,48 +734,410 @@ func normalizeAppStatus(status string) string {
 	return "draft"
 }
 
+func buildContactLine(contact CandidateContact) string {
+	parts := []string{}
+	if contact.Email != "" {
+		parts = append(parts, contact.Email)
+	}
+	if contact.Location != "" {
+		parts = append(parts, contact.Location)
+	}
+	return strings.Join(parts, " | ")
+}
+
+func buildSkillsLine(skills []ResumeSkill) string {
+	parts := []string{}
+	for _, skill := range skills {
+		parts = append(parts, skill.Category+": "+strings.Join(skill.Items, ", "))
+	}
+	return strings.Join(parts, " \\ ")
+}
+
+func buildEducationFromSections(sections []SourceSection) []ResumeEducation {
+	education := []ResumeEducation{}
+	for _, section := range sections {
+		if section.SectionType != "education" {
+			continue
+		}
+		entry := ResumeEducation{
+			Organization: section.Heading,
+		}
+		lines := strings.Split(strings.TrimSpace(section.Content), "\n")
+		contentLines := []string{}
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "- ") {
+				continue
+			}
+			contentLines = append(contentLines, line)
+		}
+		if len(contentLines) == 0 {
+			if section.Heading != "" {
+				education = append(education, entry)
+			}
+			continue
+		}
+		for _, line := range contentLines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if strings.Contains(line, "|") {
+				parts := strings.SplitN(line, "|", 2)
+				left := strings.TrimSpace(parts[0])
+				right := ""
+				if len(parts) > 1 {
+					right = strings.TrimSpace(parts[1])
+				}
+				lower := strings.ToLower(left)
+				if strings.Contains(lower, "bachelor") || strings.Contains(lower, "master") || strings.Contains(lower, "phd") || strings.Contains(lower, "diploma") || strings.Contains(lower, "certificate") || strings.Contains(lower, "doctor") || strings.Contains(lower, "engineering") || strings.Contains(lower, "technology") || strings.Contains(lower, "science") || strings.Contains(lower, "information") {
+					entry.Degree = left
+					if right != "" {
+						entry.EndDate = extractEndDate(right)
+					}
+				} else if entry.Location == "" {
+					entry.Location = left
+				}
+			} else if strings.Contains(strings.ToLower(line), "bachelor") || strings.Contains(strings.ToLower(line), "master") || strings.Contains(strings.ToLower(line), "phd") || strings.Contains(strings.ToLower(line), "diploma") {
+				entry.Degree = line
+			} else if entry.Location == "" {
+				entry.Location = line
+			}
+		}
+		if entry.Degree == "" && entry.Location == "" && entry.Organization == "" {
+			continue
+		}
+		if entry.Degree == "" && len(contentLines) > 0 {
+			entry.Degree = contentLines[0]
+		}
+		education = append(education, entry)
+	}
+	if len(education) == 0 {
+		for _, section := range sections {
+			heading := strings.TrimSpace(section.Heading)
+			content := strings.TrimSpace(section.Content)
+			if heading == "" && content == "" {
+				continue
+			}
+			lower := strings.ToLower(heading + " " + content)
+			if strings.Contains(lower, "university") || strings.Contains(lower, "bachelor") || strings.Contains(lower, "master") || strings.Contains(lower, "phd") || strings.Contains(lower, "college") || strings.Contains(lower, "institute") {
+				education = append(education, ResumeEducation{
+					Organization: heading,
+					Degree:       content,
+				})
+			}
+		}
+	}
+	return education
+}
+
+func extractEndDate(text string) string {
+	text = strings.TrimSpace(text)
+	parts := strings.FieldsFunc(text, func(r rune) bool {
+		return r == '-' || r == 0x2013 || r == 0x2014
+	})
+	if len(parts) >= 2 {
+		date := strings.TrimSpace(parts[len(parts)-1])
+		if strings.Contains(date, "/") || strings.Contains(date, "Present") || strings.Contains(date, "present") {
+			return date
+		}
+	}
+	return ""
+}
+
+type resumeTexPromptInput struct {
+	Headline    string
+	Summary     string
+	ContactLine string
+	SkillsLine  string
+	Skills      []ResumeSkill
+	Experience  []ResumeEntry
+	Projects    []ResumeEntry
+	Education   []ResumeEducation
+	Sections    []SourceSection
+	Facts       []EvidenceFact
+	Claims      []CandidateClaim
+	Drafts      []TailoredBulletDraft
+	Analysis    JobAnalysis
+	Strategy    ApplicationStrategy
+}
+
+func buildResumeTexPrompt(input resumeTexPromptInput) string {
+	profileJSON, _ := jsonMarshalNoErr(map[string]any{
+		"headline":     input.Headline,
+		"summary":      input.Summary,
+		"contact_line": input.ContactLine,
+		"skills_line":  input.SkillsLine,
+		"skills":       input.Skills,
+		"experience":   input.Experience,
+		"projects":     input.Projects,
+		"education":    input.Education,
+	})
+	sourceSectionJSON, _ := jsonMarshalNoErr(sourceSectionSummaries(input.Sections))
+	factJSON, _ := jsonMarshalNoErr(factSummaries(input.Facts))
+	claimJSON, _ := jsonMarshalNoErr(claimSummaries(input.Claims))
+	draftJSON, _ := jsonMarshalNoErr(draftSummaries(input.Drafts))
+	jdJSON, _ := jsonMarshalNoErr(map[string]any{
+		"role_title":    input.Analysis.RoleTitle,
+		"company":       input.Analysis.Company,
+		"required_skills":          input.Analysis.RequiredSkills,
+		"preferred_skills":         input.Analysis.PreferredSkills,
+		"responsibilities":         input.Analysis.Responsibilities,
+		"top_pain_points":          input.Analysis.TopPainPoints,
+		"positioning_strategy":     input.Strategy.PositioningStrategy,
+		"resume_headline":          input.Strategy.ResumeHeadline,
+		"do_not_overclaim":         input.Strategy.DoNotOverclaim,
+	})
+
+	skeleton := latexResumeTemplate()
+
+	return fmt.Sprintf(`# Task
+Generate a one-page LaTeX resume that exactly matches the provided format skeleton. Replace ALL placeholder content with tailored content from the context data below. Do NOT invent data not present in the context. Use the best-fit content for the target job description.
+
+# Format Skeleton (use this EXACT formatting, replace only content)
+`+"```latex\n%s\n```"+`
+
+# Structured Resume Data
+`+"```json\n%s\n```"+`
+
+# Source Section Content (original resume sections)
+`+"```json\n%s\n```"+`
+
+# Evidence Facts (atom-level extracted facts)
+`+"```json\n%s\n```"+`
+
+# Candidate Claims (approved atom-bank profile claims)
+`+"```json\n%s\n```"+`
+
+# Tailored Bullet Drafts (JD-specific bullet drafts)
+`+"```json\n%s\n```"+`
+
+# Job Description Analysis
+`+"```json\n%s\n```"+`
+
+# Instructions
+1. Output ONLY valid LaTeX code matching the skeleton format
+2. Replace ALL placeholder content (headline, contact, summary, skills, experience bullets, project bullets, education) with tailored content from the context
+3. Keep the EXACT same LaTeX commands and formatting as the skeleton
+4. Order experience entries by relevance to the JD
+5. Use the MOST JD-relevant bullets from the structured data, source sections, and bullet drafts
+6. Skills must reflect only technologies evidenced in facts/claims
+7. The resume must fit on ONE page — be selective with bullets (3-5 most relevant per role)
+8. Do NOT invent technologies, metrics, or achievements not present in the context
+9. Use JD terminology when it maps to real evidence in the context
+10. Avoid banned phrases: leveraged, spearheaded, empowered, utilized, cutting-edge, game-changer, transformative, synergy, seamless
+
+Return ONLY the LaTeX code, no explanations.`, skeleton, profileJSON, sourceSectionJSON, factJSON, claimJSON, draftJSON, jdJSON)
+}
+
+func (s *Store) generateResumeTex(ctx context.Context, prompt string) string {
+	if prompt == "" {
+		return ""
+	}
+	system := `You are JD Tailor's resume LaTeX generator. Return ONLY valid LaTeX code matching the provided skeleton format. Never include markdown fences or explanations.`
+	rules := s.promptRuleDigest("resume", "validation")
+	systemWithRules := system
+	if rules != "" {
+		systemWithRules = system + "\n\n# Validation Rules\n" + rules
+	}
+	text, err := s.GenerateLLMText(ctx, nil, systemWithRules, prompt, 2400)
+	if err != nil {
+		_ = s.LogEvent("warning", "resume tex generation failed: "+err.Error())
+		return ""
+	}
+	text = strings.TrimSpace(text)
+	return text
+}
+
+func jsonMarshalNoErr(v any) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+func sourceSectionSummaries(sections []SourceSection) []map[string]any {
+	result := []map[string]any{}
+	for _, section := range sections {
+		result = append(result, map[string]any{
+			"heading":      section.Heading,
+			"section_type": section.SectionType,
+			"content":      section.Content,
+		})
+	}
+	return result
+}
+
+func factSummaries(facts []EvidenceFact) []map[string]any {
+	result := []map[string]any{}
+	for _, fact := range facts {
+		result = append(result, map[string]any{
+			"fact_text":      fact.FactText,
+			"evidence_quote": fact.EvidenceQuote,
+			"technologies":   fact.Technologies,
+			"origin_heading": fact.OriginHeading,
+			"origin_type":    fact.OriginType,
+		})
+	}
+	return result
+}
+
+func claimSummaries(claims []CandidateClaim) []map[string]any {
+	result := []map[string]any{}
+	for _, claim := range claims {
+		if claim.Status != "approved" && claim.Status != "approved_restricted" {
+			continue
+		}
+		result = append(result, map[string]any{
+			"claim_text":     claim.ClaimText,
+			"technologies":   claim.Technologies,
+			"actions":        claim.Actions,
+			"capabilities":   claim.Capabilities,
+			"origin_heading": claim.OriginHeading,
+			"origin_type":    claim.OriginType,
+			"status":         claim.Status,
+		})
+	}
+	return result
+}
+
+func draftSummaries(drafts []TailoredBulletDraft) []map[string]any {
+	result := []map[string]any{}
+	for _, draft := range drafts {
+		result = append(result, map[string]any{
+			"draft_text":     draft.DraftText,
+			"origin_heading": draft.OriginHeading,
+			"origin_type":    draft.OriginType,
+		})
+	}
+	return result
+}
+
 func latexResumeTemplate() string {
-	return `\documentclass[11pt,a4paper]{article}
-\usepackage[utf8]{inputenc}
-\usepackage[margin=0.5in]{geometry}
-\usepackage{enumitem}
+	return `\documentclass[letterpaper,11pt]{article}
+\usepackage{lmodern}
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
 \usepackage{titlesec}
+\usepackage{marvosym}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+\usepackage{amsmath}
+\usepackage{fontawesome}
 
-\pagestyle{empty}
-\setlength{\parindent}{0pt}
-\setlength{\parskip}{4pt}
+\hypersetup{
+    colorlinks=true,
+    urlcolor=blue
+}
 
-\titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+%----------PAGE SETUP----------
+\addtolength{\oddsidemargin}{-0.5in}
+\addtolength{\evensidemargin}{-0.5in}
+\addtolength{\textwidth}{1in}
+\addtolength{\topmargin}{-.55in}
+\addtolength{\textheight}{1.1in}
+
+\urlstyle{same}
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+%----------SECTION FORMAT----------
+\titleformat{\section}{
+  \vspace{-3pt}\scshape\raggedright\large
+}{}{0em}{}[\color{black}\titlerule \vspace{-4pt}]
+
+\pdfgentounicode=1
+
+%----------CUSTOM COMMANDS----------
+\newcommand{\resumeItem}[1]{
+  \item\small{#1 \vspace{-2pt}}
+}
+
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-1pt}\item
+    \begin{tabular*}{0.97\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \textbf{#1} & #2 \\
+      \textit{\small#3} & \textit{\small #4} \\
+    \end{tabular*}\vspace{-6pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & #2 \\
+    \end{tabular*}\vspace{-6pt}
+}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.15in, label={}]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}
+\newcommand{\resumeItemListStart}{\begin{itemize}[leftmargin=0.18in]}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-5pt}}
 
 \begin{document}
 
+%----------HEADING----------
 \begin{center}
-{\LARGE\bfseries {{.Headline}}} \\
-\vspace{4pt}
-{{.Summary}}
+    \textbf{\Huge \scshape [[.Headline]]} \\ \vspace{1pt}
+    \small
+    [[.ContactLine]]
 \end{center}
 
-{{range .Skills}}
-\section{\Category}
-{{join .Items ", "}}
+%-----------SUMMARY-----------
+\section{Professional Summary}
+[[.Summary]] \vspace{-4pt}
 
-{{end}}
+%-----------TECHNICAL SKILLS-----------
+\section{Technical Skills}
+\resumeSubHeadingListStart
+[[range .Skills]]\textbf{[[.Category]]}: [[join .Items ", "]] \\[0pt]
+[[end]]
+\resumeSubHeadingListEnd
 
-{{range .Experience}}
-\section{\Title}
-{{range .Bullets}}
-\item {{.}}
-{{end}}
+%-----------EXPERIENCE-----------
+\section{Experience}
+\resumeSubHeadingListStart
+[[range .Experience]]
+\resumeSubheading
+[[.Company]] [[.Location]]
+[[.Title]] [[.StartDate]] -- [[.EndDate]]
+\resumeItemListStart
+[[range .Bullets]]\resumeItem{[[.]]}
+[[end]]
+\resumeItemListEnd
+[[end]]
+\resumeSubHeadingListEnd
 
-{{end}}
+%-----------PROJECTS-----------
+\section{Projects}
+\resumeSubHeadingListStart
+[[range .Projects]]
+\resumeProjectHeading [[.Title]] [[.StartDate]] -- [[.EndDate]]
+\resumeItemListStart
+[[range .Bullets]]\resumeItem{[[.]]}
+[[end]]
+\resumeItemListEnd
+[[end]]
+\resumeSubHeadingListEnd
 
-{{range .Projects}}
-\section{\Title}
-{{range .Bullets}}
-\item {{.}}
-{{end}}
-
-{{end}}
+%-----------EDUCATION-----------
+\section{Education}
+\resumeSubHeadingListStart
+[[range .Education]]
+\resumeSubheading
+[[.Organization]] [[.Location]]
+[[.Degree]] [[.EndDate]]
+\vspace{3pt}
+[[end]]
+\resumeSubHeadingListEnd
 
 \end{document}
 `
