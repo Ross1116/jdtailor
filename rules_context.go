@@ -151,7 +151,8 @@ func (s *Store) promptRuleDigest(categories ...string) string {
 	}
 	rules, err := s.ListPromptRules()
 	if err != nil {
-		return ""
+		_ = s.LogEvent("warning", "failed to load prompt rules, using defaults: "+err.Error())
+		rules = defaultPromptRules()
 	}
 	parts := []string{}
 	for _, rule := range rules {

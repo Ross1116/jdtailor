@@ -190,7 +190,7 @@ func (s *Store) SaveSettings(input SaveSettingsInput) (Settings, error) {
 	}
 
 	if err := s.LogEvent("info", "settings saved"); err != nil {
-		return Settings{}, err
+		_ = s.LogEvent("warning", "failed to log settings-saved event: "+err.Error())
 	}
 
 	return Settings{
@@ -737,7 +737,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 
-	return s.LogEvent("info", "database migrated")
+	_ = s.LogEvent("info", "database migrated")
+	return nil
 }
 
 func (s *Store) migrationApplied(ctx context.Context, version int) (bool, error) {

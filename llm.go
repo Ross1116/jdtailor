@@ -192,6 +192,10 @@ func (s *Store) TestLLM(ctx context.Context, client *http.Client) (LLMTestResult
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
+	} else if client.Timeout == 0 {
+		clientCopy := *client
+		clientCopy.Timeout = 30 * time.Second
+		client = &clientCopy
 	}
 	switch provider {
 	case "openai":

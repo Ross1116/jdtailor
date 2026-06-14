@@ -35,7 +35,7 @@ func (s *Store) embeddingForEntity(ctx context.Context, client *http.Client, ent
 	if cached, err := s.getCachedEmbedding(entityType, entityID, provider, model, inputHash); err == nil && len(cached.Vector) > 0 {
 		return cached.Vector, nil
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
+		_ = s.LogEvent("warning", "embedding cache read failed, regenerating: "+err.Error())
 	}
 
 	vector, provider, model, err := s.GenerateEmbedding(ctx, client, text)
