@@ -2238,7 +2238,7 @@ function buildMockFitAnalysis(jobID: number): JobFitAnalysis {
   const rows: FitNeedAnalysis[] = requirements.map((req) => {
     const reqMatches = matches.filter((match) => match.requirement_id === req.id);
     const best = reqMatches.sort((a, b) => b.score - a.score)[0];
-    const gap = !best ? 'critical' : best.score >= 0.75 ? 'covered' : best.score >= 0.45 ? 'partial' : 'critical';
+    const gap = !best ? 'critical' : best.score >= 0.75 ? 'covered' : best.score >= 0.45 ? 'partial' : best.score >= 0.32 ? 'adjacent' : 'critical';
     return {
       requirement_id: req.id,
       jd_need: req.requirement_text,
@@ -2249,13 +2249,13 @@ function buildMockFitAnalysis(jobID: number): JobFitAnalysis {
       risk: best ? '' : 'no matching evidence',
     };
   });
-  const score = rows.length ? Math.round(rows.reduce((sum, row) => sum + (row.gap_level === 'covered' ? 1 : row.gap_level === 'partial' ? 0.55 : 0), 0) / rows.length * 100) : 0;
+  const score = rows.length ? Math.round(rows.reduce((sum, row) => sum + (row.gap_level === 'covered' ? 1 : row.gap_level === 'partial' ? 0.55 : row.gap_level === 'adjacent' ? 0.35 : 0), 0) / rows.length * 100) : 0;
   return {
     job_id: jobID,
     overall_score: score,
-    recommendation: score >= 70 ? 'Apply' : score >= 55 ? 'Apply With Caution' : score >= 40 ? 'Upskill First' : 'Look Elsewhere',
+    recommendation: score >= 70 ? 'Apply' : score >= 58 ? "Apply, But Don't Over-Prioritise" : score >= 48 ? 'Apply With Caution' : score >= 32 ? 'Upskill First' : 'Look Elsewhere',
     strengths: rows.filter((row) => row.gap_level === 'covered').map((row) => row.jd_need),
-    critical_gaps: rows.filter((row) => row.gap_level === 'critical').map((row) => row.jd_need),
+    critical_gaps: rows.filter((row) => row.gap_level === 'critical' || row.gap_level === 'adjacent').map((row) => row.jd_need),
     reality_check: `${score}% evidence-backed fit based on ${requirements.length} parsed requirements.`,
     analysis: rows,
     created_at: now(),

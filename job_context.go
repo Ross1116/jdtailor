@@ -478,6 +478,8 @@ Build an evidence-backed match map for this job.
 		}
 		_ = s.LogEvent("warning", "job match map used local fallback: "+err.Error())
 	}
+	parsed = mergeParsedJobMatches(parsed, fallbackJobMatchesFromClaims(requirements, claims))
+	parsed = mergeParsedJobMatches(parsed, fallbackJobMatches(requirements, facts))
 	return s.replaceJobMatches(jobID, parsed, requirements, facts)
 }
 
@@ -1593,8 +1595,10 @@ func (s *Store) replaceJobRequirements(job JobDescription, requirements []parsed
 
 func (s *Store) replaceJobMatches(jobID int64, matches []parsedJobMatch, requirements []JobRequirement, facts []factPromptContext) ([]JobFactMatch, error) {
 	reqIDs := map[int64]bool{}
+	reqsByID := map[int64]JobRequirement{}
 	for _, req := range requirements {
 		reqIDs[req.ID] = true
+		reqsByID[req.ID] = req
 	}
 	factIDs := map[int64]bool{}
 	factsByID := map[int64]factPromptContext{}
@@ -1611,6 +1615,7 @@ func (s *Store) replaceJobMatches(jobID int64, matches []parsedJobMatch, require
 	if _, err := tx.ExecContext(context.Background(), `DELETE FROM job_fact_matches WHERE job_id = ?`, jobID); err != nil {
 		return nil, err
 	}
+	sanitizedMatches := []parsedJobMatch{}
 	count := 0
 	for _, match := range matches {
 		if strings.EqualFold(match.CoverageStatus, "gap") || match.Score <= 0 {
@@ -1619,6 +1624,16 @@ func (s *Store) replaceJobMatches(jobID int64, matches []parsedJobMatch, require
 		if !reqIDs[match.RequirementID] || !factIDs[match.FactID] {
 			continue
 		}
+		req := reqsByID[match.RequirementID]
+		fact := factsByID[match.FactID]
+		match = sanitizeParsedJobMatch(match, req, fact)
+		if strings.EqualFold(match.CoverageStatus, "gap") || match.Score <= 0 {
+			continue
+		}
+		sanitizedMatches = append(sanitizedMatches, match)
+	}
+	sanitizedMatches = selectStoredJobMatches(sanitizedMatches, 5)
+	for _, match := range sanitizedMatches {
 		if _, err := tx.ExecContext(
 			context.Background(),
 			`INSERT INTO job_fact_matches (job_id, requirement_id, fact_id, score, rationale, coverage_status, created_at, updated_at)
@@ -1645,6 +1660,118 @@ func (s *Store) replaceJobMatches(jobID int64, matches []parsedJobMatch, require
 		_ = s.LogEvent("info", "job match map built")
 	}
 	return s.ListJobFactMatches(jobID)
+}
+
+func selectStoredJobMatches(matches []parsedJobMatch, maxPerRequirement int) []parsedJobMatch {
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].RequirementID != matches[j].RequirementID {
+			return matches[i].RequirementID < matches[j].RequirementID
+		}
+		if coverageRank(matches[i].CoverageStatus) != coverageRank(matches[j].CoverageStatus) {
+			return coverageRank(matches[i].CoverageStatus) > coverageRank(matches[j].CoverageStatus)
+		}
+		return matches[i].Score > matches[j].Score
+	})
+	selected := []parsedJobMatch{}
+	counts := map[int64]int{}
+	weakCounts := map[int64]int{}
+	seen := map[string]bool{}
+	for _, match := range matches {
+		key := fmt.Sprintf("%d|%d", match.RequirementID, match.FactID)
+		if seen[key] {
+			continue
+		}
+		if counts[match.RequirementID] >= maxPerRequirement {
+			continue
+		}
+		if strings.EqualFold(match.CoverageStatus, "weak") {
+			if weakCounts[match.RequirementID] >= 2 {
+				continue
+			}
+			weakCounts[match.RequirementID]++
+		}
+		seen[key] = true
+		counts[match.RequirementID]++
+		selected = append(selected, match)
+	}
+	return selected
+}
+
+func coverageRank(status string) int {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "strong":
+		return 3
+	case "partial":
+		return 2
+	case "weak":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func sanitizeParsedJobMatch(match parsedJobMatch, req JobRequirement, fact factPromptContext) parsedJobMatch {
+	evidenceText := strings.ToLower(strings.Join([]string{
+		fact.FactText,
+		fact.EvidenceQuote,
+		strings.Join(fact.Technologies, " "),
+		fact.SectionHeading,
+		strings.Join(fact.Context, " "),
+	}, " "))
+	if strings.TrimSpace(evidenceText) == "" {
+		return match
+	}
+	overlap := []string{}
+	for _, term := range jobMatchTerms(req.RequirementText, req.Keywords) {
+		if strings.Contains(evidenceText, term) {
+			overlap = append(overlap, term)
+		}
+	}
+	overlap = normalizeStringList(overlap)
+	if !jobMatchOverlapAllowed(req, overlap, evidenceText) {
+		if transferableScore, theme := transferableJobMatchScore(req, evidenceText); transferableScore > 0 {
+			if match.Score > transferableScore || match.Score <= 0 {
+				match.Score = transferableScore
+			}
+			match.CoverageStatus = matchCoverageForScore(match.Score)
+			match.Rationale = "Transferable evidence: " + theme
+			return match
+		}
+		adjacentScore := adjacentJobMatchScore(req, overlap, evidenceText)
+		if adjacentScore <= 0 {
+			match.Score = 0
+			match.CoverageStatus = "gap"
+			match.Rationale = "Rejected generic or missing required technical overlap."
+			return match
+		}
+		if match.Score > adjacentScore {
+			match.Score = adjacentScore
+		}
+		match.CoverageStatus = "weak"
+		match.Rationale = "Adjacent evidence only: " + strings.Join(meaningfulJobOverlapTerms(overlap), ", ")
+		return match
+	}
+	required := requirementRequiredMatchTerms(req)
+	if len(required) > 0 {
+		sanitizedScore := jobMatchScore(req, overlap, evidenceText, 0.32)
+		if match.Score > sanitizedScore {
+			match.Score = sanitizedScore
+		}
+	} else {
+		match.Score = clampScore(match.Score)
+	}
+	switch {
+	case match.Score >= 0.75 && len(meaningfulJobOverlapTerms(overlap)) >= 1:
+		match.CoverageStatus = "strong"
+	case match.Score >= 0.45:
+		match.CoverageStatus = "partial"
+	default:
+		match.CoverageStatus = "weak"
+	}
+	if strings.TrimSpace(match.Rationale) == "" || strings.Contains(strings.ToLower(match.Rationale), "data, time") {
+		match.Rationale = "Evidence overlap: " + strings.Join(meaningfulJobOverlapTerms(overlap), ", ")
+	}
+	return match
 }
 
 func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, requirements []JobRequirement, facts []factPromptContext, claims []CandidateClaim) ([]TailoredBulletDraft, error) {
@@ -1763,7 +1890,6 @@ func (s *Store) replaceBulletDrafts(jobID int64, drafts []parsedBulletDraft, req
 			_ = s.logEventTx(tx, "warning", "bullet draft rejected: no valid same-origin supporting facts for "+originHeading+" text="+draft.DraftText)
 			continue
 		}
-
 		originKey, originBudget := draftOriginBudgetFromOrigin(originHeading, originType)
 		if originBudget > 0 && originCounts[originKey] >= originBudget {
 			_ = s.recordBulletGenerationEventTx(tx, jobID, originHeading, "validation_rejected", "rejected", "origin budget reached", draft.DraftText)
@@ -2685,6 +2811,7 @@ func isIrrelevantJobRequirement(req parsedJobRequirement) bool {
 		"12-month", "12 month", "contract", "max term", "fixed term", "salary", "compensation", "benefit", "leave", "hybrid", "remote", "location", "office",
 		"how to apply", "application process", "submit your application", "recruit", "hiring", "interview", "equal opportunity", "diversity", "background check", "sponsorship",
 		"leading personal injury", "class actions law firm", "about us", "about the company", "company is", "we are a", "we're a", "our client", "we believe", "we are looking for", "based in", "we want people", "right now, your expertise", "in 6 months", "in 12 months", "what your success will look like", "why catapult", "deserves to feel", "redefining", "platform provides", "dedicated team", "immediate care", "critical situations",
+		"favourite sports team", "favorite sports team", "team / department / company", "growth and development of the team", "one of those rare roles", "as close to the edge as you can get",
 		"logo", "linkedin", "promoted by", "responses managed", "profile matches", "is this information helpful", "personalized tips", "top applicant", "retry premium", "people you can reach out", "school alumni", "clicked apply",
 	}
 	for _, marker := range irrelevantMarkers {
@@ -3135,6 +3262,9 @@ func fallbackJobMatches(requirements []JobRequirement, facts []factPromptContext
 		}
 		candidates := []parsedJobMatch{}
 		for _, fact := range facts {
+			if fact.Status != factStatusApproved {
+				continue
+			}
 			factText := strings.ToLower(strings.Join([]string{
 				fact.FactText,
 				fact.EvidenceQuote,
@@ -3148,10 +3278,31 @@ func fallbackJobMatches(requirements []JobRequirement, facts []factPromptContext
 				}
 			}
 			overlap = normalizeStringList(overlap)
-			if len(overlap) == 0 {
+			if !jobMatchOverlapAllowed(req, overlap, factText) {
+				if score, theme := transferableJobMatchScore(req, factText); score > 0 {
+					candidates = append(candidates, parsedJobMatch{
+						RequirementID:  req.ID,
+						FactID:         fact.ID,
+						Score:          score,
+						CoverageStatus: matchCoverageForScore(score),
+						Rationale:      "Transferable evidence: " + theme,
+					})
+					continue
+				}
+				score := adjacentJobMatchScore(req, overlap, factText)
+				if score <= 0 {
+					continue
+				}
+				candidates = append(candidates, parsedJobMatch{
+					RequirementID:  req.ID,
+					FactID:         fact.ID,
+					Score:          score,
+					CoverageStatus: "weak",
+					Rationale:      "Adjacent evidence only: " + strings.Join(meaningfulJobOverlapTerms(overlap), ", "),
+				})
 				continue
 			}
-			score := 0.35 + float64(len(overlap))*0.16
+			score := jobMatchScore(req, overlap, factText, 0.35)
 			status := "partial"
 			if len(overlap) >= 3 || score >= 0.75 {
 				status = "strong"
@@ -3203,10 +3354,31 @@ func fallbackJobMatchesFromClaims(requirements []JobRequirement, claims []claimP
 				}
 			}
 			overlap = normalizeStringList(overlap)
-			if len(overlap) == 0 {
+			if !jobMatchOverlapAllowed(req, overlap, claimText) {
+				if score, theme := transferableJobMatchScore(req, claimText); score > 0 {
+					candidates = append(candidates, parsedJobMatch{
+						RequirementID:  req.ID,
+						FactID:         claim.SourceFactIDs[0],
+						Score:          score,
+						CoverageStatus: matchCoverageForScore(score),
+						Rationale:      "Transferable atom-bank evidence: " + theme + " via " + claim.Label,
+					})
+					continue
+				}
+				score := adjacentJobMatchScore(req, overlap, claimText)
+				if score <= 0 {
+					continue
+				}
+				candidates = append(candidates, parsedJobMatch{
+					RequirementID:  req.ID,
+					FactID:         claim.SourceFactIDs[0],
+					Score:          score,
+					CoverageStatus: "weak",
+					Rationale:      "Adjacent atom-bank overlap: " + strings.Join(meaningfulJobOverlapTerms(overlap), ", "),
+				})
 				continue
 			}
-			score := 0.42 + float64(len(overlap))*0.17 + claimStrengthWeight(claim)
+			score := jobMatchScore(req, overlap, claimText, 0.42) + claimStrengthWeight(claim)
 			status := "partial"
 			if len(overlap) >= 3 || score >= 0.75 {
 				status = "strong"
@@ -3231,6 +3403,319 @@ func fallbackJobMatchesFromClaims(requirements []JobRequirement, claims []claimP
 		matches = append(matches, candidates...)
 	}
 	return matches
+}
+
+func mergeParsedJobMatches(primary []parsedJobMatch, fallback []parsedJobMatch) []parsedJobMatch {
+	merged := append([]parsedJobMatch{}, primary...)
+	indexByKey := map[string]int{}
+	for index, match := range merged {
+		key := fmt.Sprintf("%d|%d", match.RequirementID, match.FactID)
+		indexByKey[key] = index
+	}
+	for _, match := range fallback {
+		key := fmt.Sprintf("%d|%d", match.RequirementID, match.FactID)
+		if existingIndex, ok := indexByKey[key]; ok {
+			if match.Score > merged[existingIndex].Score {
+				merged[existingIndex] = match
+			}
+			continue
+		}
+		indexByKey[key] = len(merged)
+		merged = append(merged, match)
+	}
+	return merged
+}
+
+func jobMatchOverlapAllowed(req JobRequirement, overlap []string, evidenceText string) bool {
+	if len(overlap) == 0 {
+		return false
+	}
+	meaningful := meaningfulJobOverlapTerms(overlap)
+	if len(meaningful) == 0 {
+		return false
+	}
+	required := requirementRequiredMatchTerms(req)
+	if len(required) == 0 {
+		return len(meaningful) >= 1
+	}
+	evidence := strings.ToLower(evidenceText)
+	requiredHits := 0
+	for _, term := range required {
+		if containsString(meaningful, term) || strings.Contains(evidence, term) {
+			requiredHits++
+		}
+	}
+	if len(required) >= 3 {
+		if normalizeRequirementCategory(req.Category) == "nice_to_have" {
+			return requiredHits >= 1
+		}
+		return requiredHits >= 2
+	}
+	return requiredHits >= 1
+}
+
+func transferableJobMatchScore(req JobRequirement, evidenceText string) (float64, string) {
+	reqText := strings.ToLower(strings.Join([]string{req.RequirementText, strings.Join(req.Keywords, " "), req.Category}, " "))
+	evidence := strings.ToLower(evidenceText)
+	category := normalizeRequirementCategory(req.Category)
+
+	if isStreamingRequirement(reqText) {
+		switch {
+		case containsAny(evidence, "kafka", "kinesis", "stream processing", "real-time", "low-latency"):
+			return 0.72, "direct streaming or low-latency data-processing evidence"
+		case containsAny(evidence, "sftp", "ftp", "ingestion", "pipeline", "processing flow", "data transfer"):
+			return 0.50, "data ingestion/pipeline evidence, but not real-time Kafka/Kinesis"
+		case containsAny(evidence, "aws", "docker", "github actions") && containsAny(evidence, "data", "database", "backend", "pipeline"):
+			return 0.42, "cloud/backend data-processing evidence, but missing streaming tools"
+		}
+	}
+
+	if isCloudPlatformRequirement(reqText) {
+		switch {
+		case containsAny(evidence, "aws", "cloud", "serverless", "kubernetes", "terraform", "iac"):
+			return 0.58, "cloud platform evidence"
+		case containsAny(evidence, "docker", "github actions", "compose", "linux", "postgresql", "database-backed", "backend"):
+			return 0.48, "deployment/backend platform evidence, but not full cloud migration"
+		}
+	}
+
+	if isArchitectureRequirement(reqText) {
+		switch {
+		case containsAny(evidence, "architecture", "architected", "designed", "system design"):
+			return 0.70, "backend/system architecture evidence"
+		case containsAny(evidence, "fastapi", "sqlalchemy", "pydantic", "crud", "service modules", "api", "apis", "microservices"):
+			return 0.56, "API/service design evidence"
+		}
+	}
+
+	if isCodeQualityRequirement(reqText) {
+		switch {
+		case containsAny(evidence, "unit test", "unit testing", "integration test", "integration testing", "code review", "code reviews"):
+			return 0.70, "testing or code-review evidence"
+		case containsAny(evidence, "refactored", "reliability", "audit logging", "rbac", "integration workflows", "production backend"):
+			return 0.48, "quality/reliability engineering evidence, but not explicit tests or reviews"
+		}
+	}
+
+	if isDatabaseRequirement(reqText) {
+		switch {
+		case containsAny(evidence, "postgresql", "mysql", "sqlite", "sql", "database", "repository layer", "sqlalchemy"):
+			return 0.66, "relational database and querying evidence"
+		case containsAny(evidence, "data model", "schema", "migration", "alembic"):
+			return 0.56, "database modeling/migration evidence"
+		}
+	}
+
+	if isProductRequirement(reqText) {
+		switch {
+		case containsAny(evidence, "production planning platform", "bookings", "asset scheduling", "planning workflows"):
+			return 0.58, "product-facing workflow/platform delivery evidence"
+		case containsAny(evidence, "login", "registration", "password", "user", "customer", "invited-user"):
+			return 0.46, "user workflow delivery evidence"
+		}
+	}
+
+	if isOwnershipRequirement(reqText) ||
+		(category == "responsibility" && containsAny(reqText, "build", "develop", "deliver")) {
+		switch {
+		case containsAny(evidence, "built and shipped", "built", "shipped", "delivered", "end-to-end", "production backend"):
+			return 0.62, "end-to-end feature or backend delivery evidence"
+		case containsAny(evidence, "developed", "maintained", "implemented"):
+			return 0.52, "software delivery evidence"
+		}
+	}
+
+	if isTroubleshootingRequirement(reqText) {
+		switch {
+		case containsAny(evidence, "refactored", "failure handling", "troubleshoot", "debug", "reliability", "reduced manual intervention"):
+			return 0.56, "troubleshooting/reliability improvement evidence"
+		case containsAny(evidence, "linux automation", "automation scripts", "background workers", "integration workflows"):
+			return 0.48, "automation/cross-system operations evidence"
+		}
+	}
+
+	if isIoTRequirement(reqText) {
+		switch {
+		case containsAny(evidence, "iot", "device", "devices", "hardware", "firmware"):
+			return 0.62, "device/IoT evidence"
+		case containsAny(evidence, "linux", "automation", "monitoring", "configuration"):
+			return 0.34, "systems automation evidence, but not IoT/device-health work"
+		}
+	}
+
+	return 0, ""
+}
+
+func isStreamingRequirement(text string) bool {
+	return containsAny(text, "kafka", "kinesis", "stream processing", "athlete data streams") ||
+		(strings.Contains(text, "real-time") && strings.Contains(text, "data"))
+}
+
+func isCloudPlatformRequirement(text string) bool {
+	return containsAny(text, "cloud-based", "cloud based", "large-scale data processing", "cloud platform", "migrate", "migration", "on-premise")
+}
+
+func isArchitectureRequirement(text string) bool {
+	return containsAny(text, "technical design", "system architecture", "design patterns", "define system") ||
+		(strings.Contains(text, "architecture") && !isDatabaseRequirement(text))
+}
+
+func isCodeQualityRequirement(text string) bool {
+	return containsAny(text, "code reviews", "code quality", "coding standards", "unit testing", "integration testing")
+}
+
+func isDatabaseRequirement(text string) bool {
+	return containsAny(text, "nosql", "relational", "database", "querying") ||
+		(strings.Contains(text, "sql") && strings.Contains(text, "architecture"))
+}
+
+func isProductRequirement(text string) bool {
+	return containsAny(text, "product mindset", "user needs", "customer and product", "delivering impactful")
+}
+
+func isOwnershipRequirement(text string) bool {
+	return containsAny(text, "owning features", "end-to-end", "owning outcomes", "features & initiatives", "build applications", "build applications and services")
+}
+
+func isTroubleshootingRequirement(text string) bool {
+	return containsAny(text, "troubleshooting", "solving complex", "cross-stack", "complex problems", "team productivity")
+}
+
+func isIoTRequirement(text string) bool {
+	return containsAny(text, "iot", "device health", "health and configuration") ||
+		(strings.Contains(text, "devices") && strings.Contains(text, "real-time"))
+}
+
+func matchCoverageForScore(score float64) string {
+	switch {
+	case score >= 0.75:
+		return "strong"
+	case score >= 0.45:
+		return "partial"
+	default:
+		return "weak"
+	}
+}
+
+func containsAny(text string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func adjacentJobMatchScore(req JobRequirement, overlap []string, evidenceText string) float64 {
+	meaningful := meaningfulJobOverlapTerms(overlap)
+	if len(meaningful) == 0 {
+		return 0
+	}
+	required := requirementRequiredMatchTerms(req)
+	if len(required) == 0 {
+		return 0
+	}
+	evidence := strings.ToLower(evidenceText)
+	requiredHits := 0
+	for _, term := range required {
+		if containsString(meaningful, term) || strings.Contains(evidence, term) {
+			requiredHits++
+		}
+	}
+	if requiredHits == 0 {
+		return 0
+	}
+	if normalizeRequirementCategory(req.Category) == "nice_to_have" {
+		return 0.40
+	}
+	if req.Priority == "high" || normalizeRequirementCategory(req.Category) == "must_have" {
+		return 0.34 + minFloat(float64(requiredHits)*0.03, 0.06)
+	}
+	return 0.38
+}
+
+func jobMatchScore(req JobRequirement, overlap []string, evidenceText string, base float64) float64 {
+	meaningful := meaningfulJobOverlapTerms(overlap)
+	score := base + float64(len(meaningful))*0.14
+	required := requirementRequiredMatchTerms(req)
+	if len(required) > 0 {
+		hits := 0
+		evidence := strings.ToLower(evidenceText)
+		for _, term := range required {
+			if containsString(meaningful, term) || strings.Contains(evidence, term) {
+				hits++
+			}
+		}
+		if hits == 0 {
+			score -= 0.25
+		} else {
+			score += float64(hits) * 0.08
+		}
+	}
+	if normalizeRequirementCategory(req.Category) == "nice_to_have" {
+		score = minFloat(score, 0.72)
+	}
+	return clampScore(score)
+}
+
+func meaningfulJobOverlapTerms(overlap []string) []string {
+	terms := []string{}
+	for _, term := range overlap {
+		term = strings.ToLower(strings.TrimSpace(term))
+		if term == "" || isJobStopWord(term) || weakJobMatchTerm(term) {
+			continue
+		}
+		terms = append(terms, term)
+	}
+	return normalizeStringList(terms)
+}
+
+func requirementRequiredMatchTerms(req JobRequirement) []string {
+	lower := strings.ToLower(strings.Join([]string{req.RequirementText, strings.Join(req.Keywords, " ")}, " "))
+	groups := [][]string{
+		{"kafka", "kinesis", "aws", "edge devices", "real-time", "stream processing"},
+		{"iot", "device", "devices", "real-time"},
+		{"cloud", "migration", "on-premise", "aws"},
+		{"microservice", "microservices", "aws", "domain-driven", "ddd"},
+		{"nosql", "relational", "database", "querying", "performance"},
+		{"code review", "code reviews", "code quality", "unit testing", "integration testing", "coding standards"},
+		{"firmware", "hardware", "edge"},
+	}
+	if strings.Contains(lower, "specific technologies") ||
+		strings.Contains(lower, "advantageous but not mandatory") ||
+		strings.Contains(lower, "not mandatory") ||
+		strings.Contains(lower, "our stack") {
+		groups = append([][]string{{"go", "rust", "c#", ".net", "c++", "iac", "iot", "aws"}}, groups...)
+	}
+	for _, group := range groups {
+		matches := []string{}
+		for _, term := range group {
+			if strings.Contains(lower, term) {
+				matches = append(matches, term)
+			}
+		}
+		if len(matches) > 0 {
+			return normalizeStringList(matches)
+		}
+	}
+	return nil
+}
+
+func weakJobMatchTerm(term string) bool {
+	switch strings.ToLower(strings.TrimSpace(term)) {
+	case "app", "apps", "application", "applications", "service", "services", "data", "time", "real", "live",
+		"next", "solution", "solutions", "customer", "product", "mindset", "support", "configuration",
+		"development", "technical", "capability", "high", "degree", "company", "department", "growth",
+		"best", "practice", "practices", "lessons", "learned", "people", "rare", "roles", "closely",
+		"favourite", "sports", "likely", "most", "based", "large", "paving", "leading", "market",
+		"track", "record", "end", "features", "initiatives", "but", "net", "stack", "specific",
+		"user", "users", "delivering", "impactful", "integration", "reliability", "coding", "quality",
+		"ensure", "adherence", "participate", "conduct", "demonstrate", "consistently", "complex",
+		"problems", "solving", "cross", "generation", "migrate", "experiences", "athlete":
+		return true
+	default:
+		return false
+	}
 }
 
 func fallbackBulletDraftsFromClaims(requirements []JobRequirement, matches []JobFactMatch, claims []CandidateClaim) []parsedBulletDraft {
@@ -3370,7 +3855,7 @@ func selectFactsForRequirements(requirements []JobRequirement, facts []factPromp
 		}, " "))
 		score := 0
 		for _, term := range terms {
-			if strings.Contains(text, term) {
+			if strings.Contains(text, term) && !weakJobMatchTerm(term) {
 				score += 3
 			}
 		}
@@ -3499,7 +3984,7 @@ func selectClaimsForRequirements(requirements []JobRequirement, claims []claimPr
 		text := strings.ToLower(claimSearchText(claim))
 		score := 0
 		for _, term := range terms {
-			if strings.Contains(text, term) {
+			if strings.Contains(text, term) && !weakJobMatchTerm(term) {
 				score += 3
 			}
 		}
@@ -4003,6 +4488,13 @@ func clampScore(score float64) float64 {
 		return 1
 	}
 	return score
+}
+
+func minFloat(left float64, right float64) float64 {
+	if left < right {
+		return left
+	}
+	return right
 }
 
 func filterLLMRiskFlags(flags []string) []string {

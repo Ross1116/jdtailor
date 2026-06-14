@@ -2395,6 +2395,106 @@ func TestParseJobRequirementsCleansCatapultNoise(t *testing.T) {
 	}
 }
 
+func TestJobMatchSanitizerBalancesCatapultTransferableEvidence(t *testing.T) {
+	streamReq := JobRequirement{
+		ID:              1,
+		Category:        "must_have",
+		Priority:        "high",
+		RequirementText: "Real-time data processing using technologies like Kafka, Kinesis, AWS, and edge devices",
+		Keywords:        []string{"Kafka", "Kinesis", "AWS", "real-time", "edge devices"},
+	}
+	sftpFact := factPromptContext{
+		ID:           10,
+		FactText:     "actions=refactored; artifact=SFTP/FTP ingestion pipelines; scope=automated processing flows; outcome=improved reliability and reduced manual intervention for data transfers",
+		Technologies: []string{"SFTP", "FTP"},
+	}
+	match := sanitizeParsedJobMatch(parsedJobMatch{RequirementID: 1, FactID: 10, Score: 0.88, CoverageStatus: "strong"}, streamReq, sftpFact)
+	if match.Score < 0.45 || match.Score >= 0.75 || match.CoverageStatus != "partial" {
+		t.Fatalf("stream/SFTP match = %+v, want partial transferable evidence", match)
+	}
+	awsOnlyFact := factPromptContext{
+		ID:           12,
+		FactText:     "experience_years=3+; technologies=AWS, Java, Python",
+		Technologies: []string{"AWS", "Java", "Python"},
+	}
+	match = sanitizeParsedJobMatch(parsedJobMatch{RequirementID: 1, FactID: 12, Score: 0.54, CoverageStatus: "partial"}, streamReq, awsOnlyFact)
+	if match.Score <= 0 || match.Score >= 0.45 || match.CoverageStatus != "weak" {
+		t.Fatalf("stream/AWS-only match = %+v, want weak adjacent evidence", match)
+	}
+
+	iotReq := JobRequirement{
+		ID:              2,
+		Category:        "must_have",
+		Priority:        "high",
+		RequirementText: "Enhance athlete support and customer experiences through IoT capabilities that provide real-time information about device health and configuration",
+		Keywords:        []string{"IoT", "real-time", "device", "configuration"},
+	}
+	linuxFact := factPromptContext{
+		ID:           11,
+		FactText:     "actions=built, supported; artifact=automation scripts and supported Linux-based internal systems; tools=Linux",
+		Technologies: []string{"Linux"},
+	}
+	match = sanitizeParsedJobMatch(parsedJobMatch{RequirementID: 2, FactID: 11, Score: 0.75, CoverageStatus: "strong"}, iotReq, linuxFact)
+	if match.Score <= 0 || match.Score >= 0.45 || match.CoverageStatus != "weak" {
+		t.Fatalf("iot/linux match = %+v, want weak adjacent evidence", match)
+	}
+
+	codeQualityReq := JobRequirement{
+		ID:              3,
+		Category:        "must_have",
+		Priority:        "high",
+		RequirementText: "Participate in code reviews to ensure code quality, adherence to coding standards, and best practices. Conducting unit testing and integration testing to verify functionality and reliability",
+		Keywords:        []string{"code reviews", "code quality", "coding standards", "unit testing", "integration testing", "reliability"},
+	}
+	reliabilityFact := factPromptContext{
+		ID:       13,
+		FactText: "actions=refactored; artifact=SFTP/FTP ingestion pipelines; outcome=improved reliability and reduced manual intervention for data transfers",
+	}
+	match = sanitizeParsedJobMatch(parsedJobMatch{RequirementID: 3, FactID: 13, Score: 0.68, CoverageStatus: "partial"}, codeQualityReq, reliabilityFact)
+	if match.Score < 0.45 || match.Score >= 0.75 || match.CoverageStatus != "partial" {
+		t.Fatalf("code-quality/reliability-only match = %+v, want partial transferable evidence", match)
+	}
+
+	productReq := JobRequirement{
+		ID:              4,
+		Category:        "responsibility",
+		Priority:        "medium",
+		RequirementText: "A customer and product mindset - Understanding of user needs and a focus on delivering impactful solutions",
+		Keywords:        []string{"customer", "product", "user", "delivering", "impactful"},
+	}
+	userFlowFact := factPromptContext{
+		ID:           14,
+		FactText:     "actions=built; artifact=login, registration, forgot password, reset password, and invited-user password setup flows",
+		Technologies: []string{"Go", "Vite"},
+	}
+	match = sanitizeParsedJobMatch(parsedJobMatch{RequirementID: 4, FactID: 14, Score: 0.68, CoverageStatus: "partial"}, productReq, userFlowFact)
+	if match.Score < 0.45 || match.Score >= 0.75 || match.CoverageStatus != "partial" {
+		t.Fatalf("product-mindset/user-flow match = %+v, want partial transferable evidence", match)
+	}
+}
+
+func TestJobMatchSanitizerAllowsOptionalGoEvidenceButCapsScore(t *testing.T) {
+	req := JobRequirement{
+		ID:              1,
+		Category:        "nice_to_have",
+		Priority:        "low",
+		RequirementText: "Experience with the specific technologies in our stack is advantageous but not mandatory. (AWS infrastructure, including IoT, IaC, Go, Rust, C# .Net, C++)",
+		Keywords:        []string{"AWS", "IoT", "IaC", "Go", "Rust", "C#", ".Net", "C++"},
+	}
+	fact := factPromptContext{
+		ID:           12,
+		FactText:     "actions=designed; artifact=custom peer-to-peer transfer protocol; technologies=Go, goroutines, mutexes",
+		Technologies: []string{"Go"},
+	}
+	match := sanitizeParsedJobMatch(parsedJobMatch{RequirementID: 1, FactID: 12, Score: 0.96, CoverageStatus: "strong"}, req, fact)
+	if match.Score <= 0 || match.CoverageStatus == "gap" {
+		t.Fatalf("go optional match rejected: %+v", match)
+	}
+	if match.Score > 0.72 || match.CoverageStatus == "strong" {
+		t.Fatalf("go optional match = %+v, want capped non-strong score", match)
+	}
+}
+
 func stringListContains(values []string, needle string) bool {
 	for _, value := range values {
 		if strings.EqualFold(value, needle) {

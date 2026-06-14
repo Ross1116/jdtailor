@@ -312,7 +312,9 @@ func buildFitAnalysis(jobID int64, requirements []JobRequirement, matches []JobF
 	weighted := 0.0
 	highPriorityTotal := 0
 	highPriorityCovered := 0
+	highPrioritySupported := 0
 	partialNeeds := 0
+	adjacentNeeds := 0
 	riskyEvidence := 0
 	for _, req := range requirements {
 		weight := 1.0
@@ -351,13 +353,26 @@ func buildFitAnalysis(jobID int64, requirements []JobRequirement, matches []JobF
 			gapLevel = "covered"
 			if req.Priority == "high" {
 				highPriorityCovered++
+				highPrioritySupported++
 			}
 			strengths = append(strengths, "Strong evidence for: "+req.RequirementText)
 		} else if bestScore >= 0.45 {
 			gapLevel = "partial"
 			partialNeeds++
+			if req.Priority == "high" {
+				highPrioritySupported++
+			}
 			if req.Priority == "high" || req.Category == "must_have" {
 				gaps = append(gaps, "Partial evidence only: "+req.RequirementText)
+			}
+		} else if bestScore >= 0.32 {
+			gapLevel = "adjacent"
+			adjacentNeeds++
+			if req.Priority == "high" {
+				highPrioritySupported++
+			}
+			if req.Priority == "high" || req.Category == "must_have" {
+				gaps = append(gaps, "Adjacent transferable evidence only: "+req.RequirementText)
 			}
 		} else {
 			gapPrefix := "Missing evidence for"
@@ -388,30 +403,36 @@ func buildFitAnalysis(jobID int64, requirements []JobRequirement, matches []JobF
 	if total > 0 {
 		score = int((weighted / total) * 100)
 	}
-	recommendation := fitRecommendation(score, highPriorityTotal, highPriorityCovered)
+	recommendation := fitRecommendation(score, highPriorityTotal, highPriorityCovered, highPrioritySupported)
 	return JobFitAnalysis{
 		JobID:          jobID,
 		OverallScore:   score,
 		Recommendation: recommendation,
 		Strengths:      normalizeStringList(strengths),
 		CriticalGaps:   normalizeStringList(gaps),
-		RealityCheck:   fitRealityCheck(score, len(requirements), highPriorityTotal, highPriorityCovered, partialNeeds, riskyEvidence),
+		RealityCheck:   fitRealityCheck(score, len(requirements), highPriorityTotal, highPriorityCovered, highPrioritySupported, partialNeeds, adjacentNeeds, riskyEvidence),
 		Analysis:       analysis,
 	}
 }
 
-func fitRecommendation(score int, highPriorityTotal int, highPriorityCovered int) string {
-	highCoverage := 1.0
+func fitRecommendation(score int, highPriorityTotal int, highPriorityCovered int, highPrioritySupported int) string {
+	strongCoverage := 1.0
+	supportedCoverage := 1.0
 	if highPriorityTotal > 0 {
-		highCoverage = float64(highPriorityCovered) / float64(highPriorityTotal)
+		strongCoverage = float64(highPriorityCovered) / float64(highPriorityTotal)
+		supportedCoverage = float64(highPrioritySupported) / float64(highPriorityTotal)
 	}
 	recommendation := "Look Elsewhere"
 	switch {
-	case score >= 72 && highCoverage >= 0.6:
+	case score >= 72 && strongCoverage >= 0.6:
 		recommendation = "Apply"
-	case score >= 58 && highCoverage >= 0.4:
+	case score >= 58 && strongCoverage >= 0.4:
 		recommendation = "Apply With Caution"
-	case score >= 38:
+	case score >= 58 && supportedCoverage >= 0.65:
+		recommendation = "Apply, But Don't Over-Prioritise"
+	case score >= 48 && supportedCoverage >= 0.5:
+		recommendation = "Apply With Caution"
+	case score >= 32:
 		recommendation = "Upskill First"
 	default:
 		recommendation = "Look Elsewhere"
@@ -419,19 +440,22 @@ func fitRecommendation(score int, highPriorityTotal int, highPriorityCovered int
 	return recommendation
 }
 
-func fitRealityCheck(score int, requirementCount int, highPriorityTotal int, highPriorityCovered int, partialNeeds int, riskyEvidence int) string {
-	base := fmt.Sprintf("%d%% evidence-backed fit across %d parsed requirements; %d/%d high-priority needs are strongly covered.", score, requirementCount, highPriorityCovered, highPriorityTotal)
+func fitRealityCheck(score int, requirementCount int, highPriorityTotal int, highPriorityCovered int, highPrioritySupported int, partialNeeds int, adjacentNeeds int, riskyEvidence int) string {
+	base := fmt.Sprintf("%d%% evidence-backed fit across %d parsed requirements; %d/%d high-priority needs are strongly covered; %d/%d have at least adjacent support.", score, requirementCount, highPriorityCovered, highPriorityTotal, highPrioritySupported, highPriorityTotal)
 	if riskyEvidence > 0 {
 		base += fmt.Sprintf(" %d match(es) rely on unapproved or rejected evidence, so treat those claims cautiously.", riskyEvidence)
 	}
 	if partialNeeds > 0 {
 		base += fmt.Sprintf(" %d requirement(s) are only partially supported.", partialNeeds)
 	}
+	if adjacentNeeds > 0 {
+		base += fmt.Sprintf(" %d requirement(s) have adjacent transferable evidence.", adjacentNeeds)
+	}
 	switch {
 	case score >= 75:
 		return base + " Competitive application if the resume leads with the strongest matching evidence and avoids unsupported extras."
 	case score >= 58:
-		return base + " Plausible but not dominant; apply only with tight tailoring around the covered requirements."
+		return base + " High-upside stretch: plausible if the resume leads with adjacent cloud/data/product systems evidence and stays honest about senior cloud, streaming, IoT, and hardware gaps."
 	case score >= 38:
 		return base + " Interview odds are weak unless the role is flexible or the resume can credibly close the critical gaps."
 	default:
