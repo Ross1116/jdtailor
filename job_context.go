@@ -230,7 +230,7 @@ func (s *Store) ListJobDescriptions() ([]JobDescription, error) {
 }
 
 func (s *Store) CreateJobDescription(input CreateJobDescriptionInput) (JobDescription, error) {
-	rawText := strings.TrimSpace(input.RawText)
+	rawText := normalizePastedText(input.RawText)
 	if rawText == "" {
 		return JobDescription{}, errors.New("job description text is required")
 	}
@@ -272,7 +272,7 @@ func (s *Store) UpdateJobDescription(input UpdateJobDescriptionInput) (JobDescri
 	if input.ID <= 0 {
 		return JobDescription{}, errors.New("job id is required")
 	}
-	rawText := strings.TrimSpace(input.RawText)
+	rawText := normalizePastedText(input.RawText)
 	if rawText == "" {
 		return JobDescription{}, errors.New("job description text is required")
 	}
@@ -332,22 +332,24 @@ Parse the pasted job description into resume-tailoring requirements.
 {"requirements":[{"category":"must_have|responsibility|nice_to_have|domain|seniority","requirement_text":"","keywords":[],"priority":"high|medium|low","source_quote":""}]}
 
 # Keep
-- Technical skills, tools, languages, frameworks, databases, cloud platforms.
-- Architecture and delivery expectations: distributed systems, security, observability, resilience, DevSecOps, testing, data models.
-- Concrete responsibilities that a resume bullet can support.
-- Seniority signals only when they imply experience depth, leadership, mentoring, influence, or years.
+- Technical skills, tools, languages, frameworks, databases, cloud platforms, and required architecture patterns.
+- Concrete engineering responsibilities that a resume bullet can support: build, design, migrate, test, own, troubleshoot, mentor, integrate.
+- Seniority signals only when they imply experience depth, technical leadership, mentoring, influence, or years.
 - Domain requirements only when the JD explicitly asks for domain experience/background/knowledge.
 
 # Reject
 - LinkedIn/page chrome: logos, promoted text, profile match banners, Premium upsells, alumni/people panels, "helpful" prompts.
 - Company/about-us blurbs, generic mission statements, benefits, salary, location, contract duration, application instructions.
-- Recruiter/poster profile headlines, role title rows, company mission paragraphs, and employer product blurbs.
+- Recruiter/poster profile headlines, role title rows, company mission paragraphs, employer product blurbs, and "why join us" sections.
 - Role-title-only metadata such as "Software Engineer".
-- Generic soft skills unless concrete and evidence-backed: stakeholder management, mentoring, leadership, cross-functional delivery.
+- Generic soft skills unless tied to concrete engineering work: communication, passion, mindset, openness, team player, curiosity.
+- Success timeline sections such as "in 6 months" or "in 12 months" unless they introduce a new hard requirement.
+- Optional stack lists should be category "nice_to_have" and priority "low", not "must_have".
 
 # Quality bar
-- Return 8 to 16 highest-value requirements at most.
+- Return 6 to 12 highest-value requirements at most.
 - Make each requirement atomic: one skill/responsibility cluster per item.
+- Remove decorative heading prefixes. For "Live Data Stream Processing: Dive into real-time processing using Kafka", output "Real-time data processing using Kafka".
 - `+"`source_quote`"+` must be an exact quote from <job_description>.
 - `+"`keywords`"+` should contain 2 to 8 matching terms, favoring tools and domain-specific nouns.
 - Do not invent requirements not stated in the JD.
@@ -379,6 +381,7 @@ Parse the pasted job description into resume-tailoring requirements.
 		}
 		_ = s.LogEvent("warning", "job requirements used local fallback: "+err.Error())
 	}
+	parsed = mergeParsedJobRequirements(parsed, fallbackJobRequirements(job.RawText))
 	requirements, err := s.replaceJobRequirements(job, parsed)
 	if err != nil {
 		return nil, err
@@ -683,6 +686,8 @@ func buildBulletOriginGroups(requirements []JobRequirement, matches []JobFactMat
 		}
 	}
 
+	enrichBulletOriginGroupsWithOriginClaims(groupsByOrigin, claims, factsByID)
+
 	groups := []bulletOriginGroup{}
 	for _, group := range groupsByOrigin {
 		if len(group.Requirements) == 0 || len(group.Facts) == 0 || len(group.Claims) == 0 {
@@ -703,6 +708,27 @@ func buildBulletOriginGroups(requirements []JobRequirement, matches []JobFactMat
 	return groups
 }
 
+func enrichBulletOriginGroupsWithOriginClaims(groupsByOrigin map[string]*bulletOriginGroup, claims []CandidateClaim, factsByID map[int64]factPromptContext) {
+	for _, group := range groupsByOrigin {
+		for _, claim := range claims {
+			if !claimAllowedForDrafts(claim) || len(claim.SourceFactIDs) == 0 {
+				continue
+			}
+			if !claimAllowedForOriginDraft(claim, group.OriginHeading, group.OriginType, factsByID) {
+				continue
+			}
+			group.Claims = appendUniqueClaim(group.Claims, claim)
+			for _, factID := range claim.SourceFactIDs {
+				fact, ok := factsByID[factID]
+				if !ok || !sameOrigin(fact.SectionHeading, fact.SectionType, group.OriginHeading, group.OriginType) {
+					continue
+				}
+				group.Facts = appendUniqueFact(group.Facts, fact)
+			}
+		}
+	}
+}
+
 func buildEvidencePackets(group bulletOriginGroup) []evidencePacket {
 	reqIDs := []int64{}
 	for _, req := range group.Requirements {
@@ -717,27 +743,28 @@ func buildEvidencePackets(group bulletOriginGroup) []evidencePacket {
 		if len(claim.SourceFactIDs) == 0 {
 			continue
 		}
-		theme := inferClaimValueTheme(claim)
-		packet := packetsByTheme[theme]
-		if packet == nil {
-			packet = &evidencePacket{
-				ID:             int64(len(packetsByTheme) + 1),
-				OriginHeading:  group.OriginHeading,
-				OriginType:     group.OriginType,
-				ValueTheme:     theme,
-				RequirementIDs: reqIDs,
-				Atoms:          map[string][]string{},
+		for _, theme := range inferClaimValueThemes(claim) {
+			packet := packetsByTheme[theme]
+			if packet == nil {
+				packet = &evidencePacket{
+					ID:             int64(len(packetsByTheme) + 1),
+					OriginHeading:  group.OriginHeading,
+					OriginType:     group.OriginType,
+					ValueTheme:     theme,
+					RequirementIDs: reqIDs,
+					Atoms:          map[string][]string{},
+				}
+				packetsByTheme[theme] = packet
 			}
-			packetsByTheme[theme] = packet
-		}
-		packet.Claims = append(packet.Claims, claimPromptContextFromCandidate(claim))
-		appendPacketAtoms(packet, claim)
-		for _, factID := range claim.SourceFactIDs {
-			fact, ok := factsByID[factID]
-			if !ok {
-				continue
+			packet.Claims = append(packet.Claims, claimPromptContextFromCandidate(claim))
+			appendPacketAtoms(packet, claim)
+			for _, factID := range claim.SourceFactIDs {
+				fact, ok := factsByID[factID]
+				if !ok {
+					continue
+				}
+				packet.Facts = appendUniqueFact(packet.Facts, fact)
 			}
-			packet.Facts = appendUniqueFact(packet.Facts, fact)
 		}
 	}
 	packets := []evidencePacket{}
@@ -777,6 +804,14 @@ func appendPacketAtoms(packet *evidencePacket, claim CandidateClaim) {
 }
 
 func inferClaimValueTheme(claim CandidateClaim) string {
+	themes := inferClaimValueThemes(claim)
+	if len(themes) == 0 {
+		return "engineering_delivery"
+	}
+	return themes[0]
+}
+
+func inferClaimValueThemes(claim CandidateClaim) []string {
 	text := strings.ToLower(strings.Join([]string{
 		claim.ClaimText,
 		strings.Join(claim.Actions, " "),
@@ -786,22 +821,29 @@ func inferClaimValueTheme(claim CandidateClaim) string {
 		strings.Join(claim.Scope, " "),
 		strings.Join(claim.Outcomes, " "),
 	}, " "))
-	switch {
-	case strings.Contains(text, "audit") || strings.Contains(text, "rbac") || strings.Contains(text, "access") || strings.Contains(text, "security") || strings.Contains(text, "integrity"):
-		return "security_traceability"
-	case strings.Contains(text, "ai") || strings.Contains(text, "llm") || strings.Contains(text, "extract") || strings.Contains(text, "token") || strings.Contains(text, "automation"):
-		return "automation_ai"
-	case strings.Contains(text, "react") || strings.Contains(text, "ui") || strings.Contains(text, "frontend") || strings.Contains(text, "dashboard"):
-		return "frontend_product"
-	case strings.Contains(text, "architecture") || strings.Contains(text, "design") || strings.Contains(text, "data model") || strings.Contains(text, "maintainable"):
-		return "technical_design"
-	case strings.Contains(text, "debug") || strings.Contains(text, "reliability") || strings.Contains(text, "observability") || strings.Contains(text, "validation") || strings.Contains(text, "recovery"):
-		return "reliability_quality"
-	case strings.Contains(text, "booking") || strings.Contains(text, "scheduling") || strings.Contains(text, "workflow") || strings.Contains(text, "api") || strings.Contains(text, "backend") || strings.Contains(text, "platform"):
-		return "product_platform_delivery"
-	default:
-		return "engineering_delivery"
+	themes := []string{}
+	if strings.Contains(text, "booking") || strings.Contains(text, "scheduling") || strings.Contains(text, "workflow") || strings.Contains(text, "api") || strings.Contains(text, "backend") || strings.Contains(text, "platform") || strings.Contains(text, "shipped") {
+		themes = append(themes, "product_platform_delivery")
 	}
+	if strings.Contains(text, "architecture") || strings.Contains(text, "design") || strings.Contains(text, "data model") || strings.Contains(text, "maintainable") || strings.Contains(text, "service") {
+		themes = append(themes, "technical_design")
+	}
+	if strings.Contains(text, "audit") || strings.Contains(text, "rbac") || strings.Contains(text, "access") || strings.Contains(text, "security") || strings.Contains(text, "integrity") || strings.Contains(text, "traceability") {
+		themes = append(themes, "security_traceability")
+	}
+	if strings.Contains(text, "debug") || strings.Contains(text, "reliability") || strings.Contains(text, "observability") || strings.Contains(text, "validation") || strings.Contains(text, "recovery") {
+		themes = append(themes, "reliability_quality")
+	}
+	if strings.Contains(text, "ai") || strings.Contains(text, "llm") || strings.Contains(text, "extract") || strings.Contains(text, "token") || strings.Contains(text, "automation") {
+		themes = append(themes, "automation_ai")
+	}
+	if strings.Contains(text, "react") || strings.Contains(text, "ui") || strings.Contains(text, "frontend") || strings.Contains(text, "dashboard") {
+		themes = append(themes, "frontend_product")
+	}
+	if len(themes) == 0 {
+		themes = append(themes, "engineering_delivery")
+	}
+	return normalizeStringList(themes)
 }
 
 func valueThemeOrder(theme string) int {
@@ -906,6 +948,7 @@ Generate the strongest resume-worthy bullet suggestions for this origin only.
 The JD requirements are prioritization context, not a one-to-one checklist.
 Do not create a bullet just because a requirement has keyword overlap.
 Only write bullets that would be valuable on a real software engineering resume.
+The final set should read like a coherent resume section, not repeated variants of the closest JD requirement.
 
 # Locked origin
 origin_heading: %s
@@ -937,6 +980,7 @@ Return at most %d drafts.
 - Prefer one bullet per evidence packet; skip packets that do not produce a strong human resume insight.
 - A bullet does not need to perfectly satisfy a high-priority requirement if it is still one of the strongest same-origin resume bullets.
 - Do not create one bullet per requirement. Create only the strongest bullets for this origin.
+- Prefer story diversity over exact JD mirroring: one product/platform bullet, one security/reliability/quality bullet, one automation/frontend/architecture bullet when evidence supports those lanes.
 
 # Bullet style
 - Start each draft_text with a strong past-tense action verb, no leading hyphen.
@@ -946,6 +990,7 @@ Return at most %d drafts.
 - Use JD keywords only as prioritization and wording cues; the bullet must be built from candidate claim/fact atoms.
 - Each bullet should make clear what real value was created: reliability, traceability, validation, delivery breadth, reduced manual work, safer access, faster debugging, or another supported outcome.
 - Do not stuff unrelated facts together. If atoms do not naturally support one insight, write a narrower bullet.
+- Do not repeat the same primary technology, artifact, or topic across drafts. If one draft mentions FastAPI/PostgreSQL/backend APIs, other drafts should focus on different evidenced value such as auditability, access control, maintainability, AI workflow, frontend work, or architecture.
 - Write like a practical engineer, not a marketing page.
 - Avoid inflated resume cliches.
 - Avoid generic tool-list bullets.
@@ -1439,11 +1484,15 @@ func (s *Store) autoSelectDuplicate(jobID int64, draft TailoredBulletDraft, sele
 		if !sameOrigin(draft.OriginHeading, draft.OriginType, existing.OriginHeading, existing.OriginType) {
 			continue
 		}
-		if normalizeValueTheme(draft.ValueTheme) == normalizeValueTheme(existing.ValueTheme) {
-			_ = s.recordBulletGenerationEvent(jobID, draft.OriginHeading, "selection_skipped", "duplicate", "same value theme", draft.DraftText)
+		local := jaccardScore(similarityTokens(draft.DraftText), similarityTokens(existing.DraftText))
+		if normalizeValueTheme(draft.ValueTheme) == normalizeValueTheme(existing.ValueTheme) && local >= 0.55 {
+			_ = s.recordBulletGenerationEvent(jobID, draft.OriginHeading, "selection_skipped", "duplicate", fmt.Sprintf("same theme similarity %.0f%%", local*100), draft.DraftText)
 			return true
 		}
-		local := jaccardScore(similarityTokens(draft.DraftText), similarityTokens(existing.DraftText))
+		if storyFamiliesTooSimilar(bulletStoryFamilies(draft.DraftText), bulletStoryFamilies(existing.DraftText)) && local >= 0.34 {
+			_ = s.recordBulletGenerationEvent(jobID, draft.OriginHeading, "selection_skipped", "duplicate", "same story family", draft.DraftText)
+			return true
+		}
 		if local >= 0.68 {
 			_ = s.recordBulletGenerationEvent(jobID, draft.OriginHeading, "selection_skipped", "duplicate", fmt.Sprintf("local similarity %.0f%%", local*100), draft.DraftText)
 			return true
@@ -1833,6 +1882,7 @@ type draftSemanticRef struct {
 	OriginHeading string
 	OriginType    string
 	ValueTheme    string
+	StoryFamilies []string
 	Text          string
 	ClaimIDs      []int64
 	FactIDs       []int64
@@ -1843,6 +1893,7 @@ func draftRefFromParsed(draft parsedBulletDraft, claimIDs []int64, factIDs []int
 		OriginHeading: draft.OriginHeading,
 		OriginType:    draft.OriginType,
 		ValueTheme:    normalizeValueTheme(draft.ValueTheme),
+		StoryFamilies: bulletStoryFamilies(draft.DraftText),
 		Text:          draft.DraftText,
 		ClaimIDs:      uniqueInt64s(claimIDs),
 		FactIDs:       uniqueInt64s(factIDs),
@@ -1856,15 +1907,65 @@ func duplicateAcceptedDraft(draft parsedBulletDraft, claimIDs []int64, factIDs [
 		if !sameOrigin(ref.OriginHeading, ref.OriginType, other.OriginHeading, other.OriginType) {
 			continue
 		}
+		overlap := jaccardScore(refTokens, similarityTokens(strings.Join([]string{other.ValueTheme, other.Text}, " ")))
 		if normalizeValueTheme(ref.ValueTheme) == normalizeValueTheme(other.ValueTheme) {
-			if int64OverlapCount(ref.ClaimIDs, other.ClaimIDs) > 0 || int64OverlapCount(ref.FactIDs, other.FactIDs) > 0 {
+			if overlap >= 0.62 && (int64OverlapCount(ref.ClaimIDs, other.ClaimIDs) > 0 || int64OverlapCount(ref.FactIDs, other.FactIDs) > 0) {
 				return true
 			}
 		}
-		overlap := jaccardScore(refTokens, similarityTokens(strings.Join([]string{other.ValueTheme, other.Text}, " ")))
+		if storyFamiliesTooSimilar(ref.StoryFamilies, other.StoryFamilies) && overlap >= 0.38 {
+			return true
+		}
 		if overlap >= 0.72 && (int64OverlapCount(ref.ClaimIDs, other.ClaimIDs) > 0 || int64OverlapCount(ref.FactIDs, other.FactIDs) > 0) {
 			return true
 		}
+	}
+	return false
+}
+
+func bulletStoryFamilies(text string) []string {
+	lower := strings.ToLower(text)
+	families := []string{}
+	if strings.Contains(lower, "fastapi") || strings.Contains(lower, "postgresql") || strings.Contains(lower, "backend") || strings.Contains(lower, "api") || strings.Contains(lower, "apis") {
+		families = append(families, "backend_api")
+	}
+	if strings.Contains(lower, "booking") || strings.Contains(lower, "scheduling") || strings.Contains(lower, "planning") || strings.Contains(lower, "programme") || strings.Contains(lower, "upload") {
+		families = append(families, "workflow_delivery")
+	}
+	if strings.Contains(lower, "rbac") || strings.Contains(lower, "access control") || strings.Contains(lower, "permission") {
+		families = append(families, "access_control")
+	}
+	if strings.Contains(lower, "audit") || strings.Contains(lower, "traceability") || strings.Contains(lower, "data changes") || strings.Contains(lower, "integrity") {
+		families = append(families, "audit_traceability")
+	}
+	if strings.Contains(lower, "react") || strings.Contains(lower, "typescript") || strings.Contains(lower, "frontend") || strings.Contains(lower, "ui") {
+		families = append(families, "frontend_ui")
+	}
+	if strings.Contains(lower, "ai") || strings.Contains(lower, "llm") || strings.Contains(lower, "extraction") || strings.Contains(lower, "token") {
+		families = append(families, "ai_workflows")
+	}
+	if strings.Contains(lower, "architecture") || strings.Contains(lower, "data model") || strings.Contains(lower, "service design") || strings.Contains(lower, "maintainable") {
+		families = append(families, "architecture_quality")
+	}
+	return normalizeStringList(families)
+}
+
+func storyFamiliesTooSimilar(left []string, right []string) bool {
+	if len(left) == 0 || len(right) == 0 {
+		return false
+	}
+	overlap := intStringOverlapCount(left, right)
+	if overlap == 0 {
+		return false
+	}
+	if overlap >= minInt(len(left), len(right)) {
+		return true
+	}
+	if containsString(left, "backend_api") && containsString(right, "backend_api") &&
+		(containsString(left, "workflow_delivery") == containsString(right, "workflow_delivery") ||
+			containsString(left, "access_control") == containsString(right, "access_control") ||
+			containsString(left, "audit_traceability") == containsString(right, "audit_traceability")) {
+		return true
 	}
 	return false
 }
@@ -1978,6 +2079,29 @@ func int64OverlapCount(left []int64, right []int64) int {
 	return count
 }
 
+func intStringOverlapCount(left []string, right []string) int {
+	seen := map[string]bool{}
+	for _, value := range left {
+		seen[value] = true
+	}
+	count := 0
+	for _, value := range right {
+		if seen[value] {
+			count++
+		}
+	}
+	return count
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func parseJobRequirements(text string) ([]parsedJobRequirement, error) {
 	var parsed parsedJobRequirementsResponse
 	if err := parseJSONObject(text, &parsed); err != nil {
@@ -1991,8 +2115,7 @@ func parseJobRequirements(text string) ([]parsedJobRequirement, error) {
 		if strings.TrimSpace(req.RequirementText) == "" || strings.TrimSpace(req.SourceQuote) == "" {
 			return nil, errors.New("every requirement must include requirement_text and source_quote")
 		}
-		req.RequirementText = strings.TrimSpace(req.RequirementText)
-		req.SourceQuote = strings.TrimSpace(req.SourceQuote)
+		req = normalizeParsedJobRequirement(req)
 		if isIrrelevantJobRequirement(req) {
 			continue
 		}
@@ -2005,6 +2128,82 @@ func parseJobRequirements(text string) ([]parsedJobRequirement, error) {
 		filtered = filtered[:16]
 	}
 	return filtered, nil
+}
+
+func normalizeParsedJobRequirement(req parsedJobRequirement) parsedJobRequirement {
+	req.RequirementText = normalizeRequirementSentence(req.RequirementText)
+	req.SourceQuote = strings.TrimSpace(req.SourceQuote)
+	req.Keywords = extractJobKeywords(strings.Join([]string{req.RequirementText, strings.Join(req.Keywords, " ")}, " "))
+	lower := strings.ToLower(strings.Join([]string{req.RequirementText, req.SourceQuote}, " "))
+	if strings.Contains(lower, "advantageous but not mandatory") ||
+		strings.Contains(lower, "not mandatory") ||
+		strings.Contains(lower, "nice to have") ||
+		strings.Contains(lower, "preferred") ||
+		strings.Contains(lower, "bonus") {
+		req.Category = "nice_to_have"
+		req.Priority = "low"
+	}
+	if strings.Contains(lower, "mentor") || strings.Contains(lower, "mentoring") || strings.Contains(lower, "knowledge sharing") {
+		req.Category = "seniority"
+		if strings.TrimSpace(req.Priority) == "" || req.Priority == "high" {
+			req.Priority = "medium"
+		}
+	}
+	return req
+}
+
+func normalizeRequirementSentence(text string) string {
+	text = cleanJobDetailLine(normalizePastedText(text))
+	text = strings.TrimSuffix(text, ".")
+	if before, after, ok := strings.Cut(text, ":"); ok {
+		prefix := strings.ToLower(strings.TrimSpace(before))
+		if len(strings.Fields(prefix)) <= 6 && requirementHeadingPrefix(prefix) {
+			text = strings.TrimSpace(after)
+		}
+	}
+	replacements := []struct {
+		old string
+		new string
+	}{
+		{"Dive into the world of real-time data processing using", "Real-time data processing using"},
+		{"Harness the power of the cloud for", "Cloud-based"},
+		{"Join the mission to enhance", "Enhance"},
+		{"Be a key driver in defining", "Define"},
+		{"Contributing to", "Contribute to"},
+		{"Participating in", "Participate in"},
+		{"Conducting", "Conduct"},
+	}
+	for _, replacement := range replacements {
+		if strings.HasPrefix(text, replacement.old) {
+			text = replacement.new + strings.TrimPrefix(text, replacement.old)
+		}
+	}
+	return strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+}
+
+func requirementHeadingPrefix(prefix string) bool {
+	for _, marker := range []string{
+		"develop high-quality software",
+		"technical design and architecture",
+		"collaboration and communication",
+		"problem solving and troubleshooting",
+		"code reviews and quality",
+		"mentoring and knowledge sharing",
+		"continuous learning and skill development",
+		"adherence to best practices and standards",
+		"live data stream processing",
+		"cloud-based data processing",
+		"iot capabilities for enhanced experiences",
+		"cloud platform migration",
+		"integrate with firmware and hardware",
+		"scaling",
+		"ai",
+	} {
+		if prefix == marker {
+			return true
+		}
+	}
+	return false
 }
 
 func draftOriginBudgetFromOrigin(originHeading string, originType string) (string, int) {
@@ -2476,10 +2675,16 @@ func isIrrelevantJobRequirement(req parsedJobRequirement) bool {
 	if isJobBoilerplateLine(requirementText) || isJobBoilerplateLine(sourceQuote) {
 		return true
 	}
+	if looksLikeEmployerDescription(requirementText) || looksLikeEmployerDescription(sourceQuote) {
+		return true
+	}
+	if isPureSoftSkillRequirement(requirementText) {
+		return true
+	}
 	irrelevantMarkers := []string{
 		"12-month", "12 month", "contract", "max term", "fixed term", "salary", "compensation", "benefit", "leave", "hybrid", "remote", "location", "office",
 		"how to apply", "application process", "submit your application", "recruit", "hiring", "interview", "equal opportunity", "diversity", "background check", "sponsorship",
-		"leading personal injury", "class actions law firm", "about us", "about the company", "company is", "we are a", "we're a", "our client", "we believe", "deserves to feel", "redefining", "platform provides", "dedicated team", "immediate care", "critical situations",
+		"leading personal injury", "class actions law firm", "about us", "about the company", "company is", "we are a", "we're a", "our client", "we believe", "we are looking for", "based in", "we want people", "right now, your expertise", "in 6 months", "in 12 months", "what your success will look like", "why catapult", "deserves to feel", "redefining", "platform provides", "dedicated team", "immediate care", "critical situations",
 		"logo", "linkedin", "promoted by", "responses managed", "profile matches", "is this information helpful", "personalized tips", "top applicant", "retry premium", "people you can reach out", "school alumni", "clicked apply",
 	}
 	for _, marker := range irrelevantMarkers {
@@ -2505,6 +2710,59 @@ func isIrrelevantJobRequirement(req parsedJobRequirement) bool {
 	return false
 }
 
+func looksLikeEmployerDescription(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return true
+	}
+	companyMarkers := []string{
+		" is a ",
+		" is building ",
+		"we work with ",
+		"we provide ",
+		"we deliver ",
+		"our solutions ",
+		"with a mission ",
+		"empowers professional teams",
+		"every decision is an opportunity",
+		"future of sports performance",
+	}
+	for _, marker := range companyMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	if strings.HasPrefix(lower, "catapult ") && !hasCandidateRequirementCue(lower) {
+		return true
+	}
+	return false
+}
+
+func hasCandidateRequirementCue(lower string) bool {
+	for _, cue := range []string{"experience", "proficiency", "understanding", "track record", "build", "design", "develop", "own", "test", "mentor", "migrate", "integrate", "troubleshoot"} {
+		if strings.Contains(lower, cue) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPureSoftSkillRequirement(text string) bool {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if lower == "" {
+		return true
+	}
+	if strings.Contains(lower, "collaborative team player") ||
+		strings.Contains(lower, "verbal and written communication") ||
+		strings.Contains(lower, "positive and curious mindset") ||
+		strings.Contains(lower, "can-do attitude") ||
+		strings.HasPrefix(lower, "a passion for educating") ||
+		strings.HasPrefix(lower, "an appetite for using/learning") {
+		return true
+	}
+	return false
+}
+
 func hasStrictTailorableRequirementSignal(text string, keywords []string) bool {
 	if isJobBoilerplateLine(text) {
 		return false
@@ -2512,19 +2770,21 @@ func hasStrictTailorableRequirementSignal(text string, keywords []string) bool {
 	lower := strings.ToLower(strings.Join(append([]string{text}, keywords...), " "))
 	for _, signal := range []string{
 		"experience", "hands-on", "strong", "deep", "knowledge", "understanding", "programming", "skills",
-		"design ", "design and", "build ", "build and", "develop", "deliver", "modernis", "test", "support ",
+		"exposure", "regulated", "healthcare", "pharma", "medical devices",
+		"track record", "owning", "own ", "full-stack", "full stack",
+		"design ", "design and", "build ", "build and", "develop", "deliver", "modernis", "test", "testing", "support ",
 		"architecture", "api", "apis", "data ingestion", "high-concurrency", "dashboard", "dashboards",
-		"workflow", "workflows", "rag", "retrieval", "chunking", "metadata filtering", "model context protocol", "evaluation framework",
-		"cloud", "serverless", "event-driven", "distributed", "scalable", "resilience", "observability", "security",
+		"workflow", "workflows", "real-time", "low-latency", "stream processing", "rag", "retrieval", "chunking", "metadata filtering", "model context protocol", "evaluation framework",
+		"cloud", "serverless", "event-driven", "distributed", "scalable", "resilience", "observability", "security", "firmware", "hardware",
 		"networking", "identity", "database", "nosql", "data model", "data models", "schema",
 		"devsecops", "agile", "solid", "containers", "messaging", "queues", "topics", "stakeholder", "mentor",
-		"engineering practices", "technical excellence",
+		"engineering practices", "technical excellence", "microservice", "domain-driven",
 	} {
 		if strings.Contains(lower, signal) {
 			return true
 		}
 	}
-	for _, tech := range []string{"fastapi", "postgresql", "react", "next.js", "typescript", "javascript", "python", "golang", "java", "spring", "mysql", "node.js", "node", "azure", "cosmos db", "aws", "gcp", "docker", "kubernetes", "terraform", "redis", "snowflake", "langgraph", "crewai", "mcp", "langsmith", "arize", "phoenix", "cursor", "claudecode", "copilot"} {
+	for _, tech := range []string{"fastapi", "postgresql", "react", "next.js", "typescript", "javascript", "python", "golang", "go", "java", "spring", "mysql", "node.js", "node", "azure", "cosmos db", "aws", "gcp", "docker", "kubernetes", "terraform", "redis", "snowflake", "kafka", "kinesis", "iot", "iac", "rust", "c#", ".net", "c++", "langgraph", "crewai", "mcp", "langsmith", "arize", "phoenix", "cursor", "claudecode", "copilot"} {
 		if strings.Contains(lower, tech) {
 			return true
 		}
@@ -2543,6 +2803,11 @@ func isJobBoilerplateLine(line string) bool {
 			if strings.Contains(lower, marker) {
 				return true
 			}
+		}
+	}
+	for _, marker := range []string{"experience with", "hands-on", "understanding of", "exposure to"} {
+		if strings.Contains(lower, marker) {
+			return false
 		}
 	}
 	if looksLikeRoleTitle(cleaned) && !hasConcreteRequirementVerb(cleaned) && len(strings.Fields(cleaned)) <= 10 {
@@ -2567,6 +2832,7 @@ func hasConcreteRequirementVerb(line string) bool {
 }
 
 func fallbackJobRequirements(raw string) []parsedJobRequirement {
+	raw = normalizePastedText(raw)
 	lines := splitJobRequirementCandidates(raw)
 	requirements := []parsedJobRequirement{}
 	seen := map[string]bool{}
@@ -2586,6 +2852,7 @@ func fallbackJobRequirements(raw string) []parsedJobRequirement {
 			Priority:        inferJobRequirementPriority(line, len(requirements)),
 			SourceQuote:     line,
 		}
+		req = normalizeParsedJobRequirement(req)
 		if isIrrelevantJobRequirement(req) || len(req.Keywords) == 0 {
 			continue
 		}
@@ -2600,6 +2867,56 @@ func fallbackJobRequirements(raw string) []parsedJobRequirement {
 		}
 	}
 	return requirements
+}
+
+func mergeParsedJobRequirements(primary []parsedJobRequirement, supplemental []parsedJobRequirement) []parsedJobRequirement {
+	merged := append([]parsedJobRequirement{}, primary...)
+	for _, candidate := range supplemental {
+		if len(merged) >= 16 {
+			break
+		}
+		if hasSimilarParsedRequirement(merged, candidate) {
+			continue
+		}
+		merged = append(merged, candidate)
+	}
+	return merged
+}
+
+func hasSimilarParsedRequirement(existing []parsedJobRequirement, candidate parsedJobRequirement) bool {
+	candidateText := normalizedRequirementText(candidate.RequirementText)
+	candidateTerms := jobMatchTerms(candidate.RequirementText, candidate.Keywords)
+	for _, current := range existing {
+		currentText := normalizedRequirementText(current.RequirementText)
+		if candidateText == currentText || strings.Contains(candidateText, currentText) || strings.Contains(currentText, candidateText) {
+			return true
+		}
+		currentTerms := jobMatchTerms(current.RequirementText, current.Keywords)
+		minTerms := minInt(len(candidateTerms), len(currentTerms))
+		if minTerms >= 2 && requirementTermOverlap(candidateTerms, currentTerms) >= minInt(2, minTerms) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizedRequirementText(text string) string {
+	text = strings.ToLower(cleanJobDetailLine(normalizePastedText(text)))
+	return strings.Join(strings.Fields(text), " ")
+}
+
+func requirementTermOverlap(left []string, right []string) int {
+	seen := map[string]bool{}
+	for _, term := range left {
+		seen[term] = true
+	}
+	overlap := 0
+	for _, term := range right {
+		if seen[term] {
+			overlap++
+		}
+	}
+	return overlap
 }
 
 func isJobHeadingOrMetadata(line string) bool {
@@ -2644,6 +2961,7 @@ func hasTailorableRequirementSignal(text string, keywords []string) bool {
 }
 
 func splitJobRequirementCandidates(raw string) []string {
+	raw = normalizePastedText(raw)
 	candidates := []string{}
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
@@ -2692,11 +3010,11 @@ func inferJobRequirementPriority(line string, index int) string {
 
 func extractJobKeywords(text string) []string {
 	stop := map[string]bool{}
-	for _, word := range []string{"the", "and", "for", "with", "that", "this", "you", "your", "our", "are", "will", "have", "has", "from", "into", "work", "role", "team", "need", "needs", "required", "requirement", "requirements", "experience", "strong", "deep", "hands", "excellent", "ability", "using", "including"} {
+	for _, word := range []string{"the", "and", "for", "with", "that", "this", "you", "your", "our", "are", "will", "have", "has", "from", "into", "work", "role", "team", "need", "needs", "required", "requirement", "requirements", "experience", "strong", "deep", "hands", "excellent", "ability", "using", "including", "specific", "technologies", "advantageous", "mandatory", "participating", "contributing", "conducting", "understanding", "develop", "build", "join", "dive", "harness"} {
 		stop[word] = true
 	}
 	keywords := []string{}
-	for _, tech := range []string{"Node.js", "React.js", "Azure", "Cosmos DB", "NoSQL", "DevSecOps", "Agile", "SOLID", "serverless", "event-driven", "containers", "messaging", "queues", "topics", "cloud", "observability", "security", "networking", "resilience", "identity", "distributed", "scalable"} {
+	for _, tech := range []string{"TypeScript", "Node.js", "React", "React.js", "AWS", "Azure", "Cosmos DB", "NoSQL", "SQL", "Kafka", "Kinesis", "IoT", "IaC", "Go", "Rust", "C#", ".Net", "C++", "DDD", "domain-driven design", "microservice", "microservices", "DevOps", "DevSecOps", "Agile", "SOLID", "serverless", "event-driven", "containers", "networking", "databases", "messaging", "queues", "topics", "cloud", "observability", "security", "firmware", "hardware", "edge devices", "real-time", "low-latency", "stream processing", "healthcare", "pharma", "medical devices", "regulated industries", "resilience", "identity", "distributed", "scalable"} {
 		if strings.Contains(strings.ToLower(text), strings.ToLower(tech)) {
 			keywords = append(keywords, tech)
 		}
@@ -2788,6 +3106,7 @@ func meaningfulJobLines(raw string, limit int) []string {
 func cleanJobDetailLine(line string) string {
 	line = strings.TrimSpace(line)
 	line = strings.TrimPrefix(line, "-")
+	line = strings.TrimPrefix(line, "\u2022")
 	line = strings.TrimPrefix(line, "•")
 	line = strings.TrimSpace(strings.Trim(line, "#*_`"))
 	return strings.Join(strings.Fields(line), " ")
@@ -3501,6 +3820,7 @@ func scanJobDescriptions(rows *sql.Rows) ([]JobDescription, error) {
 		if err := rows.Scan(&job.ID, &job.Company, &job.Title, &job.URL, &job.RawText, &job.CreatedAt, &job.UpdatedAt); err != nil {
 			return nil, err
 		}
+		job.RawText = normalizePastedText(job.RawText)
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()

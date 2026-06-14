@@ -224,7 +224,7 @@ func buildJobAnalysis(job JobDescription, requirements []JobRequirement) JobAnal
 	if len(painPoints) == 0 {
 		painPoints = append(responsibilities, required...)
 	}
-	painPoints = normalizeStringList(painPoints)
+	painPoints = preserveStringListOrder(painPoints)
 	if len(painPoints) > 3 {
 		painPoints = painPoints[:3]
 	}
@@ -256,6 +256,9 @@ func requirementCanBeTopPainPoint(req JobRequirement) bool {
 	text := strings.ToLower(req.RequirementText)
 	bad := []string{
 		"degree",
+		"computer science",
+		"equivalent practical experience",
+		"solid understanding",
 		"communication",
 		"team-first",
 		"team first",
@@ -277,6 +280,24 @@ func requirementCanBeTopPainPoint(req JobRequirement) bool {
 	}
 
 	return true
+}
+
+func preserveStringListOrder(values []string) []string {
+	seen := map[string]bool{}
+	ordered := []string{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		ordered = append(ordered, value)
+	}
+	return ordered
 }
 
 func buildFitAnalysis(jobID int64, requirements []JobRequirement, matches []JobFactMatch) JobFitAnalysis {

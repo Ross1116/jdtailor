@@ -1808,8 +1808,8 @@ func TestBulletDraftsRespectOriginBudgets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replaceBulletDrafts() error = %v", err)
 	}
-	if len(inserted) != 8 {
-		t.Fatalf("drafts len = %d, want 8: %+v", len(inserted), inserted)
+	if len(inserted) != 2 {
+		t.Fatalf("drafts len = %d, want one same-story draft per origin: %+v", len(inserted), inserted)
 	}
 	selected, err := store.AutoSelectResumeBullets(job.ID)
 	if err != nil {
@@ -1822,7 +1822,7 @@ func TestBulletDraftsRespectOriginBudgets(t *testing.T) {
 		}
 	}
 	if selectedCount != 2 {
-		t.Fatalf("selected drafts = %d, want 2 same-theme representatives: %+v", selectedCount, selected)
+		t.Fatalf("selected drafts = %d, want 2 story-diverse representatives: %+v", selectedCount, selected)
 	}
 }
 
@@ -1859,6 +1859,177 @@ func TestBulletDraftsRejectNonHumanStyle(t *testing.T) {
 	}}, requirements, []factPromptContext{{ID: 1, Status: "approved", SectionHeading: "Acme", SectionType: "experience"}}, testClaims)
 	if err == nil || !strings.Contains(err.Error(), "no usable same-origin bullet drafts") {
 		t.Fatalf("replaceBulletDrafts() error = %v, want rejected non-human draft", err)
+	}
+}
+
+func TestBulletDraftsKeepDistinctBulletsFromRichClaim(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Acme",
+		Title:   "Backend Engineer",
+		RawText: "Design and deliver SaaS features.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	requirements, err := store.replaceJobRequirements(job, []parsedJobRequirement{{
+		Category:        "responsibility",
+		RequirementText: "Design and deliver SaaS features.",
+		Keywords:        []string{"design", "deliver", "SaaS"},
+		Priority:        "high",
+		SourceQuote:     "Design and deliver SaaS features.",
+	}})
+	if err != nil {
+		t.Fatalf("replaceJobRequirements() error = %v", err)
+	}
+	facts := []factPromptContext{
+		{ID: 1, Status: "approved", FactText: "Built FastAPI/PostgreSQL backend APIs for bookings and asset scheduling.", SectionHeading: "Sitespace", SectionType: "experience"},
+		{ID: 2, Status: "approved", FactText: "Added RBAC and immutable audit logging for production data changes.", SectionHeading: "Sitespace", SectionType: "experience"},
+	}
+	claims := []CandidateClaim{{
+		ID:               1,
+		ClaimText:        "FastAPI backend with scheduling APIs, RBAC, and audit logging",
+		ClaimType:        "experience",
+		SourceFactIDs:    []int64{1, 2},
+		Actions:          []string{"built", "shipped", "added"},
+		Technologies:     []string{"FastAPI", "PostgreSQL"},
+		Artifacts:        []string{"backend APIs", "RBAC", "audit logging"},
+		Scope:            []string{"bookings", "asset scheduling", "production data changes"},
+		Outcomes:         []string{"access control", "traceability"},
+		EvidenceStrength: "direct",
+		Strength:         "strong",
+		AllowedUse:       []string{"experience_bullet"},
+		OriginHeading:    "Sitespace",
+		OriginType:       "experience",
+		Status:           claimStatusApproved,
+	}}
+	group := bulletOriginGroup{
+		OriginHeading: "Sitespace",
+		OriginType:    "experience",
+		Requirements:  requirements,
+		Facts:         facts,
+		Claims:        claims,
+	}
+	packets := buildEvidencePackets(group)
+	if len(packets) < 2 {
+		t.Fatalf("packets = %+v, want multiple value themes from rich claim", packets)
+	}
+	inserted, err := store.replaceBulletDrafts(job.ID, []parsedBulletDraft{
+		{
+			OriginHeading: "Sitespace",
+			OriginType:    "experience",
+			ValueTheme:    "product_platform_delivery",
+			RequirementID: requirements[0].ID,
+			ClaimIDs:      []int64{1},
+			FactIDs:       []int64{1, 2},
+			DraftText:     "Built and shipped FastAPI/PostgreSQL APIs for bookings and asset scheduling, turning planning requirements into usable platform workflows.",
+		},
+		{
+			OriginHeading: "Sitespace",
+			OriginType:    "experience",
+			ValueTheme:    "security_traceability",
+			RequirementID: requirements[0].ID,
+			ClaimIDs:      []int64{1},
+			FactIDs:       []int64{1, 2},
+			DraftText:     "Added RBAC and immutable audit logging to strengthen access control and traceability across production data changes.",
+		},
+	}, requirements, facts, claims)
+	if err != nil {
+		t.Fatalf("replaceBulletDrafts() error = %v", err)
+	}
+	if len(inserted) != 2 {
+		t.Fatalf("inserted = %+v, want two distinct bullets from same rich claim", inserted)
+	}
+}
+
+func TestBulletDraftsUseSameOriginClaimsBeyondDirectMatch(t *testing.T) {
+	requirements := []JobRequirement{{ID: 1, RequirementText: "Build SaaS features.", Priority: "high", Category: "responsibility"}}
+	facts := []factPromptContext{
+		{ID: 1, Status: "approved", FactText: "Built backend APIs.", SectionHeading: "Sitespace", SectionType: "experience"},
+		{ID: 2, Status: "approved", FactText: "Added audit logging.", SectionHeading: "Sitespace", SectionType: "experience"},
+	}
+	matches := []JobFactMatch{{RequirementID: 1, FactID: 1, Score: 0.9, CoverageStatus: "strong"}}
+	claims := []CandidateClaim{
+		{
+			ID:            1,
+			ClaimText:     "backend APIs",
+			SourceFactIDs: []int64{1},
+			Artifacts:     []string{"backend APIs"},
+			OriginHeading: "Sitespace",
+			OriginType:    "experience",
+			Status:        claimStatusApproved,
+		},
+		{
+			ID:            2,
+			ClaimText:     "audit logging traceability",
+			SourceFactIDs: []int64{2},
+			Artifacts:     []string{"audit logging"},
+			Outcomes:      []string{"traceability"},
+			OriginHeading: "Sitespace",
+			OriginType:    "experience",
+			Status:        claimStatusApproved,
+		},
+	}
+	groups := buildBulletOriginGroups(requirements, matches, facts, claims)
+	if len(groups) != 1 {
+		t.Fatalf("groups = %+v, want one Sitespace group", groups)
+	}
+	if len(groups[0].Claims) != 2 || len(groups[0].Facts) != 2 {
+		t.Fatalf("group = %+v, want same-origin unmatched claim/fact included", groups[0])
+	}
+}
+
+func TestBulletDraftsCollapseSameBackendStoryVariants(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{Company: "Acme", Title: "Backend Engineer", RawText: "Build APIs."})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	requirements, err := store.replaceJobRequirements(job, []parsedJobRequirement{{
+		Category:        "responsibility",
+		RequirementText: "Build APIs.",
+		Keywords:        []string{"API"},
+		Priority:        "high",
+		SourceQuote:     "Build APIs.",
+	}})
+	if err != nil {
+		t.Fatalf("replaceJobRequirements() error = %v", err)
+	}
+	facts := []factPromptContext{{ID: 1, Status: "approved", SectionHeading: "Sitespace", SectionType: "experience"}}
+	claims := testClaimsForPromptFacts(facts)
+	inserted, err := store.replaceBulletDrafts(job.ID, []parsedBulletDraft{
+		{
+			OriginHeading: "Sitespace",
+			OriginType:    "experience",
+			ValueTheme:    "product_platform_delivery",
+			RequirementID: requirements[0].ID,
+			ClaimIDs:      []int64{1},
+			FactIDs:       []int64{1},
+			DraftText:     "Built FastAPI backend APIs for bookings and asset scheduling, turning planning requirements into usable platform workflows.",
+		},
+		{
+			OriginHeading: "Sitespace",
+			OriginType:    "experience",
+			ValueTheme:    "product_platform_delivery",
+			RequirementID: requirements[0].ID,
+			ClaimIDs:      []int64{1},
+			FactIDs:       []int64{1},
+			DraftText:     "Delivered backend APIs for asset scheduling and bookings on a FastAPI stack, supporting planning workflows.",
+		},
+	}, requirements, facts, claims)
+	if err != nil {
+		t.Fatalf("replaceBulletDrafts() error = %v", err)
+	}
+	if len(inserted) != 1 {
+		t.Fatalf("inserted = %+v, want duplicate backend story collapsed", inserted)
 	}
 }
 
@@ -2101,6 +2272,136 @@ func TestCreateJobDescriptionInfersDetailsFromRawText(t *testing.T) {
 	if job.Company != "Sitespace" || job.Title != "Backend Engineer" {
 		t.Fatalf("job details = %q/%q, want Sitespace/Backend Engineer", job.Company, job.Title)
 	}
+}
+
+func TestCreateJobDescriptionRepairsPastedLinkedInMojibake(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		RawText: "Magentus\nSoftware Engineer\nGreater Sydney Area Â· Reposted 20 hours ago\nYouâ€™ll own solutions end-to-endâ€”from design through production support.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	if strings.Contains(job.RawText, "Â") || strings.Contains(job.RawText, "â") {
+		t.Fatalf("raw text still contains mojibake: %q", job.RawText)
+	}
+	for _, want := range []string{"You'll own solutions", "end-to-end - from", "Greater Sydney Area - Reposted"} {
+		if !strings.Contains(job.RawText, want) {
+			t.Fatalf("raw text missing %q: %q", want, job.RawText)
+		}
+	}
+}
+
+func TestParseJobDescriptionBackfillsExplicitRequirements(t *testing.T) {
+	t.Setenv("OPENROUTER_API_KEY", "sk-test")
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Magentus",
+		Title:   "Software Engineer",
+		RawText: `About You
+Strong experience with TypeScript, Node.js, and React in production environments
+Hands-on experience with AWS (serverless, containers, networking, databases)
+Solid understanding of modern DevOps practices
+Experience using AI tools in development workflows
+Exposure to regulated industries (healthcare, pharma, or medical devices) is highly regarded`,
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+
+	content := `{"requirements":[{"category":"must_have","requirement_text":"Strong experience with TypeScript, Node.js, and React in production environments","keywords":["TypeScript","Node.js","React"],"priority":"high","source_quote":"Strong experience with TypeScript, Node.js, and React in production environments"}]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","content":%q}}]}`, content)
+	}))
+	defer server.Close()
+	restoreURL := openRouterChatCompletionsURLForTest(server.URL)
+	defer restoreURL()
+
+	requirements, err := store.ParseJobDescription(t.Context(), job.ID, server.Client())
+	if err != nil {
+		t.Fatalf("ParseJobDescription() error = %v", err)
+	}
+	for _, want := range []string{"AWS", "modern DevOps practices", "regulated industries"} {
+		found := false
+		for _, req := range requirements {
+			if strings.Contains(req.RequirementText, want) || stringListContains(req.Keywords, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("requirements missing %q: %+v", want, requirements)
+		}
+	}
+}
+
+func TestJobAnalysisTopPainPointsSkipCredentialsAndSoftSkills(t *testing.T) {
+	analysis := buildJobAnalysis(JobDescription{ID: 1, Company: "Magentus", Title: "Software Engineer"}, []JobRequirement{
+		{RequirementText: "Collaborate with cross-functional teams to deliver shared outcomes across the Magentus group", Category: "responsibility", Priority: "medium", Keywords: []string{"collaborate", "cross-functional"}},
+		{RequirementText: "Degree in Computer Science/IT or equivalent practical experience", Category: "must_have", Priority: "medium", Keywords: []string{"Computer Science", "IT"}},
+		{RequirementText: "Design, build, and deliver new features for our health-tech SaaS platform", Category: "responsibility", Priority: "high", Keywords: []string{"design", "build", "SaaS"}},
+		{RequirementText: "Hands-on experience with AWS (serverless, containers, networking, databases)", Category: "must_have", Priority: "high", Keywords: []string{"AWS", "serverless"}},
+		{RequirementText: "Contribute to continuous improvement across software design, product capability, and system architecture", Category: "responsibility", Priority: "medium", Keywords: []string{"system architecture"}},
+	})
+	if len(analysis.TopPainPoints) == 0 {
+		t.Fatal("top pain points empty")
+	}
+	for _, bad := range []string{"Degree", "Collaborate"} {
+		for _, painPoint := range analysis.TopPainPoints {
+			if strings.Contains(painPoint, bad) {
+				t.Fatalf("top pain points include low-signal item %q: %+v", bad, analysis.TopPainPoints)
+			}
+		}
+	}
+	if analysis.TopPainPoints[0] != "Design, build, and deliver new features for our health-tech SaaS platform" {
+		t.Fatalf("top pain points = %+v, want parser order with strongest responsibility first", analysis.TopPainPoints)
+	}
+}
+
+func TestParseJobRequirementsCleansCatapultNoise(t *testing.T) {
+	response := `{"requirements":[
+		{"category":"responsibility","requirement_text":"Catapult is a sports technology company that empowers professional teams to make data-driven decisions. We deliver health, performance, video, and AI insights from the locker room to competitive environments, ensuring every decision is an opportunity to gain an advantage, sharpen performance, and build lasting success","keywords":["Catapult","sports","company"],"priority":"high","source_quote":"Catapult is a sports technology company that empowers professional teams to make data-driven decisions. We deliver health, performance, video, and AI insights from the locker room to competitive environments, ensuring every decision is an opportunity to gain an advantage, sharpen performance, and build lasting success"},
+		{"category":"responsibility","requirement_text":"Live Data Stream Processing: Dive into the world of real-time data processing using technologies like Kafka, Kinesis, AWS, and edge devices","keywords":["Live","Data","Stream","Processing","AWS"],"priority":"high","source_quote":"Live Data Stream Processing: Dive into the world of real-time data processing using technologies like Kafka, Kinesis, AWS, and edge devices"},
+		{"category":"must_have","requirement_text":"Experience with the specific technologies in our stack is advantageous but not mandatory. (AWS infrastructure, including IoT, IaC, Go, Rust, C# .Net, C++)","keywords":["AWS","Rust"],"priority":"medium","source_quote":"Experience with the specific technologies in our stack is advantageous but not mandatory. (AWS infrastructure, including IoT, IaC, Go, Rust, C# .Net, C++)"},
+		{"category":"must_have","requirement_text":"A collaborative team player with strong verbal and written communication skills","keywords":["collaborative","communication"],"priority":"high","source_quote":"A collaborative team player with strong verbal and written communication skills"},
+		{"category":"must_have","requirement_text":"Proficiency in microservice architectures within AWS, applying domain-driven design principles","keywords":["AWS","microservice"],"priority":"high","source_quote":"Proficiency in microservice architectures within AWS, applying domain-driven design principles"}
+	]}`
+	requirements, err := parseJobRequirements(response)
+	if err != nil {
+		t.Fatalf("parseJobRequirements() error = %v", err)
+	}
+	if len(requirements) != 3 {
+		t.Fatalf("requirements = %+v, want company blurb and soft skill removed", requirements)
+	}
+	if requirements[0].RequirementText != "Real-time data processing using technologies like Kafka, Kinesis, AWS, and edge devices" {
+		t.Fatalf("stream requirement = %q", requirements[0].RequirementText)
+	}
+	optional := requirements[1]
+	if optional.Category != "nice_to_have" || optional.Priority != "low" {
+		t.Fatalf("optional stack requirement = %+v, want nice_to_have/low", optional)
+	}
+	if !stringListContains(optional.Keywords, "IoT") || !stringListContains(optional.Keywords, "IaC") || !stringListContains(optional.Keywords, "Go") {
+		t.Fatalf("optional keywords = %+v, want stack terms preserved", optional.Keywords)
+	}
+}
+
+func stringListContains(values []string, needle string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBuildJobMatchMapFallsBackOnEmptyLLMJSON(t *testing.T) {

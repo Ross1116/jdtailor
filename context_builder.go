@@ -1344,7 +1344,7 @@ func metadataContentLineCount(section SourceSection) int {
 }
 
 func normalizeRawSourceText(rawText string) string {
-	text := strings.TrimSpace(rawText)
+	text := normalizePastedText(rawText)
 	if text == "" {
 		return ""
 	}

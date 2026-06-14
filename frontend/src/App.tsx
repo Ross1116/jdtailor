@@ -5,11 +5,14 @@ import {
   Bot,
   BriefcaseBusiness,
   CheckCircle2,
+  ChevronRight,
   Clipboard,
   Cpu,
   Database,
+  FilePlus2,
   FileText,
   Folder,
+  Gauge,
   KeyRound,
   Layers3,
   ListChecks,
@@ -17,8 +20,10 @@ import {
   Play,
   RefreshCcw,
   Save,
+  Search,
   Settings as SettingsIcon,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Trash2,
   Upload,
@@ -1589,106 +1594,202 @@ function JobsView({
   selectedJobID: number;
   tailoredDrafts: TailoredBulletDraft[];
 }) {
+  const [jobSearch, setJobSearch] = useState('');
+  const [activeJobView, setActiveJobView] = useState<'overview' | 'requirements' | 'drafts' | 'diagnostics'>('overview');
+  const [agentOptions, setAgentOptions] = useState({
+    parse: true,
+    match: true,
+    fit: true,
+    strategy: true,
+    drafts: false,
+    select: false,
+  });
   const matchesByRequirement = new Map<number, JobFactMatch[]>();
   matches.forEach((match) => {
     matchesByRequirement.set(match.requirement_id, [...(matchesByRequirement.get(match.requirement_id) ?? []), match]);
   });
   const requirementLabel = (id: number) => requirements.find((req) => req.id === id)?.requirement_text ?? `Requirement ${id}`;
   const jobWork = jobWorkItem(busyAction);
+  const selectedJob = jobs.find((job) => job.id === selectedJobID);
+  const filteredJobs = jobs.filter((job) => {
+    const query = jobSearch.trim().toLowerCase();
+    if (!query) return true;
+    return [job.title, job.company, job.url, job.raw_text].some((value) => value.toLowerCase().includes(query));
+  });
+  const matchedRequirementCount = requirements.filter((requirement) => (matchesByRequirement.get(requirement.id) ?? []).length > 0).length;
+  const selectedDraftCount = tailoredDrafts.filter((draftItem) => draftItem.selected_for_resume).length;
+  const acceptedDraftCount = tailoredDrafts.filter((draftItem) => draftItem.status === 'accepted').length;
+  const readyToMatch = selectedJobID > 0 && requirements.length > 0 && facts.length > 0;
+  const readyForFit = selectedJobID > 0 && requirements.length > 0;
+  const readyForStrategy = selectedJobID > 0 && Boolean(fitAnalysis);
+  const readyForDrafts = selectedJobID > 0 && matches.length > 0;
+  const pipelineBusy = busyAction !== '';
+  const pipelineSteps = [
+    {key: 'parse' as const, label: 'Parse', icon: <Sparkles size={15} />, enabled: agentOptions.parse, ready: selectedJobID > 0, action: onParseJob},
+    {key: 'match' as const, label: 'Match', icon: <ListChecks size={15} />, enabled: agentOptions.match, ready: readyToMatch, action: onBuildMatchMap},
+    {key: 'fit' as const, label: 'Fit', icon: <Activity size={15} />, enabled: agentOptions.fit, ready: readyForFit, action: onGenerateFit},
+    {key: 'strategy' as const, label: 'Strategy', icon: <Wrench size={15} />, enabled: agentOptions.strategy, ready: readyForStrategy, action: onGenerateStrategy},
+    {key: 'drafts' as const, label: 'Draft', icon: <FileText size={15} />, enabled: agentOptions.drafts, ready: readyForDrafts, action: onGenerateDrafts},
+    {key: 'select' as const, label: 'Select', icon: <CheckCircle2 size={15} />, enabled: agentOptions.select, ready: tailoredDrafts.length > 0, action: onAutoSelectDrafts},
+  ];
+  async function runAgentPipeline() {
+    for (const step of pipelineSteps) {
+      if (!step.enabled || !step.ready) continue;
+      await Promise.resolve(step.action());
+      await delay(80);
+    }
+  }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[340px_1fr]">
-      <Panel icon={<BriefcaseBusiness size={18} />} title="Job descriptions" subtitle="Paste JD text and keep one match map per application.">
-        <div className="space-y-4">
-          <SecondaryButton label="New job" onClick={onNewJob} />
-          <div className="space-y-2">
-            {jobs.length === 0 ? (
-              <EmptyState text="No jobs saved yet." />
-            ) : (
-              jobs.map((job) => (
-                <div
-                  key={job.id}
-                  className={`flex items-start gap-2 rounded-md border p-3 text-sm ${job.id === selectedJobID ? 'border-sky-300 bg-sky-50' : 'border-slate-200 bg-slate-50'}`}
-                >
-                  <button type="button" onClick={() => onSelectJob(job)} className="min-w-0 flex-1 text-left">
-                    <span className="font-semibold text-slate-950">{job.title}</span>
-                    <span className="mt-1 block text-slate-600">{job.company || 'Company not set'}</span>
-                    <span className="mt-2 line-clamp-3 block text-slate-500">{job.raw_text}</span>
-                  </button>
-                  <IconOnlyButton label="Delete job" onClick={() => onDeleteJob(job.id)}>
-                    <Trash2 size={16} />
-                  </IconOnlyButton>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </Panel>
+    <div className="grid gap-4 xl:grid-cols-[380px_1fr]">
+      <aside className="space-y-4">
+        <Panel icon={<BriefcaseBusiness size={18} />} title="Applications" subtitle={`${jobs.length} saved JD${jobs.length === 1 ? '' : 's'}`}>
+          <div className="space-y-3">
+            <div className="grid gap-2 sm:grid-cols-[1fr_auto] xl:grid-cols-1">
+              <label className="relative block">
+                <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                <input
+                  value={jobSearch}
+                  onChange={(event) => setJobSearch(event.target.value)}
+                  placeholder="Search title, company, keywords"
+                  className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
+                />
+              </label>
+              <IconButton label="New JD" onClick={onNewJob} full>
+                <FilePlus2 size={16} />
+              </IconButton>
+            </div>
 
-      <div className="space-y-4">
-        <Panel icon={<FileText size={18} />} title="JD intake" subtitle="Paste the job description and parse it into requirements.">
-          <form className="space-y-4" onSubmit={onSaveJob}>
-            {jobWork && (
-              <InlineProgress title={jobWork.title} detail={jobWork.detail} progress={jobWork.progress} />
-            )}
-            <div className="grid gap-3 md:grid-cols-3">
-              <TextInput label="Company" value={draft.company} onChange={(value) => onDraftChange({...draft, company: value})} />
-              <TextInput label="Title" value={draft.title} onChange={(value) => onDraftChange({...draft, title: value})} />
-              <TextInput label="URL" value={draft.url} onChange={(value) => onDraftChange({...draft, url: value})} />
+            <div className="max-h-[540px] space-y-2 overflow-y-auto pr-1">
+              {filteredJobs.length === 0 ? (
+                <EmptyState text={jobs.length === 0 ? 'No jobs saved yet.' : 'No jobs match the search.'} />
+              ) : (
+                filteredJobs.map((job) => {
+                  const active = job.id === selectedJobID;
+                  return (
+                    <div key={job.id} className={`group rounded-md border ${active ? 'border-sky-300 bg-sky-50' : 'border-slate-200 bg-white hover:border-slate-300'}`}>
+                      <button type="button" onClick={() => onSelectJob(job)} className="block w-full p-3 text-left">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-slate-950">{job.title}</p>
+                            <p className="mt-0.5 truncate text-xs font-medium text-slate-600">{job.company || 'Company not set'}</p>
+                          </div>
+                          <ChevronRight className={`mt-0.5 shrink-0 ${active ? 'text-sky-600' : 'text-slate-300 group-hover:text-slate-500'}`} size={16} />
+                        </div>
+                        <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-500">{job.raw_text}</p>
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {active && requirements.length > 0 && <StatusBadge text={`${requirements.length} reqs`} />}
+                          {active && matches.length > 0 && <StatusBadge text={`${matchedRequirementCount}/${requirements.length} matched`} />}
+                          {active && fitAnalysis && <StatusBadge text={`${fitAnalysis.overall_score}% fit`} />}
+                          {active && tailoredDrafts.length > 0 && <StatusBadge text={`${tailoredDrafts.length} drafts`} />}
+                        </div>
+                      </button>
+                      <div className="flex justify-end border-t border-slate-200 px-2 py-2">
+                        <IconOnlyButton label="Delete job" onClick={() => onDeleteJob(job.id)}>
+                          <Trash2 size={15} />
+                        </IconOnlyButton>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
-            <TextArea label="Raw JD text" rows={10} value={draft.raw_text} onChange={(value) => onDraftChange({...draft, raw_text: value})} />
-            <div className="grid gap-3 md:grid-cols-7">
-              <IconButton label={selectedJobID ? 'Update JD' : 'Save JD'} submit disabled={busyAction === 'save-job' || draft.raw_text.trim() === ''}>
-                <Save size={16} />
-              </IconButton>
-              <IconButton label="Parse JD" onClick={onParseJob} disabled={!selectedJobID || busyAction === 'parse-job'}>
-                <Sparkles size={16} />
-              </IconButton>
-              <IconButton label="Build matches" onClick={onBuildMatchMap} disabled={!selectedJobID || requirements.length === 0 || facts.length === 0 || busyAction === 'build-match-map'}>
-                <ListChecks size={16} />
-              </IconButton>
-              <IconButton label="Fit" onClick={onGenerateFit} disabled={!selectedJobID || requirements.length === 0 || busyAction === 'generate-fit'}>
-                <Activity size={16} />
-              </IconButton>
-              <IconButton label="Strategy" onClick={onGenerateStrategy} disabled={!selectedJobID || !fitAnalysis || busyAction === 'generate-strategy'}>
-                <Wrench size={16} />
-              </IconButton>
-              <IconButton label="Draft bullets" onClick={onGenerateDrafts} disabled={!selectedJobID || matches.length === 0 || busyAction === 'generate-bullets'}>
-                <Sparkles size={16} />
-              </IconButton>
-              <IconButton label="Auto-select" onClick={onAutoSelectDrafts} disabled={!selectedJobID || tailoredDrafts.length === 0 || busyAction === 'auto-select-drafts'}>
-                <CheckCircle2 size={16} />
-              </IconButton>
-            </div>
-          </form>
+          </div>
         </Panel>
 
-        <Panel icon={<Activity size={18} />} title="JD analysis and strategy" subtitle="Top pain points, evidence-backed fit, and resume positioning.">
-          <div className="grid gap-3 lg:grid-cols-3">
-            {jobWork && (
-              <div className="lg:col-span-3">
-                <StageRail
-                  current={busyAction}
-                  stages={[
-                    ['parse-job', 'Parse'],
-                    ['build-match-map', 'Match'],
-                    ['generate-fit', 'Fit'],
-                    ['generate-strategy', 'Strategy'],
-                    ['generate-bullets', 'Draft'],
-                    ['auto-select-drafts', 'Select'],
-                  ]}
+        <Panel icon={<SlidersHorizontal size={18} />} title="Agent run" subtitle="Choose the stages this JD should run.">
+          <div className="space-y-3">
+            {jobWork && <InlineProgress compact title={jobWork.title} detail={jobWork.detail} progress={jobWork.progress} />}
+            <div className="grid gap-2">
+              {pipelineSteps.map((step) => (
+                <ToggleSwitch
+                  key={step.key}
+                  checked={step.enabled}
+                  disabled={pipelineBusy}
+                  label={step.label}
+                  meta={step.ready ? 'ready' : 'waiting'}
+                  icon={step.icon}
+                  onChange={(checked) => setAgentOptions((previous) => ({...previous, [step.key]: checked}))}
                 />
-              </div>
-            )}
-            <SummaryBlock
-              title="Top pain points"
-              empty="Parse a saved JD."
-              items={jobAnalysis?.top_pain_points ?? []}
+              ))}
+            </div>
+            <IconButton label="Run selected stages" onClick={runAgentPipeline} disabled={!selectedJobID || pipelineBusy} full>
+              <Play size={16} />
+            </IconButton>
+            <StageRail
+              current={busyAction}
+              stages={[
+                ['parse-job', 'Parse'],
+                ['build-match-map', 'Match'],
+                ['generate-fit', 'Fit'],
+                ['generate-strategy', 'Strategy'],
+                ['generate-bullets', 'Draft'],
+                ['auto-select-drafts', 'Select'],
+              ]}
             />
-            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+          </div>
+        </Panel>
+      </aside>
+
+      <div className="space-y-4">
+        <Panel icon={<Gauge size={18} />} title={selectedJob ? `${selectedJob.company || 'Untitled company'} - ${selectedJob.title}` : 'JD workspace'} subtitle="Intake, matching, fit, strategy, and resume bullets in one place.">
+          <div className="space-y-4">
+            <form className="space-y-3" onSubmit={onSaveJob}>
+              <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1.2fr_auto]">
+                <TextInput label="Company" value={draft.company} onChange={(value) => onDraftChange({...draft, company: value})} />
+                <TextInput label="Title" value={draft.title} onChange={(value) => onDraftChange({...draft, title: value})} />
+                <TextInput label="URL" value={draft.url} onChange={(value) => onDraftChange({...draft, url: value})} />
+                <div className="flex items-end">
+                  <IconButton label={selectedJobID ? 'Update JD' : 'Save JD'} submit disabled={busyAction === 'save-job' || draft.raw_text.trim() === ''} full>
+                    <Save size={16} />
+                  </IconButton>
+                </div>
+              </div>
+              <TextArea label="Raw JD text" rows={6} value={draft.raw_text} onChange={(value) => onDraftChange({...draft, raw_text: normalizePastedText(value)})} />
+            </form>
+
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <JobMetric label="Requirements" value={`${requirements.length}`} detail={requirements.length ? `${matchedRequirementCount} with evidence` : 'parse JD first'} />
+              <JobMetric label="Fit" value={fitAnalysis ? `${fitAnalysis.overall_score}%` : '--'} detail={fitAnalysis?.recommendation ?? 'generate after matches'} />
+              <JobMetric label="Drafts" value={`${tailoredDrafts.length}`} detail={`${acceptedDraftCount} accepted, ${selectedDraftCount} selected`} />
+              <JobMetric label="Gaps" value={`${applicationStrategy?.do_not_overclaim.length ?? fitAnalysis?.critical_gaps.length ?? 0}`} detail="do-not-overclaim items" />
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-6">
+              {pipelineSteps.map((step) => (
+                <IconButton key={step.key} label={step.label} onClick={step.action} disabled={!step.ready || pipelineBusy} full>
+                  {step.icon}
+                </IconButton>
+              ))}
+            </div>
+          </div>
+        </Panel>
+
+        <div className="flex flex-wrap gap-2 rounded-md border border-slate-200 bg-white p-2 shadow-sm">
+          {[
+            ['overview', 'Overview'],
+            ['requirements', `Requirements ${requirements.length}`],
+            ['drafts', `Drafts ${tailoredDrafts.length}`],
+            ['diagnostics', `Diagnostics ${bulletEvents.length}`],
+          ].map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setActiveJobView(value as typeof activeJobView)}
+              className={`h-9 rounded-md px-3 text-sm font-medium ${activeJobView === value ? 'bg-slate-950 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {activeJobView === 'overview' && (
+          <div className="grid gap-4 xl:grid-cols-3">
+            <SummaryBlock title="Top pain points" empty="Parse a saved JD." items={jobAnalysis?.top_pain_points ?? []} />
+            <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
               <p className="text-sm font-semibold text-slate-950">Fit</p>
               {fitAnalysis ? (
-                <div className="mt-2 space-y-2 text-sm text-slate-700">
+                <div className="mt-3 space-y-2 text-sm text-slate-700">
                   <div className="flex flex-wrap gap-2">
                     <StatusBadge text={`${fitAnalysis.overall_score}%`} />
                     <StatusBadge text={fitAnalysis.recommendation} />
@@ -1696,158 +1797,121 @@ function JobsView({
                   <p>{fitAnalysis.reality_check}</p>
                 </div>
               ) : (
-                <p className="mt-2 text-sm text-slate-500">Generate fit after matches.</p>
+                <p className="mt-3 text-sm text-slate-500">Generate fit after building matches.</p>
               )}
             </div>
-            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+            <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
               <p className="text-sm font-semibold text-slate-950">Strategy</p>
               {applicationStrategy ? (
-                <div className="mt-2 space-y-2 text-sm text-slate-700">
+                <div className="mt-3 space-y-2 text-sm text-slate-700">
                   <p className="font-medium text-slate-900">{applicationStrategy.resume_headline}</p>
                   <p>{applicationStrategy.positioning_strategy}</p>
                 </div>
               ) : (
-                <p className="mt-2 text-sm text-slate-500">Generate strategy after fit.</p>
+                <p className="mt-3 text-sm text-slate-500">Generate strategy after fit.</p>
               )}
             </div>
-            <SummaryBlock
-              title="Keywords"
-              empty="No keywords yet."
-              items={(applicationStrategy?.keywords ?? jobAnalysis?.keywords ?? []).slice(0, 10)}
-            />
-            <SummaryBlock
-              title="Do not overclaim"
-              empty="No blocked gaps yet."
-              items={applicationStrategy?.do_not_overclaim ?? fitAnalysis?.critical_gaps ?? []}
-            />
-            <SummaryBlock
-              title="Required skills"
-              empty="No required skills yet."
-              items={jobAnalysis?.required_skills ?? []}
-            />
+            <SummaryBlock title="Keywords" empty="No keywords yet." items={(applicationStrategy?.keywords ?? jobAnalysis?.keywords ?? []).slice(0, 12)} />
+            <SummaryBlock title="Do not overclaim" empty="No blocked gaps yet." items={applicationStrategy?.do_not_overclaim ?? fitAnalysis?.critical_gaps ?? []} />
+            <SummaryBlock title="Required skills" empty="No required skills yet." items={jobAnalysis?.required_skills ?? []} />
           </div>
-        </Panel>
+        )}
 
-        <Panel icon={<ListChecks size={18} />} title="Requirements and matches" subtitle="All fact statuses are shown so risky evidence stays visible.">
-          <div className="space-y-3">
-            {requirements.length === 0 ? (
-              <EmptyState text="Parse a saved JD to create requirements." />
-            ) : (
-              requirements.map((requirement) => (
-                <div key={requirement.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                  <div className="mb-2 flex flex-wrap items-center gap-2">
-                    <StatusBadge text={requirement.priority} />
-                    <StatusBadge text={requirement.category} />
-                    {asStringArray(requirement.keywords).map((keyword) => <StatusBadge key={keyword} text={keyword} />)}
-                  </div>
-                  <p className="text-sm font-semibold text-slate-950">{requirement.requirement_text}</p>
-                  <p className="mt-1 text-sm text-slate-600">{requirement.source_quote}</p>
-                  <div className="mt-3 space-y-2">
-                    {(matchesByRequirement.get(requirement.id) ?? []).length === 0 ? (
-                      <p className="text-sm text-slate-500">No matches yet.</p>
-                    ) : (
-                      (matchesByRequirement.get(requirement.id) ?? []).map((match) => (
-                        <div key={match.id} className="rounded-md border border-slate-200 bg-white p-3">
-                          <div className="mb-2 flex flex-wrap items-center gap-2">
-                            <StatusBadge text={match.coverage_status} />
-                            <StatusBadge text={`${Math.round(match.score * 100)}%`} />
-                            <StatusBadge text={match.fact_status} />
-                            {asStringArray(match.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
+        {activeJobView === 'requirements' && (
+          <Panel icon={<ListChecks size={18} />} title="Requirements and matches" subtitle={`${requirements.length} parsed requirements, ${matches.length} evidence links`}>
+            <div className="space-y-3">
+              {requirements.length === 0 ? (
+                <EmptyState text="Parse a saved JD to create requirements." />
+              ) : (
+                requirements.map((requirement) => (
+                  <div key={requirement.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      <StatusBadge text={requirement.priority} />
+                      <StatusBadge text={requirement.category} />
+                      {asStringArray(requirement.keywords).slice(0, 6).map((keyword) => <StatusBadge key={keyword} text={keyword} />)}
+                    </div>
+                    <p className="text-sm font-semibold text-slate-950">{requirement.requirement_text}</p>
+                    <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                      {(matchesByRequirement.get(requirement.id) ?? []).length === 0 ? (
+                        <p className="rounded-md border border-dashed border-slate-300 bg-white px-3 py-4 text-sm text-slate-500">No matches yet.</p>
+                      ) : (
+                        (matchesByRequirement.get(requirement.id) ?? []).map((match) => (
+                          <div key={match.id} className="rounded-md border border-slate-200 bg-white p-3">
+                            <div className="mb-2 flex flex-wrap items-center gap-2">
+                              <StatusBadge text={match.coverage_status} />
+                              <StatusBadge text={`${Math.round(match.score * 100)}%`} />
+                              <StatusBadge text={match.fact_status} />
+                            </div>
+                            <p className="text-sm text-slate-900">{match.fact_text}</p>
+                            <p className="mt-1 text-xs text-slate-500">{match.rationale}</p>
                           </div>
-                          <p className="text-sm text-slate-900">{match.fact_text}</p>
-                          <p className="mt-1 text-xs text-slate-500">{match.rationale}</p>
-                        </div>
-                      ))
-                    )}
+                        ))
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))
-            )}
-          </div>
-        </Panel>
+                ))
+              )}
+            </div>
+          </Panel>
+        )}
 
-        <Panel icon={<Sparkles size={18} />} title="Saved bullet drafts" subtitle="Suggestions only; they do not overwrite source truth.">
-          <div className="space-y-3">
-            {tailoredDrafts.length === 0 ? (
-              <EmptyState text="Generate drafts after building a match map." />
-            ) : (
-              tailoredDrafts.map((item) => (
-                <div key={item.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                  <div className="mb-3 flex flex-wrap items-center gap-2">
-                    <StatusBadge text={item.status} />
-                    {item.selected_for_resume && <StatusBadge text="selected" />}
-                    <StatusBadge text={`${Math.round(item.selection_score * 100)} score`} />
-                    <StatusBadge text={`${Math.round(item.resume_value_score * 100)} resume`} />
-                    <StatusBadge text={`${Math.round(item.jd_relevance_score * 100)} JD`} />
-                    <StatusBadge text={`origin x${item.origin_weight.toFixed(2)}`} />
-                    {item.risk_penalty > 0 && <StatusBadge text={`${Math.round(item.risk_penalty * 100)} risk penalty`} />}
-                    {item.unsupported_context_penalty > 0 && <StatusBadge text={`${Math.round(item.unsupported_context_penalty * 100)} unsupported`} />}
-                    <StatusBadge text={item.origin_type || 'unknown origin'} />
-                    {item.origin_heading && <StatusBadge text={item.origin_heading} />}
-                    {item.value_theme && <StatusBadge text={item.value_theme.replaceAll('_', ' ')} />}
-                    <StatusBadge text={requirementLabel(item.requirement_id)} />
-                    {item.claim_ids.length > 0 && <StatusBadge text={`claims ${item.claim_ids.join(', ')}`} />}
-                    {item.fact_ids.length > 0 && <StatusBadge text={`facts ${item.fact_ids.join(', ')}`} />}
-                    {asStringArray(item.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
+        {activeJobView === 'drafts' && (
+          <Panel icon={<Sparkles size={18} />} title="Saved bullet drafts" subtitle={`${tailoredDrafts.length} suggestions; selected drafts can be copied into the resume.`}>
+            <div className="space-y-3">
+              {tailoredDrafts.length === 0 ? (
+                <EmptyState text="Generate drafts after building a match map." />
+              ) : (
+                tailoredDrafts.map((item) => (
+                  <div key={item.id} className={`rounded-md border p-3 ${item.selected_for_resume ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-slate-50'}`}>
+                    <div className="mb-3 flex flex-wrap items-center gap-2">
+                      <StatusBadge text={item.status} />
+                      {item.selected_for_resume && <StatusBadge text="selected" />}
+                      <StatusBadge text={`${Math.round(item.selection_score * 100)} score`} />
+                      <StatusBadge text={item.origin_heading || 'unknown origin'} />
+                      {item.value_theme && <StatusBadge text={item.value_theme.replaceAll('_', ' ')} />}
+                    </div>
+                    <TextArea label="Draft bullet" rows={3} value={item.draft_text} onChange={(value) => onChangeDraft({...item, draft_text: value})} />
+                    <p className="mt-2 text-xs text-slate-600">{item.rationale}</p>
+                    <div className="mt-3 grid gap-2 md:grid-cols-6">
+                      <IconButton label="Save" onClick={() => onSaveDraft(item)} disabled={busyAction === `update-draft-${item.id}`}><Save size={16} /></IconButton>
+                      <SecondaryButton label="Accept" onClick={() => onSetDraftStatus(item, 'accepted')} />
+                      <SecondaryButton label="Review" onClick={() => onSetDraftStatus(item, 'needs_review')} />
+                      <DangerButton label="Reject" onClick={() => onSetDraftStatus(item, 'rejected')} />
+                      <SecondaryButton label={item.selected_for_resume ? 'Unselect' : 'Select'} onClick={() => onSelectDraft(item, !item.selected_for_resume)} />
+                      <IconButton label="Copy" onClick={() => navigator.clipboard?.writeText(item.draft_text)}><Clipboard size={16} /></IconButton>
+                    </div>
                   </div>
-                  <TextArea
-                    label="Draft bullet"
-                    rows={3}
-                    value={item.draft_text}
-                    onChange={(value) => onChangeDraft({...item, draft_text: value})}
-                  />
-                  <div className="mt-3 grid gap-3 md:grid-cols-[1fr_220px]">
-                    <TextInput label="Rationale" value={item.rationale} onChange={(value) => onChangeDraft({...item, rationale: value})} />
-                    <TextInput label="Risk flags" value={item.risk_flags.join(', ')} onChange={(value) => onChangeDraft({...item, risk_flags: splitList(value)})} />
-                  </div>
-                  {item.selection_reason && (
-                    <p className="mt-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
-                      {item.selected_for_resume ? 'Selected' : 'Not selected'}: {item.selection_reason}
-                    </p>
-                  )}
-                  <div className="mt-3 grid gap-3 md:grid-cols-5">
-                    <IconButton label="Save" onClick={() => onSaveDraft(item)} disabled={busyAction === `update-draft-${item.id}`}>
-                      <Save size={16} />
-                    </IconButton>
-                    <SecondaryButton label="Accept" onClick={() => onSetDraftStatus(item, 'accepted')} />
-                    <SecondaryButton label="Needs review" onClick={() => onSetDraftStatus(item, 'needs_review')} />
-                    <DangerButton label="Reject" onClick={() => onSetDraftStatus(item, 'rejected')} />
-                    <SecondaryButton label={item.selected_for_resume ? 'Unselect' : 'Select'} onClick={() => onSelectDraft(item, !item.selected_for_resume)} />
-                  </div>
-                  <div className="mt-3 grid gap-3 md:grid-cols-2">
-                    <IconButton label="Copy" onClick={() => navigator.clipboard?.writeText(item.draft_text)} disabled={false}>
-                      <Clipboard size={16} />
-                    </IconButton>
-                    <DangerButton label="Delete draft" onClick={() => onDeleteDraft(item.id)} />
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </Panel>
+                ))
+              )}
+            </div>
+          </Panel>
+        )}
 
-        <Panel icon={<Activity size={18} />} title="Bullet diagnostics" subtitle="Generation, rejection, insertion, and selection events for the current job.">
-          <div className="space-y-2">
-            {bulletEvents.length === 0 ? (
-              <EmptyState text="No bullet diagnostics yet." />
-            ) : (
-              bulletEvents.slice(0, 40).map((event) => (
-                <div key={event.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                  <div className="mb-2 flex flex-wrap items-center gap-2">
-                    <StatusBadge text={event.stage} />
-                    <StatusBadge text={event.status} />
-                    {event.origin_heading && <StatusBadge text={event.origin_heading} />}
+        {activeJobView === 'diagnostics' && (
+          <Panel icon={<Activity size={18} />} title="Bullet diagnostics" subtitle="Generation, rejection, insertion, and selection events.">
+            <div className="space-y-2">
+              {bulletEvents.length === 0 ? (
+                <EmptyState text="No bullet diagnostics yet." />
+              ) : (
+                bulletEvents.slice(0, 60).map((event) => (
+                  <div key={event.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                      <StatusBadge text={event.stage} />
+                      <StatusBadge text={event.status} />
+                      {event.origin_heading && <StatusBadge text={event.origin_heading} />}
+                    </div>
+                    {event.reason && <p className="text-xs text-slate-600">{event.reason}</p>}
+                    {event.draft_text && <p className="mt-1 text-sm text-slate-900">{event.draft_text}</p>}
                   </div>
-                  {event.reason && <p className="text-xs text-slate-600">{event.reason}</p>}
-                  {event.draft_text && <p className="mt-1 text-sm text-slate-900">{event.draft_text}</p>}
-                </div>
-              ))
-            )}
-          </div>
-        </Panel>
+                ))
+              )}
+            </div>
+          </Panel>
+        )}
       </div>
     </div>
   );
+
 }
 
 function SectionsView({
@@ -2699,6 +2763,42 @@ function DangerButton({label, onClick}: {label: string; onClick: () => void}) {
   );
 }
 
+function ToggleSwitch({
+  checked,
+  disabled,
+  icon,
+  label,
+  meta,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  icon: JSX.Element;
+  label: string;
+  meta?: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className={`flex min-h-11 items-center justify-between gap-3 rounded-md border px-3 py-2 ${checked ? 'border-sky-200 bg-sky-50' : 'border-slate-200 bg-white'} ${disabled ? 'opacity-60' : ''}`}>
+      <span className="flex min-w-0 items-center gap-2 text-sm font-medium text-slate-800">
+        <span className={checked ? 'text-sky-700' : 'text-slate-400'}>{icon}</span>
+        <span className="truncate">{label}</span>
+        {meta && <span className="rounded-md bg-white px-2 py-0.5 text-xs font-medium text-slate-500">{meta}</span>}
+      </span>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        className="sr-only"
+      />
+      <span className={`relative h-6 w-10 rounded-full transition ${checked ? 'bg-sky-600' : 'bg-slate-300'}`}>
+        <span className={`absolute top-1 h-4 w-4 rounded-full bg-white transition ${checked ? 'left-5' : 'left-1'}`} />
+      </span>
+    </label>
+  );
+}
+
 function CheckInput({checked, label, onChange}: {checked: boolean; label: string; onChange: (checked: boolean) => void}) {
   return (
     <label className="inline-flex min-h-10 items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-700">
@@ -2710,6 +2810,16 @@ function CheckInput({checked, label, onChange}: {checked: boolean; label: string
       />
       {label}
     </label>
+  );
+}
+
+function JobMetric({detail, label, value}: {detail: string; label: string; value: string}) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
+      <p className="text-xs font-semibold uppercase text-slate-500">{label}</p>
+      <p className="mt-1 text-2xl font-semibold text-slate-950">{value}</p>
+      <p className="mt-1 truncate text-xs text-slate-500">{detail}</p>
+    </div>
   );
 }
 
@@ -3209,8 +3319,22 @@ function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function normalizePastedText(rawText: string) {
+  return rawText
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .replace(/Â·/g, '-')
+    .replace(/Â/g, '')
+    .replace(/â€™|â€˜/g, "'")
+    .replace(/â€œ|â€�/g, '"')
+    .replace(/â€”|â€“/g, ' - ')
+    .replace(/â€¢/g, '-')
+    .replace(/â€¦/g, '...');
+}
+
 function inferJobDetailsFromText(rawText: string) {
-  const lines = rawText
+  const lines = normalizePastedText(rawText)
     .split('\n')
     .map(cleanJobDetailLine)
     .filter((line) => line && !line.toLowerCase().startsWith('http'))
@@ -3253,7 +3377,7 @@ function inferJobDetailsFromText(rawText: string) {
 }
 
 function cleanJobDetailLine(line: string) {
-  return line.trim().replace(/^[-•]\s*/, '').replace(/^[#*_`]+|[#*_`]+$/g, '').replace(/\s+/g, ' ').trim();
+  return normalizePastedText(line).replace(/^[-\u2022]\s*/, '').replace(/^[#*_`]+|[#*_`]+$/g, '').replace(/\s+/g, ' ').trim();
 }
 
 function looksLikeRoleTitle(line: string) {

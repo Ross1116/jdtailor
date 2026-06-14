@@ -1053,13 +1053,14 @@ export async function CreateJobDescription(input: {company: string; title: strin
     return WailsCreateJobDescription(input);
   }
   const timestamp = now();
-  const details = inferJobDetailsFromText(input.raw_text);
+  const rawText = normalizePastedText(input.raw_text).trim();
+  const details = inferJobDetailsFromText(rawText);
   const job: JobDescription = {
     id: Date.now(),
     company: input.company.trim() || details.company,
     title: input.title.trim() || details.title || 'Untitled job',
     url: input.url.trim(),
-    raw_text: input.raw_text.trim(),
+    raw_text: rawText,
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -1073,13 +1074,14 @@ export async function UpdateJobDescription(input: {id: number; company: string; 
     return WailsUpdateJobDescription(input);
   }
   const timestamp = now();
-  const details = inferJobDetailsFromText(input.raw_text);
+  const rawText = normalizePastedText(input.raw_text).trim();
+  const details = inferJobDetailsFromText(rawText);
   mockJobs = mockJobs.map((job) => job.id === input.id ? {
     ...job,
     company: input.company.trim() || details.company,
     title: input.title.trim() || details.title || 'Untitled job',
     url: input.url.trim(),
-    raw_text: input.raw_text.trim(),
+    raw_text: rawText,
     updated_at: timestamp,
   } : job);
   return mockJobs.find((job) => job.id === input.id);
@@ -1103,16 +1105,16 @@ export async function ParseJobDescription(jobID: number) {
   const job = mockJobs.find((item) => item.id === jobID);
   if (!job) return [];
   const timestamp = now();
-  const lines = job.raw_text
+  const lines = normalizePastedText(job.raw_text)
     .split(/\n|\.|;/)
     .map((line) => line.trim())
     .filter((line) => line.length > 10 && !isIrrelevantJobRequirementLine(line));
-  const reqs = lines.slice(0, 16).map((line, index): JobRequirement => ({
+  const reqs = lines.slice(0, 16).map((line, index): JobRequirement => normalizeMockRequirement({
     id: Date.now() + index,
     job_id: jobID,
     category: mockRequirementCategory(line),
     requirement_text: line.replace(/^[-•]\s*/, ''),
-    keywords: extractKeywords(line),
+    keywords: extractKeywords(normalizeRequirementSentence(line)),
     priority: index < 3 ? 'high' : 'medium',
     source_quote: line,
     created_at: timestamp,
@@ -1589,11 +1591,25 @@ function embeddingModelDefault(provider: string) {
 }
 
 function normalizeRawSourceText(rawText: string) {
-  const text = rawText.trim();
+  const text = normalizePastedText(rawText).trim();
   if (!looksLikeLatex(text)) {
     return text;
   }
   return cleanLatexText(text);
+}
+
+function normalizePastedText(rawText: string) {
+  return rawText
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .replace(/Â·/g, '-')
+    .replace(/Â/g, '')
+    .replace(/â€™|â€˜/g, "'")
+    .replace(/â€œ|â€�/g, '"')
+    .replace(/â€”|â€“/g, ' - ')
+    .replace(/â€¢/g, '-')
+    .replace(/â€¦/g, '...');
 }
 
 function looksLikeLatex(text: string) {
@@ -2166,6 +2182,11 @@ function buildMockJobAnalysis(job: JobDescription, requirements: JobRequirement[
   const preferred = requirements.filter((req) => req.category === 'nice_to_have');
   const responsibilities = requirements.filter((req) => req.category === 'responsibility');
   const keywords = [...new Set(requirements.flatMap((req) => req.keywords))];
+  const topPainPoints = [...responsibilities, ...required]
+    .filter(requirementCanBeTopPainPoint)
+    .map((req) => req.requirement_text)
+    .filter((value, index, values) => values.findIndex((item) => item.toLowerCase() === value.toLowerCase()) === index)
+    .slice(0, 3);
   return {
     job_id: job.id,
     company: job.company,
@@ -2173,7 +2194,7 @@ function buildMockJobAnalysis(job: JobDescription, requirements: JobRequirement[
     location: inferLocationFromJD(job.raw_text),
     work_arrangement: inferArrangementFromJD(job.raw_text),
     salary: '',
-    top_pain_points: [...responsibilities, ...required].map((req) => req.requirement_text).slice(0, 3),
+    top_pain_points: topPainPoints,
     required_skills: [...new Set(required.flatMap((req) => req.keywords))],
     preferred_skills: [...new Set(preferred.flatMap((req) => req.keywords))],
     responsibilities: responsibilities.map((req) => req.requirement_text),
@@ -2186,6 +2207,29 @@ function buildMockJobAnalysis(job: JobDescription, requirements: JobRequirement[
     created_at: now(),
     updated_at: now(),
   };
+}
+
+function requirementCanBeTopPainPoint(req: JobRequirement) {
+  const text = req.requirement_text.toLowerCase();
+  if (!hasStrictTailorableRequirementSignal(req.requirement_text)) return false;
+  return ![
+    'degree',
+    'computer science',
+    'equivalent practical experience',
+    'solid understanding',
+    'communication',
+    'team-first',
+    'team first',
+    'collaborative',
+    'collaborate',
+    'team culture',
+    'ownership mentality',
+    'seek clarity',
+    'shared outcomes',
+    'values',
+    'benefits',
+    'application instruction',
+  ].some((marker) => text.includes(marker));
 }
 
 function buildMockFitAnalysis(jobID: number): JobFitAnalysis {
@@ -2240,7 +2284,7 @@ function inferRoleArchetypeFromJD(title: string, keywords: string[]) {
 }
 
 function inferJobDetailsFromText(rawText: string) {
-  const lines = rawText
+  const lines = normalizePastedText(rawText)
     .split('\n')
     .map(cleanJobDetailLine)
     .filter((line) => line && !line.toLowerCase().startsWith('http'))
@@ -2279,7 +2323,7 @@ function inferJobDetailsFromText(rawText: string) {
 }
 
 function cleanJobDetailLine(line: string) {
-  return line.trim().replace(/^[-•]\s*/, '').replace(/^[#*_`]+|[#*_`]+$/g, '').replace(/\s+/g, ' ').trim();
+  return normalizePastedText(line).replace(/^[-\u2022]\s*/, '').replace(/^[#*_`]+|[#*_`]+$/g, '').replace(/\s+/g, ' ').trim();
 }
 
 function looksLikeRoleTitle(line: string) {
@@ -2292,10 +2336,11 @@ function isIrrelevantJobRequirementLine(line: string) {
   const markers = [
     '12-month', '12 month', 'contract', 'max term', 'fixed term', 'salary', 'compensation', 'benefit', 'leave', 'hybrid', 'remote', 'location', 'office',
     'how to apply', 'application process', 'submit your application', 'recruit', 'hiring', 'interview', 'equal opportunity', 'diversity', 'background check', 'sponsorship',
-    'leading personal injury', 'class actions law firm', 'about us', 'about the company', 'company is', 'we are a', "we're a", 'our client',
+    'leading personal injury', 'class actions law firm', 'about us', 'about the company', 'company is', 'we are a', "we're a", 'our client', 'we believe', 'we are looking for', 'based in', 'we want people', 'right now, your expertise', 'in 6 months', 'in 12 months', 'what your success will look like', 'why catapult',
     'logo', 'linkedin', 'promoted by', 'responses managed', 'profile matches', 'is this information helpful', 'personalized tips', 'top applicant', 'retry premium', 'people you can reach out', 'school alumni', 'clicked apply',
   ];
   if (markers.some((marker) => lower.includes(marker))) return true;
+  if (looksLikeEmployerDescription(line) || isPureSoftSkillRequirement(line)) return true;
   if (isJobBoilerplateLine(line)) return true;
   if (isJobHeadingOrMetadata(line)) return true;
   if (!hasStrictTailorableRequirementSignal(line)) return true;
@@ -2326,14 +2371,42 @@ function hasStrictTailorableRequirementSignal(line: string) {
   const lower = line.toLowerCase();
   return [
     'experience', 'hands-on', 'strong', 'deep', 'knowledge', 'understanding', 'programming', 'skills',
-    'design ', 'design and', 'build ', 'build and', 'develop', 'deliver', 'modernis', 'test', 'support ',
+    'exposure', 'regulated', 'healthcare', 'pharma', 'medical devices',
+    'track record', 'owning', 'own ', 'full-stack', 'full stack',
+    'design ', 'design and', 'build ', 'build and', 'develop', 'deliver', 'modernis', 'test', 'testing', 'support ',
     'architecture', 'api', 'apis', 'data ingestion', 'high-concurrency', 'dashboard', 'dashboards',
-    'workflow', 'workflows', 'rag', 'retrieval', 'chunking', 'metadata filtering', 'model context protocol', 'evaluation framework',
-    'cloud', 'serverless', 'event-driven', 'distributed', 'scalable', 'resilience', 'observability', 'security',
+    'workflow', 'workflows', 'real-time', 'low-latency', 'stream processing', 'rag', 'retrieval', 'chunking', 'metadata filtering', 'model context protocol', 'evaluation framework',
+    'cloud', 'serverless', 'event-driven', 'distributed', 'scalable', 'resilience', 'observability', 'security', 'firmware', 'hardware',
     'networking', 'identity', 'database', 'nosql', 'data model', 'data models', 'schema',
     'fastapi', 'postgresql', 'react', 'next.js', 'typescript', 'javascript', 'python', 'golang', 'java', 'spring', 'mysql', 'node.js', 'node',
-    'azure', 'cosmos db', 'aws', 'gcp', 'docker', 'kubernetes', 'terraform', 'redis', 'snowflake', 'langgraph', 'crewai', 'mcp', 'langsmith', 'arize', 'phoenix', 'cursor', 'claudecode', 'copilot',
+    'azure', 'cosmos db', 'aws', 'gcp', 'docker', 'kubernetes', 'terraform', 'redis', 'snowflake', 'kafka', 'kinesis', 'iot', 'iac', 'rust', 'c#', '.net', 'c++', 'microservice', 'domain-driven', 'langgraph', 'crewai', 'mcp', 'langsmith', 'arize', 'phoenix', 'cursor', 'claudecode', 'copilot',
   ].some((signal) => lower.includes(signal));
+}
+
+function looksLikeEmployerDescription(line: string) {
+  const lower = line.trim().toLowerCase();
+  return [
+    ' is a ',
+    ' is building ',
+    'we work with ',
+    'we provide ',
+    'we deliver ',
+    'our solutions ',
+    'with a mission ',
+    'empowers professional teams',
+    'every decision is an opportunity',
+    'future of sports performance',
+  ].some((marker) => lower.includes(marker));
+}
+
+function isPureSoftSkillRequirement(line: string) {
+  const lower = line.trim().toLowerCase();
+  return lower.includes('collaborative team player') ||
+    lower.includes('verbal and written communication') ||
+    lower.includes('positive and curious mindset') ||
+    lower.includes('can-do attitude') ||
+    lower.startsWith('a passion for educating') ||
+    lower.startsWith('an appetite for using/learning');
 }
 
 function styleRiskFlags(text: string) {
@@ -2591,6 +2664,9 @@ function isJobBoilerplateLine(line: string) {
   if ((cleaned.match(/\|/g) ?? []).length >= 2 && ['acting cto', 'vp of', 'founder', 'recruiter', 'talent', 'hiring', 'ex-', ' at '].some((marker) => lower.includes(marker))) {
     return true;
   }
+  if (['experience with', 'hands-on', 'understanding of', 'exposure to'].some((marker) => lower.includes(marker))) {
+    return false;
+  }
   if (looksLikeRoleTitle(cleaned) && !hasConcreteRequirementVerb(cleaned) && cleaned.split(/\s+/).length <= 10) {
     return true;
   }
@@ -2605,24 +2681,91 @@ function hasConcreteRequirementVerb(line: string) {
 }
 
 function mockRequirementCategory(line: string) {
-  const lower = line.toLowerCase();
-  if (lower.includes('must') || lower.includes('required') || lower.includes('experience with')) return 'must_have';
-  if (lower.includes('nice') || lower.includes('preferred') || lower.includes('bonus')) return 'nice_to_have';
+	const lower = line.toLowerCase();
+	if (lower.includes('must') || lower.includes('required') || lower.includes('experience with')) return 'must_have';
+	if (lower.includes('nice') || lower.includes('preferred') || lower.includes('bonus')) return 'nice_to_have';
   if (lower.includes('senior') || lower.includes('years') || lower.includes('lead')) return 'seniority';
   if (lower.includes('industry') || lower.includes('domain')) return 'domain';
-  return 'responsibility';
+	return 'responsibility';
+}
+
+function normalizeMockRequirement(req: JobRequirement): JobRequirement {
+  const text = normalizeRequirementSentence(req.requirement_text);
+  const lower = `${text} ${req.source_quote}`.toLowerCase();
+  let category = req.category;
+  let priority = req.priority;
+  if (lower.includes('advantageous but not mandatory') || lower.includes('not mandatory') || lower.includes('preferred') || lower.includes('bonus')) {
+    category = 'nice_to_have';
+    priority = 'low';
+  }
+  if (lower.includes('mentor') || lower.includes('mentoring') || lower.includes('knowledge sharing')) {
+    category = 'seniority';
+    if (priority === 'high') priority = 'medium';
+  }
+  return {
+    ...req,
+    category,
+    priority,
+    requirement_text: text,
+    keywords: extractKeywords(`${text} ${req.keywords.join(' ')}`),
+  };
+}
+
+function normalizeRequirementSentence(value: string) {
+  let text = cleanJobDetailLine(value).replace(/\.$/, '');
+  const colonIndex = text.indexOf(':');
+  if (colonIndex > 0) {
+    const prefix = text.slice(0, colonIndex).trim().toLowerCase();
+    if (prefix.split(/\s+/).length <= 6 && requirementHeadingPrefix(prefix)) {
+      text = text.slice(colonIndex + 1).trim();
+    }
+  }
+  const replacements: Array<[string, string]> = [
+    ['Dive into the world of real-time data processing using', 'Real-time data processing using'],
+    ['Harness the power of the cloud for', 'Cloud-based'],
+    ['Join the mission to enhance', 'Enhance'],
+    ['Be a key driver in defining', 'Define'],
+    ['Contributing to', 'Contribute to'],
+    ['Participating in', 'Participate in'],
+    ['Conducting', 'Conduct'],
+  ];
+  for (const [oldValue, newValue] of replacements) {
+    if (text.startsWith(oldValue)) {
+      text = `${newValue}${text.slice(oldValue.length)}`;
+    }
+  }
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function requirementHeadingPrefix(prefix: string) {
+  return [
+    'develop high-quality software',
+    'technical design and architecture',
+    'collaboration and communication',
+    'problem solving and troubleshooting',
+    'code reviews and quality',
+    'mentoring and knowledge sharing',
+    'continuous learning and skill development',
+    'adherence to best practices and standards',
+    'live data stream processing',
+    'cloud-based data processing',
+    'iot capabilities for enhanced experiences',
+    'cloud platform migration',
+    'integrate with firmware and hardware',
+    'scaling',
+    'ai',
+  ].includes(prefix);
 }
 
 function extractKeywords(text: string) {
-  const stop = new Set(['with', 'and', 'the', 'for', 'you', 'will', 'must', 'have', 'need', 'needs', 'role', 'work', 'build', 'using']);
-  return [...new Set(
-    text
-      .replace(/[^A-Za-z0-9+#. ]/g, ' ')
-      .split(/\s+/)
-      .map((word) => word.trim())
-      .filter((word) => word.length > 2 && !stop.has(word.toLowerCase()))
-      .slice(0, 8),
-  )];
+  const stop = new Set(['with', 'and', 'the', 'for', 'you', 'will', 'must', 'have', 'need', 'needs', 'role', 'work', 'build', 'using', 'specific', 'technologies', 'advantageous', 'mandatory', 'participating', 'contributing', 'conducting', 'understanding', 'develop', 'join', 'dive', 'harness']);
+  const preferred = ['TypeScript', 'Node.js', 'React', 'AWS', 'Azure', 'NoSQL', 'SQL', 'Kafka', 'Kinesis', 'IoT', 'IaC', 'Go', 'Rust', 'C#', '.Net', 'C++', 'DDD', 'domain-driven design', 'microservice', 'microservices', 'cloud', 'firmware', 'hardware', 'edge devices', 'real-time', 'low-latency', 'stream processing'];
+  const keywords = preferred.filter((term) => text.toLowerCase().includes(term.toLowerCase()));
+  for (const word of text.replace(/[^A-Za-z0-9+#. ]/g, ' ').split(/\s+/)) {
+    const trimmed = word.trim();
+    if (trimmed.length > 2 && !stop.has(trimmed.toLowerCase())) keywords.push(trimmed);
+  }
+  return [...new Set(keywords)].slice(0, 8);
 }
 
 function defaultMockPromptRules(): PromptRule[] {
