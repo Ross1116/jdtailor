@@ -90,8 +90,16 @@ export function GenerateFitAnalysis(arg1) {
   return window['go']['main']['App']['GenerateFitAnalysis'](arg1);
 }
 
+export function GenerateResumeJSON(arg1) {
+  return window['go']['main']['App']['GenerateResumeJSON'](arg1);
+}
+
 export function GenerateTailoredBulletDrafts(arg1) {
   return window['go']['main']['App']['GenerateTailoredBulletDrafts'](arg1);
+}
+
+export function GetApplication(arg1) {
+  return window['go']['main']['App']['GetApplication'](arg1);
 }
 
 export function GetApplicationStrategy(arg1) {
@@ -122,6 +130,10 @@ export function GetRecentEvents() {
   return window['go']['main']['App']['GetRecentEvents']();
 }
 
+export function GetResumeVersion(arg1) {
+  return window['go']['main']['App']['GetResumeVersion'](arg1);
+}
+
 export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }
@@ -136,6 +148,10 @@ export function ImportCandidateSourceFile(arg1) {
 
 export function InstallTectonic() {
   return window['go']['main']['App']['InstallTectonic']();
+}
+
+export function ListApplications() {
+  return window['go']['main']['App']['ListApplications']();
 }
 
 export function ListBlockedClaims() {
@@ -162,6 +178,10 @@ export function ListContextAgentSteps(arg1) {
   return window['go']['main']['App']['ListContextAgentSteps'](arg1);
 }
 
+export function ListCorrections(arg1) {
+  return window['go']['main']['App']['ListCorrections'](arg1);
+}
+
 export function ListEvidenceFacts(arg1) {
   return window['go']['main']['App']['ListEvidenceFacts'](arg1);
 }
@@ -186,6 +206,10 @@ export function ListPromptRules() {
   return window['go']['main']['App']['ListPromptRules']();
 }
 
+export function ListResumeVersions(arg1) {
+  return window['go']['main']['App']['ListResumeVersions'](arg1);
+}
+
 export function ListSourceSections(arg1) {
   return window['go']['main']['App']['ListSourceSections'](arg1);
 }
@@ -194,8 +218,16 @@ export function ListTailoredBulletDrafts(arg1) {
   return window['go']['main']['App']['ListTailoredBulletDrafts'](arg1);
 }
 
+export function LogCorrection(arg1) {
+  return window['go']['main']['App']['LogCorrection'](arg1);
+}
+
 export function ParseJobDescription(arg1) {
   return window['go']['main']['App']['ParseJobDescription'](arg1);
+}
+
+export function RenderResumePDF(arg1) {
+  return window['go']['main']['App']['RenderResumePDF'](arg1);
 }
 
 export function RenderSamplePDF() {
@@ -206,8 +238,16 @@ export function SaveAPIKey(arg1) {
   return window['go']['main']['App']['SaveAPIKey'](arg1);
 }
 
+export function SaveApplication(arg1) {
+  return window['go']['main']['App']['SaveApplication'](arg1);
+}
+
 export function SaveCandidateProfile(arg1) {
   return window['go']['main']['App']['SaveCandidateProfile'](arg1);
+}
+
+export function SaveResumeVersion(arg1) {
+  return window['go']['main']['App']['SaveResumeVersion'](arg1);
 }
 
 export function SaveSettings(arg1) {
@@ -228,6 +268,10 @@ export function StopContextAgent(arg1) {
 
 export function TestLLM() {
   return window['go']['main']['App']['TestLLM']();
+}
+
+export function UpdateApplicationStatus(arg1, arg2) {
+  return window['go']['main']['App']['UpdateApplicationStatus'](arg1, arg2);
 }
 
 export function UpdateBlockedClaim(arg1) {
@@ -256,4 +300,8 @@ export function UpdateSourceSection(arg1) {
 
 export function UpdateTailoredBulletDraft(arg1) {
   return window['go']['main']['App']['UpdateTailoredBulletDraft'](arg1);
+}
+
+export function ValidateResumeJSON(arg1, arg2) {
+  return window['go']['main']['App']['ValidateResumeJSON'](arg1, arg2);
 }

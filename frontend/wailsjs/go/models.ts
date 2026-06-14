@@ -18,6 +18,34 @@ export namespace main {
 	        this.created_at = source["created_at"];
 	    }
 	}
+	export class Application {
+	    id: number;
+	    job_id: number;
+	    status: string;
+	    fit_score: number;
+	    resume_version_id: number;
+	    cover_letter_version_id: number;
+	    notes: string;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Application(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.job_id = source["job_id"];
+	        this.status = source["status"];
+	        this.fit_score = source["fit_score"];
+	        this.resume_version_id = source["resume_version_id"];
+	        this.cover_letter_version_id = source["cover_letter_version_id"];
+	        this.notes = source["notes"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
 	export class ApplicationStrategy {
 	    job_id: number;
 	    approved_fact_ids: number[];
@@ -347,6 +375,32 @@ export namespace main {
 	        this.created_at = source["created_at"];
 	    }
 	}
+	export class CorrectionLog {
+	    id: number;
+	    application_id: number;
+	    resume_version_id: number;
+	    original_bullet_text: string;
+	    corrected_bullet_text: string;
+	    claim_ids: number[];
+	    reason: string;
+	    created_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CorrectionLog(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.application_id = source["application_id"];
+	        this.resume_version_id = source["resume_version_id"];
+	        this.original_bullet_text = source["original_bullet_text"];
+	        this.corrected_bullet_text = source["corrected_bullet_text"];
+	        this.claim_ids = source["claim_ids"];
+	        this.reason = source["reason"];
+	        this.created_at = source["created_at"];
+	    }
+	}
 	export class CreateBlockedClaimInput {
 	    pattern: string;
 	    reason: string;
@@ -477,6 +531,26 @@ export namespace main {
 	        this.section_id = source["section_id"];
 	    }
 	}
+	export class FactualityCheck {
+	    bullet_index: number;
+	    bullet: string;
+	    has_claims: boolean;
+	    all_approved: boolean;
+	    issues?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new FactualityCheck(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.bullet_index = source["bullet_index"];
+	        this.bullet = source["bullet"];
+	        this.has_claims = source["has_claims"];
+	        this.all_approved = source["all_approved"];
+	        this.issues = source["issues"];
+	    }
+	}
 	export class FitNeedAnalysis {
 	    requirement_id: number;
 	    jd_need: string;
@@ -499,6 +573,20 @@ export namespace main {
 	        this.gap_level = source["gap_level"];
 	        this.confidence = source["confidence"];
 	        this.risk = source["risk"];
+	    }
+	}
+	export class GenerateResumeJSONInput {
+	    job_id: number;
+	    selected_bullet_ids: number[];
+	
+	    static createFrom(source: any = {}) {
+	        return new GenerateResumeJSONInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.job_id = source["job_id"];
+	        this.selected_bullet_ids = source["selected_bullet_ids"];
 	    }
 	}
 	export class Health {
@@ -976,6 +1064,191 @@ export namespace main {
 	
 	
 	
+	export class ResumeEducation {
+	    organization: string;
+	    degree: string;
+	    location: string;
+	    end_date: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ResumeEducation(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.organization = source["organization"];
+	        this.degree = source["degree"];
+	        this.location = source["location"];
+	        this.end_date = source["end_date"];
+	    }
+	}
+	export class ResumeEntry {
+	    company: string;
+	    title: string;
+	    location: string;
+	    start_date: string;
+	    end_date: string;
+	    bullets: string[];
+	    claim_ids: number[];
+	    bullet_ids: number[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ResumeEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.company = source["company"];
+	        this.title = source["title"];
+	        this.location = source["location"];
+	        this.start_date = source["start_date"];
+	        this.end_date = source["end_date"];
+	        this.bullets = source["bullets"];
+	        this.claim_ids = source["claim_ids"];
+	        this.bullet_ids = source["bullet_ids"];
+	    }
+	}
+	export class ResumeSkill {
+	    category: string;
+	    items: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ResumeSkill(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.category = source["category"];
+	        this.items = source["items"];
+	    }
+	}
+	export class ResumeJSON {
+	    headline: string;
+	    summary: string;
+	    skills: ResumeSkill[];
+	    experience: ResumeEntry[];
+	    projects: ResumeEntry[];
+	    education: ResumeEducation[];
+	    generated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ResumeJSON(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.headline = source["headline"];
+	        this.summary = source["summary"];
+	        this.skills = this.convertValues(source["skills"], ResumeSkill);
+	        this.experience = this.convertValues(source["experience"], ResumeEntry);
+	        this.projects = this.convertValues(source["projects"], ResumeEntry);
+	        this.education = this.convertValues(source["education"], ResumeEducation);
+	        this.generated_at = source["generated_at"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	export class ValidationResult {
+	    passed: boolean;
+	    errors: string[];
+	    warnings: string[];
+	    factuality_checks: FactualityCheck[];
+	    style_issues: string[];
+	    immutable_issues: string[];
+	    title_issues: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ValidationResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.passed = source["passed"];
+	        this.errors = source["errors"];
+	        this.warnings = source["warnings"];
+	        this.factuality_checks = this.convertValues(source["factuality_checks"], FactualityCheck);
+	        this.style_issues = source["style_issues"];
+	        this.immutable_issues = source["immutable_issues"];
+	        this.title_issues = source["title_issues"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ResumeVersion {
+	    id: number;
+	    job_id: number;
+	    resume_json: ResumeJSON;
+	    tex_source: string;
+	    pdf_path: string;
+	    validation_result: ValidationResult;
+	    created_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ResumeVersion(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.job_id = source["job_id"];
+	        this.resume_json = this.convertValues(source["resume_json"], ResumeJSON);
+	        this.tex_source = source["tex_source"];
+	        this.pdf_path = source["pdf_path"];
+	        this.validation_result = this.convertValues(source["validation_result"], ValidationResult);
+	        this.created_at = source["created_at"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class SaveAPIKeyInput {
 	    api_key: string;
 	    provider: string;

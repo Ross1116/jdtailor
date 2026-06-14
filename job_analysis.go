@@ -205,7 +205,9 @@ func buildJobAnalysis(job JobDescription, requirements []JobRequirement) JobAnal
 		case "nice_to_have":
 			preferred = append(preferred, req.RequirementText)
 		case "responsibility":
-			responsibilities = append(responsibilities, req.RequirementText)
+			if requirementCanBeAnalysisResponsibility(req) {
+				responsibilities = append(responsibilities, conciseAnalysisRequirementText(req.RequirementText))
+			}
 		default:
 			if req.Priority == "high" || req.Category == "must_have" {
 				required = append(required, req.RequirementText)
@@ -218,7 +220,7 @@ func buildJobAnalysis(job JobDescription, requirements []JobRequirement) JobAnal
 	painPoints := []string{}
 	for _, req := range requirements {
 		if requirementCanBeTopPainPoint(req) {
-			painPoints = append(painPoints, req.RequirementText)
+			painPoints = append(painPoints, conciseAnalysisRequirementText(req.RequirementText))
 		}
 	}
 	if len(painPoints) == 0 {
@@ -236,16 +238,57 @@ func buildJobAnalysis(job JobDescription, requirements []JobRequirement) JobAnal
 		WorkArrangement:  inferWorkArrangement(job.RawText),
 		Salary:           firstSalaryLike(job.RawText),
 		TopPainPoints:    painPoints,
-		RequiredSkills:   normalizeStringList(flattenRequirementKeywords(required, requirements, "must_have")),
-		PreferredSkills:  normalizeStringList(flattenRequirementKeywords(preferred, requirements, "nice_to_have")),
+		RequiredSkills:   analysisSkillKeywords(flattenRequirementKeywords(required, requirements, "must_have")),
+		PreferredSkills:  analysisSkillKeywords(flattenRequirementKeywords(preferred, requirements, "nice_to_have")),
 		Responsibilities: normalizeStringList(responsibilities),
 		SeniorityLevel:   inferSeniority(requirements),
 		RoleArchetype:    inferRoleArchetype(job.Title, keywords),
-		Keywords:         normalizeStringList(keywords),
+		Keywords:         analysisSkillKeywords(keywords),
 		RiskFlags:        normalizeStringList(riskFlags),
 		JobPoster:        "",
 		CompanyURL:       firstURL(job.RawText),
 	}
+}
+
+func requirementCanBeAnalysisResponsibility(req JobRequirement) bool {
+	if !requirementCanDriveBullet(req) {
+		return false
+	}
+	text := strings.ToLower(strings.Join([]string{req.RequirementText, strings.Join(req.Keywords, " ")}, " "))
+	for _, marker := range []string{
+		"customer and product mindset",
+		"understanding of user needs",
+		"global awareness",
+		"multiple nationalities",
+		"multiple cultures",
+		"constructive, open, and honest communication",
+		"growth mindset",
+		"positive and curious mindset",
+		"can-do attitude",
+	} {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+	for _, signal := range []string{
+		"build", "design", "develop", "deliver", "test", "testing", "migrate", "integrate", "troubleshoot", "architecture", "code review", "stream processing", "real-time", "low-latency", "cloud", "iot", "firmware", "hardware", "scale", "scaling", "mentor", "knowledge sharing",
+	} {
+		if strings.Contains(text, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func conciseAnalysisRequirementText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if before, _, ok := strings.Cut(text, ". "); ok && len(strings.Fields(before)) >= 6 {
+		text = before
+	}
+	return strings.TrimSpace(strings.TrimSuffix(text, "."))
 }
 
 func requirementCanBeTopPainPoint(req JobRequirement) bool {
@@ -264,6 +307,11 @@ func requirementCanBeTopPainPoint(req JobRequirement) bool {
 		"team first",
 		"collaborative",
 		"collaborate",
+		"customer and product mindset",
+		"understanding of user needs",
+		"global awareness",
+		"multiple nationalities",
+		"multiple cultures",
 		"team culture",
 		"ownership mentality",
 		"seek clarity",
@@ -280,6 +328,92 @@ func requirementCanBeTopPainPoint(req JobRequirement) bool {
 	}
 
 	return true
+}
+
+func analysisSkillKeywords(values []string) []string {
+	filtered := []string{}
+	for _, value := range values {
+		if normalized, ok := normalizeAnalysisSkillKeyword(value); ok {
+			filtered = append(filtered, normalized)
+		}
+	}
+	return normalizeStringList(filtered)
+}
+
+func normalizeAnalysisSkillKeyword(value string) (string, bool) {
+	cleaned := strings.TrimSpace(value)
+	if cleaned == "" {
+		return "", false
+	}
+	lower := strings.ToLower(cleaned)
+	canonical := map[string]string{
+		"amazon web services":    "AWS",
+		"aws":                    "AWS",
+		"cloud":                  "Cloud",
+		"cloud-based":            "Cloud-based data processing",
+		"cloud platform":         "Cloud platform",
+		"microservice":           "Microservices",
+		"microservices":          "Microservices",
+		"domain-driven design":   "Domain-driven design",
+		"ddd":                    "Domain-driven design",
+		"iot":                    "IoT",
+		"iac":                    "IaC",
+		"infrastructure as code": "IaC",
+		"kafka":                  "Kafka",
+		"kinesis":                "Kinesis",
+		"nosql":                  "NoSQL",
+		"sql":                    "SQL",
+		"relational":             "Relational databases",
+		"database":               "Database architecture",
+		"databases":              "Database architecture",
+		"querying":               "Database querying",
+		"performance":            "Performance optimization",
+		"real-time":              "Real-time data processing",
+		"low-latency":            "Low-latency systems",
+		"stream processing":      "Stream processing",
+		"edge devices":           "Edge devices",
+		"firmware":               "Firmware integration",
+		"hardware":               "Hardware integration",
+		"c#":                     "C#",
+		".net":                   ".Net",
+		"c++":                    "C++",
+		"go":                     "Go",
+		"golang":                 "Go",
+		"rust":                   "Rust",
+		"serverless":             "Serverless",
+		"containers":             "Containers",
+		"networking":             "Networking",
+		"security":               "Security",
+		"observability":          "Observability",
+		"distributed":            "Distributed systems",
+		"scalable":               "Scalable systems",
+		"architecture":           "Architecture",
+		"system architecture":    "System architecture",
+		"unit testing":           "Unit testing",
+		"integration testing":    "Integration testing",
+		"code reviews":           "Code reviews",
+		"ai":                     "AI",
+	}
+	if normalized, ok := canonical[lower]; ok {
+		return normalized, true
+	}
+	for _, phrase := range []struct {
+		needle string
+		label  string
+	}{
+		{"domain-driven", "Domain-driven design"},
+		{"microservice", "Microservices"},
+		{"real-time", "Real-time data processing"},
+		{"stream", "Stream processing"},
+		{"edge", "Edge devices"},
+		{"relational", "Relational databases"},
+		{"database", "Database architecture"},
+	} {
+		if strings.Contains(lower, phrase.needle) {
+			return phrase.label, true
+		}
+	}
+	return "", false
 }
 
 func preserveStringListOrder(values []string) []string {
@@ -668,10 +802,20 @@ func inferJobLocation(raw string) string {
 	for _, line := range meaningfulJobLines(raw, 20) {
 		lower := strings.ToLower(line)
 		if strings.Contains(lower, "melbourne") || strings.Contains(lower, "sydney") || strings.Contains(lower, "australia") {
-			return line
+			return cleanLinkedInLocationLine(line)
 		}
 	}
 	return ""
+}
+
+func cleanLinkedInLocationLine(line string) string {
+	line = strings.TrimSpace(line)
+	for _, separator := range []string{" · ", " - Reposted", " - Promoted", " - Over "} {
+		if before, _, ok := strings.Cut(line, separator); ok {
+			line = strings.TrimSpace(before)
+		}
+	}
+	return strings.TrimRight(line, " .,-")
 }
 
 func inferWorkArrangement(raw string) string {
@@ -691,11 +835,24 @@ func inferWorkArrangement(raw string) string {
 func firstSalaryLike(raw string) string {
 	for _, line := range meaningfulJobLines(raw, 40) {
 		lower := strings.ToLower(line)
+		if isLinkedInChromeLine(line) || strings.Contains(lower, "retry premium") || strings.Contains(lower, "premium for") || strings.Contains(lower, "clicked apply") {
+			continue
+		}
 		if strings.Contains(lower, "salary") || strings.Contains(line, "$") || strings.Contains(line, "A$") {
 			return line
 		}
 	}
 	return ""
+}
+
+func isLinkedInChromeLine(line string) bool {
+	lower := strings.ToLower(line)
+	for _, marker := range []string{"reposted", "promoted by", "responses managed", "profile matches", "personalized tips", "top applicant", "people you can reach out", "clicked apply"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstURL(raw string) string {

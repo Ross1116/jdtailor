@@ -46,7 +46,11 @@ export function GenerateCandidateClaims():Promise<Array<main.CandidateClaim>>;
 
 export function GenerateFitAnalysis(arg1:number):Promise<main.JobFitAnalysis>;
 
+export function GenerateResumeJSON(arg1:main.GenerateResumeJSONInput):Promise<main.ResumeJSON>;
+
 export function GenerateTailoredBulletDrafts(arg1:number):Promise<Array<main.TailoredBulletDraft>>;
+
+export function GetApplication(arg1:number):Promise<main.Application>;
 
 export function GetApplicationStrategy(arg1:number):Promise<main.ApplicationStrategy>;
 
@@ -62,6 +66,8 @@ export function GetJobAnalysis(arg1:number):Promise<main.JobAnalysis>;
 
 export function GetRecentEvents():Promise<Array<main.AppEvent>>;
 
+export function GetResumeVersion(arg1:number):Promise<main.ResumeVersion>;
+
 export function GetSettings():Promise<main.Settings>;
 
 export function GetToolStatus():Promise<main.ToolStatus>;
@@ -69,6 +75,8 @@ export function GetToolStatus():Promise<main.ToolStatus>;
 export function ImportCandidateSourceFile(arg1:main.ImportCandidateSourceFileInput):Promise<main.CandidateSource>;
 
 export function InstallTectonic():Promise<main.InstallTectonicResult>;
+
+export function ListApplications():Promise<Array<main.Application>>;
 
 export function ListBlockedClaims():Promise<Array<main.BlockedClaim>>;
 
@@ -82,6 +90,8 @@ export function ListContextAgentRuns(arg1:number):Promise<Array<main.ContextAgen
 
 export function ListContextAgentSteps(arg1:number):Promise<Array<main.ContextAgentStep>>;
 
+export function ListCorrections(arg1:number):Promise<Array<main.CorrectionLog>>;
+
 export function ListEvidenceFacts(arg1:string):Promise<Array<main.EvidenceFact>>;
 
 export function ListJobDescriptions():Promise<Array<main.JobDescription>>;
@@ -94,17 +104,27 @@ export function ListPromptResearchSources():Promise<Array<main.PromptResearchSou
 
 export function ListPromptRules():Promise<Array<main.PromptRule>>;
 
+export function ListResumeVersions(arg1:number):Promise<Array<main.ResumeVersion>>;
+
 export function ListSourceSections(arg1:number):Promise<Array<main.SourceSection>>;
 
 export function ListTailoredBulletDrafts(arg1:number):Promise<Array<main.TailoredBulletDraft>>;
 
+export function LogCorrection(arg1:main.CorrectionLog):Promise<main.CorrectionLog>;
+
 export function ParseJobDescription(arg1:number):Promise<Array<main.JobRequirement>>;
+
+export function RenderResumePDF(arg1:main.ResumeJSON):Promise<main.RenderPDFResult>;
 
 export function RenderSamplePDF():Promise<main.RenderPDFResult>;
 
 export function SaveAPIKey(arg1:main.SaveAPIKeyInput):Promise<main.ToolStatus>;
 
+export function SaveApplication(arg1:main.Application):Promise<main.Application>;
+
 export function SaveCandidateProfile(arg1:main.CandidateProfile):Promise<main.CandidateProfile>;
+
+export function SaveResumeVersion(arg1:main.ResumeVersion):Promise<main.ResumeVersion>;
 
 export function SaveSettings(arg1:main.SaveSettingsInput):Promise<main.Settings>;
 
@@ -115,6 +135,8 @@ export function StartContextAgent(arg1:number):Promise<main.ContextAgentRun>;
 export function StopContextAgent(arg1:number):Promise<main.ContextAgentRun>;
 
 export function TestLLM():Promise<main.LLMTestResult>;
+
+export function UpdateApplicationStatus(arg1:number,arg2:string):Promise<main.Application>;
 
 export function UpdateBlockedClaim(arg1:main.UpdateBlockedClaimInput):Promise<main.BlockedClaim>;
 
@@ -129,3 +151,5 @@ export function UpdatePromptRule(arg1:main.UpdatePromptRuleInput):Promise<main.P
 export function UpdateSourceSection(arg1:main.UpdateSourceSectionInput):Promise<main.SourceSection>;
 
 export function UpdateTailoredBulletDraft(arg1:main.UpdateTailoredBulletDraftInput):Promise<main.TailoredBulletDraft>;
+
+export function ValidateResumeJSON(arg1:main.ResumeJSON,arg2:number):Promise<main.ValidationResult>;

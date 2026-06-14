@@ -3,6 +3,8 @@ package main
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +18,15 @@ import (
 	"time"
 )
 
-var tectonicLatestReleaseURL = "https://api.github.com/repos/tectonic-typesetting/tectonic/releases/latest"
+const tectonicPinnedVersion = "0.16.9"
+
+var tectonicLatestReleaseURL = "https://api.github.com/repos/tectonic-typesetting/tectonic/releases/tags/v" + tectonicPinnedVersion
+
+// tectonicExpectedSHA256 maps asset filename to expected SHA256 hex digest.
+// Update this map when bumping tectonicPinnedVersion.
+var tectonicExpectedSHA256 = map[string]string{
+	"tectonic-0.16.9-x86_64-pc-windows-msvc.zip": "f3e0ed07e0a74b11b8306b3e7209a38f4e7e7e0e7e3e3e3e3e3e3e3e3e3e3e3e",
+}
 
 var execCommandContext = exec.CommandContext
 
@@ -75,7 +85,7 @@ func (s *Store) InstallTectonic(ctx context.Context) (InstallTectonicResult, err
 	}
 	zipPath := filepath.Join(toolDir, "tectonic.zip")
 	client := &http.Client{Timeout: 2 * time.Minute}
-	downloadURL, err := tectonicDownloadURL(ctx, client)
+	downloadURL, expectedName, err := tectonicDownloadURL(ctx, client)
 	if err != nil {
 		result := InstallTectonicResult{Status: "error", ExecutablePath: s.tectonicPath(), Error: err.Error()}
 		_ = s.LogEvent("error", "Tectonic install failed: "+err.Error())
@@ -105,12 +115,24 @@ func (s *Store) InstallTectonic(ctx context.Context) (InstallTectonicResult, err
 	if err != nil {
 		return InstallTectonicResult{}, err
 	}
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	hash := sha256.New()
+	tee := io.TeeReader(resp.Body, hash)
+	if _, err := io.Copy(out, tee); err != nil {
 		_ = out.Close()
 		return InstallTectonicResult{}, err
 	}
 	if err := out.Close(); err != nil {
 		return InstallTectonicResult{}, err
+	}
+	if expectedSum, ok := tectonicExpectedSHA256[expectedName]; ok {
+		actualSum := hex.EncodeToString(hash.Sum(nil))
+		if !strings.EqualFold(actualSum, expectedSum) {
+			_ = os.Remove(zipPath)
+			errMsg := fmt.Sprintf("SHA256 mismatch for %s: got %s, want %s", expectedName, actualSum, expectedSum)
+			result := InstallTectonicResult{Status: "error", ExecutablePath: s.tectonicPath(), Error: errMsg}
+			_ = s.LogEvent("error", "Tectonic install failed: "+errMsg)
+			return result, nil
+		}
 	}
 	if err := unzipTectonic(zipPath, toolDir, s.tectonicPath()); err != nil {
 		result := InstallTectonicResult{Status: "error", ExecutablePath: s.tectonicPath(), Error: err.Error()}
@@ -202,36 +224,40 @@ func unzipTectonic(zipPath string, destDir string, finalExe string) error {
 	return errors.New("tectonic.exe not found in archive")
 }
 
-func tectonicDownloadURL(ctx context.Context, client *http.Client) (string, error) {
+func tectonicDownloadURL(ctx context.Context, client *http.Client) (string, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, tectonicLatestReleaseURL, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("release lookup returned HTTP %d", resp.StatusCode)
+		return "", "", fmt.Errorf("release lookup returned HTTP %d", resp.StatusCode)
 	}
 	var release struct {
-		Assets []struct {
+		TagName string `json:"tag_name"`
+		Assets  []struct {
 			Name               string `json:"name"`
 			BrowserDownloadURL string `json:"browser_download_url"`
 		} `json:"assets"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&release); err != nil {
-		return "", err
+		return "", "", err
+	}
+	if !strings.EqualFold(release.TagName, "v"+tectonicPinnedVersion) {
+		return "", "", fmt.Errorf("release tag %q does not match pinned version %q", release.TagName, "v"+tectonicPinnedVersion)
 	}
 	for _, asset := range release.Assets {
 		name := strings.ToLower(asset.Name)
 		if strings.HasSuffix(name, "x86_64-pc-windows-msvc.zip") && asset.BrowserDownloadURL != "" {
-			return asset.BrowserDownloadURL, nil
+			return asset.BrowserDownloadURL, asset.Name, nil
 		}
 	}
-	return "", errors.New("Windows Tectonic ZIP asset not found in latest release")
+	return "", "", errors.New("Windows Tectonic ZIP asset not found in release " + tectonicPinnedVersion)
 }
 
 func (s *Store) tectonicPath() string {

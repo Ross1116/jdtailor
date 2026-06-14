@@ -694,6 +694,43 @@ func (s *Store) migrate(ctx context.Context) error {
 				ALTER TABLE tailored_bullet_drafts ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0;
 			`,
 		},
+		{
+			version: 14,
+			sql: `
+				CREATE TABLE IF NOT EXISTS resume_versions (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					job_id INTEGER NOT NULL REFERENCES job_descriptions(id) ON DELETE CASCADE,
+					resume_json TEXT NOT NULL,
+					tex_source TEXT NOT NULL DEFAULT '',
+					pdf_path TEXT NOT NULL DEFAULT '',
+					validation_result TEXT NOT NULL DEFAULT '{}',
+					created_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS applications (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					job_id INTEGER NOT NULL REFERENCES job_descriptions(id) ON DELETE CASCADE,
+					status TEXT NOT NULL DEFAULT 'draft',
+					fit_score INTEGER NOT NULL DEFAULT 0,
+					resume_version_id INTEGER NOT NULL DEFAULT 0,
+					cover_letter_version_id INTEGER NOT NULL DEFAULT 0,
+					notes TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL
+				);
+
+				CREATE TABLE IF NOT EXISTS correction_logs (
+					id INTEGER PRIMARY KEY AUTOINCREMENT,
+					application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+					resume_version_id INTEGER NOT NULL DEFAULT 0,
+					original_text TEXT NOT NULL,
+					corrected_text TEXT NOT NULL,
+					claim_ids_json TEXT NOT NULL DEFAULT '[]',
+					reason TEXT NOT NULL DEFAULT '',
+					created_at TEXT NOT NULL
+				);
+			`,
+		},
 	}
 
 	for _, migration := range migrations {

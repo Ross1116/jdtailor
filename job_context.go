@@ -343,6 +343,7 @@ Parse the pasted job description into resume-tailoring requirements.
 - Recruiter/poster profile headlines, role title rows, company mission paragraphs, employer product blurbs, and "why join us" sections.
 - Role-title-only metadata such as "Software Engineer".
 - Generic soft skills unless tied to concrete engineering work: communication, passion, mindset, openness, team player, curiosity.
+- Customer/product mindset and global-culture statements unless they are tied to a concrete engineering artifact or delivery responsibility.
 - Success timeline sections such as "in 6 months" or "in 12 months" unless they introduce a new hard requirement.
 - Optional stack lists should be category "nice_to_have" and priority "low", not "must_have".
 
@@ -2881,6 +2882,10 @@ func isPureSoftSkillRequirement(text string) bool {
 	}
 	if strings.Contains(lower, "collaborative team player") ||
 		strings.Contains(lower, "verbal and written communication") ||
+		strings.Contains(lower, "customer and product mindset") ||
+		strings.Contains(lower, "understanding of user needs") ||
+		strings.Contains(lower, "multiple nationalities") ||
+		strings.Contains(lower, "global awareness") ||
 		strings.Contains(lower, "positive and curious mindset") ||
 		strings.Contains(lower, "can-do attitude") ||
 		strings.HasPrefix(lower, "a passion for educating") ||

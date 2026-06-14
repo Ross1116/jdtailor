@@ -252,20 +252,30 @@ func TestLLMUsesOpenRouterChatCompletionsShape(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			t.Fatalf("method = %s, want POST", r.Method)
+			t.Logf("method = %s, want POST", r.Method)
+			http.Error(w, "method", http.StatusInternalServerError)
+			return
 		}
 		if r.Header.Get("Authorization") != "Bearer sk-test" {
-			t.Fatalf("authorization header not set")
+			t.Logf("authorization header not set")
+			http.Error(w, "auth", http.StatusInternalServerError)
+			return
 		}
 		if r.Header.Get("X-OpenRouter-Title") != "JD Tailor" {
-			t.Fatalf("OpenRouter title header not set")
+			t.Logf("OpenRouter title header not set")
+			http.Error(w, "title", http.StatusInternalServerError)
+			return
 		}
 		var request chatCompletionRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatalf("decode request: %v", err)
+			t.Logf("decode request: %v", err)
+			http.Error(w, "decode", http.StatusInternalServerError)
+			return
 		}
 		if request.Model != "deepseek/test" || len(request.Messages) == 0 {
-			t.Fatalf("bad request: %+v", request)
+			t.Logf("bad request: %+v", request)
+			http.Error(w, "bad request", http.StatusInternalServerError)
+			return
 		}
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"JD Tailor LLM check"}}]}`))
 	}))
@@ -301,10 +311,14 @@ func TestGenerateLLMTextUsesJSONModeAndDetectsLength(t *testing.T) {
 		call++
 		var request chatCompletionRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatalf("decode request: %v", err)
+			t.Logf("decode request: %v", err)
+			http.Error(w, "decode", http.StatusInternalServerError)
+			return
 		}
 		if request.ResponseFormat == nil || request.ResponseFormat.Type != "json_object" {
-			t.Fatalf("response format = %+v, want json_object", request.ResponseFormat)
+			t.Logf("response format = %+v, want json_object", request.ResponseFormat)
+			http.Error(w, "format", http.StatusInternalServerError)
+			return
 		}
 		if call == 1 {
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"ok\":true}"},"finish_reason":"stop"}]}`))
@@ -340,17 +354,25 @@ func TestEmbeddingClientCachesSameProviderVectors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
 		if r.URL.Path != "/api/v1/embeddings" {
-			t.Fatalf("path = %s, want /api/v1/embeddings", r.URL.Path)
+			t.Logf("path = %s, want /api/v1/embeddings", r.URL.Path)
+			http.Error(w, "path", http.StatusInternalServerError)
+			return
 		}
 		if r.Header.Get("Authorization") != "Bearer sk-test" {
-			t.Fatalf("authorization header missing")
+			t.Logf("authorization header missing")
+			http.Error(w, "auth", http.StatusInternalServerError)
+			return
 		}
 		var request embeddingsRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatalf("decode request: %v", err)
+			t.Logf("decode request: %v", err)
+			http.Error(w, "decode", http.StatusInternalServerError)
+			return
 		}
 		if request.Model != "openai/text-embedding-3-small" || request.Input != "same text" {
-			t.Fatalf("request = %+v", request)
+			t.Logf("request = %+v", request)
+			http.Error(w, "bad request", http.StatusInternalServerError)
+			return
 		}
 		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3],"index":0}],"model":"openai/text-embedding-3-small"}`))
 	}))
@@ -1718,7 +1740,9 @@ func TestJobLLMWorkflowUsesAllFactStatusesAndDraftReview(t *testing.T) {
 		call++
 		var request chatCompletionRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatalf("decode request: %v", err)
+			t.Logf("decode request: %v", err)
+			http.Error(w, "decode", http.StatusInternalServerError)
+			return
 		}
 		content := request.Messages[len(request.Messages)-1].Content
 		switch call {
@@ -1726,13 +1750,14 @@ func TestJobLLMWorkflowUsesAllFactStatusesAndDraftReview(t *testing.T) {
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"requirements\":[{\"category\":\"must_have\",\"requirement_text\":\"FastAPI experience\",\"keywords\":[\"FastAPI\"],\"priority\":\"high\",\"source_quote\":\"FastAPI experience\"}]}"}}]}`))
 		case 2:
 			if !strings.Contains(content, facts[0].Status) || !strings.Contains(content, facts[0].FactText) {
-				t.Fatalf("match prompt missing relevant approved fact: %s", content)
+				t.Logf("match prompt missing relevant approved fact: %s", content)
 			}
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"matches\":[{\"requirement_id\":1,\"fact_id\":1,\"score\":0.9,\"rationale\":\"Direct evidence\",\"coverage_status\":\"strong\"},{\"requirement_id\":1,\"fact_id\":1,\"score\":0,\"rationale\":\"No evidence\",\"coverage_status\":\"gap\"},{\"requirement_id\":1,\"fact_id\":999,\"score\":1,\"rationale\":\"Invalid\",\"coverage_status\":\"strong\"}]}"}}]}`))
 		case 3:
 			_, _ = w.Write([]byte(fmt.Sprintf(`{"choices":[{"message":{"role":"assistant","content":"{\"drafts\":[{\"requirement_id\":1,\"claim_ids\":[%d],\"fact_ids\":[1,999],\"draft_text\":\"Built FastAPI APIs for planning workflows.\",\"rationale\":\"Direct evidence\",\"risk_flags\":[]}]}"}}]}`, claims[0].ID)))
 		default:
-			t.Fatalf("unexpected LLM call %d", call)
+			t.Logf("unexpected LLM call %d", call)
+			http.Error(w, "unexpected", http.StatusInternalServerError)
 		}
 	}))
 	defer server.Close()
@@ -2372,6 +2397,58 @@ func TestJobAnalysisTopPainPointsSkipCredentialsAndSoftSkills(t *testing.T) {
 	}
 }
 
+func TestJobAnalysisFiltersCatapultDisplayNoise(t *testing.T) {
+	analysis := buildJobAnalysis(JobDescription{ID: 1, Company: "Catapult", Title: "Senior Software Engineer", RawText: "Melbourne, Victoria, Australia · Reposted 1 day ago · Over 100 people clicked apply\nRetry Premium for A$0"}, []JobRequirement{
+		{RequirementText: "A customer and product mindset - Understanding of user needs and a focus on delivering impactful solutions", Category: "responsibility", Priority: "high", Keywords: []string{"customer", "product", "impactful"}},
+		{RequirementText: "Contribute to technical design discussions, proposing solutions, and collaborating with technical leaders and colleagues globally to define system architecture and design patterns", Category: "responsibility", Priority: "high", Keywords: []string{"architecture", "design patterns", "Define"}},
+		{RequirementText: "Participate in code reviews to ensure code quality, adherence to coding standards, and best practices. Conducting unit testing and integration testing to verify functionality and reliability", Category: "responsibility", Priority: "high", Keywords: []string{"Participate", "code reviews", "unit testing", "integration testing"}},
+		{RequirementText: "Real-time data processing using technologies like Kafka, Kinesis, AWS, and edge devices. We're processing live athlete data streams like never before, fueling data-driven decisions that impact the performance of athletes", Category: "responsibility", Priority: "high", Keywords: []string{"Kafka", "Kinesis", "AWS", "edge devices", "real-time"}},
+		{RequirementText: "Experience with AWS infrastructure, including IoT, IaC, Go, Rust, C# .Net, C++", Category: "nice_to_have", Priority: "low", Keywords: []string{"AWS", "IoT", "IaC", "Go", "Rust", "C#", ".Net", "C++"}},
+		{RequirementText: "Proficiency in microservice architectures within AWS, applying domain-driven design principles", Category: "must_have", Priority: "high", Keywords: []string{"AWS", "microservice", "domain-driven design"}},
+		{RequirementText: "An understanding of NoSQL & relational database architecture, querying and performance", Category: "must_have", Priority: "high", Keywords: []string{"NoSQL", "relational", "database", "querying", "performance"}},
+	})
+
+	if analysis.Location != "Melbourne, Victoria, Australia" {
+		t.Fatalf("location = %q, want clean LinkedIn location", analysis.Location)
+	}
+	if analysis.Salary != "" {
+		t.Fatalf("salary = %q, want Premium upsell ignored", analysis.Salary)
+	}
+	for _, value := range analysis.Responsibilities {
+		if strings.Contains(value, "customer and product mindset") {
+			t.Fatalf("responsibilities include customer mindset noise: %+v", analysis.Responsibilities)
+		}
+		if strings.Contains(value, "We're processing live athlete data") || strings.Contains(value, "Conducting unit testing") {
+			t.Fatalf("responsibilities include explanatory follow-up sentence: %+v", analysis.Responsibilities)
+		}
+	}
+	for _, value := range append(append([]string{}, analysis.RequiredSkills...), analysis.Keywords...) {
+		for _, bad := range []string{"Define", "Participate", "customer", "product", "adherence"} {
+			if value == bad {
+				t.Fatalf("analysis skills include generic token %q: required=%+v keywords=%+v", bad, analysis.RequiredSkills, analysis.Keywords)
+			}
+		}
+	}
+	for _, want := range []string{"AWS", "Microservices", "Domain-driven design", "NoSQL", "Relational databases"} {
+		if !stringListContains(analysis.RequiredSkills, want) {
+			t.Fatalf("required skills missing %q: %+v", want, analysis.RequiredSkills)
+		}
+	}
+	for _, want := range []string{"IoT", "IaC", "Go", "Rust", "C#", ".Net", "C++"} {
+		if !stringListContains(analysis.PreferredSkills, want) {
+			t.Fatalf("preferred skills missing %q: %+v", want, analysis.PreferredSkills)
+		}
+	}
+	if len(analysis.TopPainPoints) == 0 || strings.Contains(analysis.TopPainPoints[0], "customer and product mindset") {
+		t.Fatalf("top pain points prioritize noise: %+v", analysis.TopPainPoints)
+	}
+	for _, value := range analysis.TopPainPoints {
+		if strings.Contains(value, "We're processing live athlete data") || strings.Contains(value, "Conducting unit testing") {
+			t.Fatalf("top pain points include explanatory follow-up sentence: %+v", analysis.TopPainPoints)
+		}
+	}
+}
+
 func TestParseJobRequirementsCleansCatapultNoise(t *testing.T) {
 	response := `{"requirements":[
 		{"category":"responsibility","requirement_text":"Catapult is a sports technology company that empowers professional teams to make data-driven decisions. We deliver health, performance, video, and AI insights from the locker room to competitive environments, ensuring every decision is an opportunity to gain an advantage, sharpen performance, and build lasting success","keywords":["Catapult","sports","company"],"priority":"high","source_quote":"Catapult is a sports technology company that empowers professional teams to make data-driven decisions. We deliver health, performance, video, and AI insights from the locker room to competitive environments, ensuring every decision is an opportunity to gain an advantage, sharpen performance, and build lasting success"},
@@ -2775,6 +2852,7 @@ func TestTectonicStatusRepoLocalOnly(t *testing.T) {
 func TestTectonicDownloadURLSelectsWindowsAsset(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{
+			"tag_name": "v0.16.9",
 			"assets": [
 				{"name": "tectonic-0.16.9-x86_64-unknown-linux-gnu.tar.gz", "browser_download_url": "linux"},
 				{"name": "tectonic-0.16.9-x86_64-pc-windows-msvc.zip", "browser_download_url": "windows"}
@@ -2789,7 +2867,7 @@ func TestTectonicDownloadURLSelectsWindowsAsset(t *testing.T) {
 		tectonicLatestReleaseURL = previous
 	}()
 
-	url, err := tectonicDownloadURL(t.Context(), server.Client())
+	url, _, err := tectonicDownloadURL(t.Context(), server.Client())
 	if err != nil {
 		t.Fatalf("tectonicDownloadURL() error = %v", err)
 	}

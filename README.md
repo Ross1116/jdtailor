@@ -6,7 +6,7 @@ Local-first job application workflow tool.
 
 - Phase 1 - Bootstrap: complete
 - Phase 2 - Candidate Context Builder: complete
-- Phase 3 - Resume Core: in progress
+- Phase 3 - Resume Core: complete
 
 ## Phase 1 Bootstrap
 

@@ -602,6 +602,90 @@ func (a *App) GetApplicationStrategy(jobID int64) (ApplicationStrategy, error) {
 	return a.store.GetApplicationStrategy(jobID)
 }
 
+func (a *App) GenerateResumeJSON(input GenerateResumeJSONInput) (ResumeJSON, error) {
+	if err := a.ensureStore(); err != nil {
+		return ResumeJSON{}, err
+	}
+	return a.store.GenerateResumeJSON(a.ctx, input)
+}
+
+func (a *App) ValidateResumeJSON(resume ResumeJSON, jobID int64) (ValidationResult, error) {
+	if err := a.ensureStore(); err != nil {
+		return ValidationResult{}, err
+	}
+	return a.store.ValidateResumeJSON(resume, jobID)
+}
+
+func (a *App) RenderResumePDF(resume ResumeJSON) (RenderPDFResult, error) {
+	if err := a.ensureStore(); err != nil {
+		return RenderPDFResult{}, err
+	}
+	return a.store.RenderResumePDF(a.ctx, resume)
+}
+
+func (a *App) SaveResumeVersion(version ResumeVersion) (ResumeVersion, error) {
+	if err := a.ensureStore(); err != nil {
+		return ResumeVersion{}, err
+	}
+	return a.store.SaveResumeVersion(version)
+}
+
+func (a *App) GetResumeVersion(id int64) (ResumeVersion, error) {
+	if err := a.ensureStore(); err != nil {
+		return ResumeVersion{}, err
+	}
+	return a.store.GetResumeVersion(id)
+}
+
+func (a *App) ListResumeVersions(jobID int64) ([]ResumeVersion, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListResumeVersions(jobID)
+}
+
+func (a *App) SaveApplication(app Application) (Application, error) {
+	if err := a.ensureStore(); err != nil {
+		return Application{}, err
+	}
+	return a.store.SaveApplication(app)
+}
+
+func (a *App) GetApplication(id int64) (Application, error) {
+	if err := a.ensureStore(); err != nil {
+		return Application{}, err
+	}
+	return a.store.GetApplication(id)
+}
+
+func (a *App) ListApplications() ([]Application, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListApplications()
+}
+
+func (a *App) UpdateApplicationStatus(id int64, status string) (Application, error) {
+	if err := a.ensureStore(); err != nil {
+		return Application{}, err
+	}
+	return a.store.UpdateApplicationStatus(id, status)
+}
+
+func (a *App) LogCorrection(correction CorrectionLog) (CorrectionLog, error) {
+	if err := a.ensureStore(); err != nil {
+		return CorrectionLog{}, err
+	}
+	return a.store.LogCorrection(correction)
+}
+
+func (a *App) ListCorrections(applicationID int64) ([]CorrectionLog, error) {
+	if err := a.ensureStore(); err != nil {
+		return nil, err
+	}
+	return a.store.ListCorrections(applicationID)
+}
+
 func (a *App) ensureStore() error {
 	if a.store != nil {
 		return nil

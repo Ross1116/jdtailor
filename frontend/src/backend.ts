@@ -63,6 +63,18 @@ import {
   UpdatePromptRule as WailsUpdatePromptRule,
   UpdateSourceSection as WailsUpdateSourceSection,
   UpdateTailoredBulletDraft as WailsUpdateTailoredBulletDraft,
+  GenerateResumeJSON as WailsGenerateResumeJSON,
+  ValidateResumeJSON as WailsValidateResumeJSON,
+  RenderResumePDF as WailsRenderResumePDF,
+  SaveResumeVersion as WailsSaveResumeVersion,
+  GetResumeVersion as WailsGetResumeVersion,
+  ListResumeVersions as WailsListResumeVersions,
+  SaveApplication as WailsSaveApplication,
+  GetApplication as WailsGetApplication,
+  ListApplications as WailsListApplications,
+  UpdateApplicationStatus as WailsUpdateApplicationStatus,
+  LogCorrection as WailsLogCorrection,
+  ListCorrections as WailsListCorrections,
 } from '../wailsjs/go/main/App';
 
 export type CandidateProfile = {
@@ -408,6 +420,95 @@ export type PromptResearchSource = {
   created_at: string;
 };
 
+export type ResumeSkill = {
+  category: string;
+  items: string[];
+};
+
+export type ResumeEntry = {
+  company: string;
+  title: string;
+  location: string;
+  start_date: string;
+  end_date: string;
+  bullets: string[];
+  claim_ids: number[];
+  bullet_ids: number[];
+};
+
+export type ResumeEducation = {
+  organization: string;
+  degree: string;
+  location: string;
+  end_date: string;
+};
+
+export type ResumeJSON = {
+  headline: string;
+  summary: string;
+  skills: ResumeSkill[];
+  experience: ResumeEntry[];
+  projects: ResumeEntry[];
+  education: ResumeEducation[];
+  generated_at: string;
+};
+
+export type FactualityCheck = {
+  bullet_index: number;
+  bullet: string;
+  has_claims: boolean;
+  all_approved: boolean;
+  issues: string[];
+};
+
+export type ValidationResult = {
+  passed: boolean;
+  errors: string[];
+  warnings: string[];
+  factuality_checks: FactualityCheck[];
+  style_issues: string[];
+  immutable_issues: string[];
+  title_issues: string[];
+};
+
+export type GenerateResumeJSONInput = {
+  job_id: number;
+  selected_bullet_ids: number[];
+};
+
+export type ResumeVersion = {
+  id: number;
+  job_id: number;
+  resume_json: ResumeJSON;
+  tex_source: string;
+  pdf_path: string;
+  validation_result: ValidationResult;
+  created_at: string;
+};
+
+export type Application = {
+  id: number;
+  job_id: number;
+  status: string;
+  fit_score: number;
+  resume_version_id: number;
+  cover_letter_version_id: number;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CorrectionLog = {
+  id: number;
+  application_id: number;
+  resume_version_id: number;
+  original_bullet_text: string;
+  corrected_bullet_text: string;
+  claim_ids: number[];
+  reason: string;
+  created_at: string;
+};
+
 const hasWailsBackend = () => Boolean(window.go?.main?.App);
 
 const now = () => new Date().toISOString();
@@ -453,6 +554,13 @@ let mockFitAnalyses: JobFitAnalysis[] = [];
 let mockStrategies: ApplicationStrategy[] = [];
 let mockPromptRules: PromptRule[] = defaultMockPromptRules();
 const mockPromptSources: PromptResearchSource[] = defaultMockPromptSources();
+
+let mockApplications: Application[] = [];
+let mockResumeVersions: ResumeVersion[] = [];
+let mockCorrections: CorrectionLog[] = [];
+let _nextMockAppId = 1;
+let _nextMockResumeVersionId = 1;
+let _nextMockCorrectionId = 1;
 
 const mockEvents = [
   {
@@ -2843,4 +2951,127 @@ function defaultMockBlockedClaims(): BlockedClaim[] {
     created_at: timestamp,
     updated_at: timestamp,
   }));
+}
+
+export async function GenerateResumeJSON(input: GenerateResumeJSONInput) {
+  if (hasWailsBackend()) {
+    return WailsGenerateResumeJSON(input);
+  }
+  const job = mockJobs.find((j) => j.id === input.job_id);
+  const title = job?.title || 'Software Engineer';
+  const resume: ResumeJSON = {
+    headline: title,
+    summary: 'Candidate — tailored for ' + title + '.',
+    skills: [],
+    experience: [],
+    projects: [],
+    education: [],
+    generated_at: now(),
+  };
+  return resume;
+}
+
+export async function ValidateResumeJSON(resume: ResumeJSON, jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsValidateResumeJSON(resume as any, jobID);
+  }
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  if (!resume.headline) errors.push('headline is empty');
+  return { passed: errors.length === 0, errors, warnings, factuality_checks: [], style_issues: [], immutable_issues: [], title_issues: [] };
+}
+
+export async function RenderResumePDF(resume: ResumeJSON) {
+  if (hasWailsBackend()) {
+    return WailsRenderResumePDF(resume as any);
+  }
+  mockEvents.unshift(mockEvent('info', 'mock PDF rendered'));
+  return { success: true, tex_path: 'mock://resume.tex', pdf_path: 'mock://resume.pdf', error: '' };
+}
+
+export async function SaveResumeVersion(input: any) {
+  if (hasWailsBackend()) {
+    return WailsSaveResumeVersion(input);
+  }
+  const timestamp = now();
+  const version: ResumeVersion = { ...input, id: _nextMockResumeVersionId++, created_at: timestamp };
+  mockResumeVersions = [version, ...mockResumeVersions];
+  mockEvents.unshift(mockEvent('info', 'mock resume version saved'));
+  return version;
+}
+
+export async function GetResumeVersion(id: number) {
+  if (hasWailsBackend()) {
+    return WailsGetResumeVersion(id);
+  }
+  const v = mockResumeVersions.find((item) => item.id === id);
+  if (!v) throw new Error('resume version not found');
+  return v;
+}
+
+export async function ListResumeVersions(jobID: number) {
+  if (hasWailsBackend()) {
+    return WailsListResumeVersions(jobID);
+  }
+  return mockResumeVersions.filter((v) => v.job_id === jobID);
+}
+
+export async function SaveApplication(input: Application) {
+  if (hasWailsBackend()) {
+    return WailsSaveApplication(input as any);
+  }
+  const timestamp = now();
+  if (input.id > 0) {
+    mockApplications = mockApplications.map((a) => a.id === input.id ? { ...a, ...input, updated_at: timestamp } : a);
+    return mockApplications.find((a) => a.id === input.id)!;
+  }
+  const app: Application = { ...input, id: _nextMockAppId++, created_at: timestamp, updated_at: timestamp };
+  mockApplications = [app, ...mockApplications];
+  mockEvents.unshift(mockEvent('info', 'mock application saved'));
+  return app;
+}
+
+export async function GetApplication(id: number) {
+  if (hasWailsBackend()) {
+    return WailsGetApplication(id);
+  }
+  const app = mockApplications.find((a) => a.id === id);
+  if (!app) throw new Error('application not found');
+  return app;
+}
+
+export async function ListApplications() {
+  if (hasWailsBackend()) {
+    return WailsListApplications();
+  }
+  return mockApplications;
+}
+
+export async function UpdateApplicationStatus(id: number, status: string) {
+  if (hasWailsBackend()) {
+    return WailsUpdateApplicationStatus(id, status);
+  }
+  const timestamp = now();
+  mockApplications = mockApplications.map((a) => a.id === id ? { ...a, status, updated_at: timestamp } : a);
+  const app = mockApplications.find((a) => a.id === id);
+  if (!app) throw new Error('application not found');
+  return app;
+}
+
+export async function LogCorrection(input: any) {
+  if (hasWailsBackend()) {
+    return WailsLogCorrection(input);
+  }
+  const timestamp = now();
+  const c: CorrectionLog = { ...input, id: _nextMockCorrectionId++, created_at: timestamp };
+  mockCorrections = [c, ...mockCorrections];
+  mockEvents.unshift(mockEvent('info', 'mock correction logged'));
+  return c;
+}
+
+export async function ListCorrections(applicationID: number) {
+  if (hasWailsBackend()) {
+    return WailsListCorrections(applicationID);
+  }
+  return mockCorrections.filter((c) => c.application_id === applicationID);
 }

@@ -5,6 +5,7 @@ import {
   Bot,
   BriefcaseBusiness,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Clipboard,
   Cpu,
@@ -30,6 +31,11 @@ import {
   UserRound,
   Wrench,
   Square,
+  X,
+  ExternalLink,
+  Plus,
+  Eye,
+  Pencil,
 } from 'lucide-react';
 import {
   AnalyzeJobDescription,
@@ -114,6 +120,23 @@ import {
   UpdatePromptRule,
   StartContextAgent,
   StopContextAgent,
+  GenerateResumeJSON,
+  ValidateResumeJSON,
+  RenderResumePDF,
+  SaveResumeVersion,
+  ListResumeVersions,
+  SaveApplication,
+  GetApplication,
+  ListApplications,
+  UpdateApplicationStatus,
+  LogCorrection,
+  ListCorrections,
+  ResumeJSON,
+  ResumeVersion,
+  Application,
+  CorrectionLog,
+  ValidationResult,
+  GenerateResumeJSONInput,
 } from './backend';
 
 type Health = {
@@ -175,7 +198,8 @@ type WorkItem = {
 };
 
 type LoadState = 'loading' | 'ready' | 'error';
-type Tab = 'sources' | 'jobs' | 'profile' | 'sections' | 'facts' | 'claims' | 'settings';
+type View = 'pipeline' | 'sources' | 'settings';
+type PipelineStep = 'job' | 'bullets' | 'resume' | 'tracker';
 type JobDraft = {company: string; title: string; url: string; raw_text: string};
 
 const emptyProfile: CandidateProfile = {
@@ -194,10 +218,21 @@ const emptyProfile: CandidateProfile = {
   records: [],
 };
 
+const APP_STATUS_LABELS: Record<string, string> = {
+  draft: 'Draft',
+  ready_to_apply: 'Ready',
+  applied: 'Applied',
+  interviewing: 'Interviewing',
+  rejected: 'Rejected',
+  offer: 'Offer',
+};
+
 function App() {
-  const [activeTab, setActiveTab] = useState<Tab>('jobs');
+  const [activeView, setActiveView] = useState<View>('pipeline');
+  const [pipelineStep, setPipelineStep] = useState<PipelineStep>('job');
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [error, setError] = useState('');
+  const [runtimeError, setRuntimeError] = useState('');
   const [health, setHealth] = useState<Health | null>(null);
   const [settings, setSettings] = useState<Settings>({
     provider: 'openrouter',
@@ -207,8 +242,6 @@ function App() {
   });
   const [toolStatus, setToolStatus] = useState<ToolStatus | null>(null);
   const [events, setEvents] = useState<AppEvent[]>([]);
-  const [promptRules, setPromptRules] = useState<PromptRule[]>([]);
-  const [promptSources, setPromptSources] = useState<PromptResearchSource[]>([]);
   const [profile, setProfile] = useState<CandidateProfile>(emptyProfile);
   const [sources, setSources] = useState<CandidateSource[]>([]);
   const [sections, setSections] = useState<SourceSection[]>([]);
@@ -226,7 +259,6 @@ function App() {
   const [fitAnalysis, setFitAnalysis] = useState<JobFitAnalysis | null>(null);
   const [applicationStrategy, setApplicationStrategy] = useState<ApplicationStrategy | null>(null);
   const [selectedSourceID, setSelectedSourceID] = useState<number>(0);
-  const [selectedSectionID, setSelectedSectionID] = useState<number>(0);
   const [selectedJobID, setSelectedJobID] = useState<number>(0);
   const [sourceDraft, setSourceDraft] = useState({
     source_type: 'current_resume',
@@ -244,15 +276,35 @@ function App() {
   const [llmResult, setLLMResult] = useState<LLMTestResult | null>(null);
   const [pdfResult, setPDFResult] = useState<RenderPDFResult | null>(null);
   const [busyAction, setBusyAction] = useState('');
+  const [applications, setApplications] = useState<Application[]>([]);
+  const [resumeVersions, setResumeVersions] = useState<ResumeVersion[]>([]);
+  const [activeResume, setActiveResume] = useState<ResumeJSON | null>(null);
+  const [activeValidation, setActiveValidation] = useState<ValidationResult | null>(null);
+  const [selectedApplicationID, setSelectedApplicationID] = useState<number>(0);
+  const [applicationNotes, setApplicationNotes] = useState('');
   const pollingContextRunIDs = useRef<Set<number>>(new Set());
+  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
+  const [showAddJob, setShowAddJob] = useState(false);
+  const [showImportSource, setShowImportSource] = useState(false);
+  const [editingProfile, setEditingProfile] = useState(false);
 
   const selectedSource = sources.find((source) => source.id === selectedSourceID);
-  const selectedSection = sections.find((section) => section.id === selectedSectionID);
   const selectedJob = jobs.find((job) => job.id === selectedJobID);
+  const selectedApplicationInfo = applications.find((a) => a.id === selectedApplicationID);
   const queuedFacts = facts.filter((fact) => fact.status === 'needs_review');
+  const queuedClaims = claims.filter((claim) => claim.status === 'needs_review');
   const apiConfigured = toolStatus?.api_key_configured ?? settings.api_key_configured;
   const tectonicStatus = toolStatus?.tectonic_status ?? health?.pdf_renderer ?? 'checking';
   const runningContextRuns = contextRuns.filter((run) => run.status === 'running');
+
+  const jobAppsMap = useMemo(() => {
+    const map = new Map<number, Application>();
+    for (const app of applications) {
+      map.set(app.job_id, app);
+    }
+    return map;
+  }, [applications]);
+
   const activeWorkItems: WorkItem[] = [
     ...runningContextRuns.map((run) => {
       const latestStep = latestContextStep(contextSteps, run.id);
@@ -260,7 +312,7 @@ function App() {
         key: `context-${run.id}`,
         kind: 'context-agent' as const,
         runID: run.id,
-        title: `Context agent: ${sourceTitle(sources, run.source_id)}`,
+        title: `Context: ${sourceTitle(sources, run.source_id)}`,
         detail: latestStep?.message || contextStageLabel(latestStep?.stage || 'queued'),
         progress: contextRunProgress(run, latestStep),
       };
@@ -268,580 +320,205 @@ function App() {
     ...(busyAction ? [{...workItemForAction(busyAction), kind: 'action' as const}] : []),
   ];
 
-  const statusText = useMemo(() => {
-    if (loadState === 'loading') {
-      return 'Loading';
-    }
-    if (loadState === 'error') {
-      return 'Needs attention';
-    }
-    return 'Ready';
-  }, [loadState]);
+  function toggleSection(key: string) {
+    setExpandedSections((prev) => ({...prev, [key]: !prev[key]}));
+  }
 
   async function load() {
     setLoadState('loading');
     setError('');
     try {
-      const [
-        nextHealth,
-        nextSettings,
-        nextStatus,
-        nextEvents,
-        nextPromptRules,
-        nextPromptSources,
-        nextProfile,
-        nextSources,
-        nextSections,
-        nextFacts,
-        nextClaims,
-        nextBlockedClaims,
-        nextContextRuns,
-        nextJobs,
-      ] = await Promise.all([
-        GetHealth(),
-        GetSettings(),
-        GetToolStatus(),
-        GetRecentEvents(),
-        ListPromptRules(),
-        ListPromptResearchSources(),
-        GetCandidateProfile(),
-        ListCandidateSources(),
-        ListSourceSections(0),
-        ListEvidenceFacts('all'),
-        ListCandidateClaims('all'),
-        ListBlockedClaims(),
-        ListContextAgentRuns(0),
-        ListJobDescriptions(),
+      const results = await Promise.all([
+        GetHealth().catch((e: any) => { throw new Error('GetHealth: ' + e) }),
+        GetSettings().catch((e: any) => { throw new Error('GetSettings: ' + e) }),
+        GetToolStatus().catch((e: any) => { throw new Error('GetToolStatus: ' + e) }),
+        GetRecentEvents().catch((e: any) => { throw new Error('GetRecentEvents: ' + e) }),
+        GetCandidateProfile().catch((e: any) => { throw new Error('GetCandidateProfile: ' + e) }),
+        ListCandidateSources().catch((e: any) => { throw new Error('ListCandidateSources: ' + e) }),
+        ListSourceSections(0).catch((e: any) => { throw new Error('ListSourceSections: ' + e) }),
+        ListEvidenceFacts('all').catch((e: any) => { throw new Error('ListEvidenceFacts: ' + e) }),
+        ListCandidateClaims('all').catch((e: any) => { throw new Error('ListCandidateClaims: ' + e) }),
+        ListBlockedClaims().catch((e: any) => { throw new Error('ListBlockedClaims: ' + e) }),
+        ListContextAgentRuns(0).catch((e: any) => { throw new Error('ListContextAgentRuns: ' + e) }),
+        ListJobDescriptions().catch((e: any) => { throw new Error('ListJobDescriptions: ' + e) }),
+        ListApplications().catch((e: any) => { throw new Error('ListApplications: ' + e) }),
       ]);
-      setHealth(nextHealth as Health);
-      setSettings(nextSettings as Settings);
-      setToolStatus(nextStatus as ToolStatus);
-      setEvents((nextEvents ?? []) as AppEvent[]);
-      setPromptRules((nextPromptRules ?? []) as PromptRule[]);
-      setPromptSources((nextPromptSources ?? []) as PromptResearchSource[]);
-      setProfile(normalizeProfile(nextProfile as CandidateProfile));
-      setSources(normalizeSources(nextSources as CandidateSource[] | null | undefined));
-      setSections((nextSections ?? []) as SourceSection[]);
-      setFacts(normalizeFacts(nextFacts as EvidenceFact[] | null | undefined));
-      setClaims(normalizeClaims(nextClaims as CandidateClaim[] | null | undefined));
-      setBlockedClaims(normalizeBlockedClaims(nextBlockedClaims as BlockedClaim[] | null | undefined));
-      setContextRuns(normalizeContextRuns(nextContextRuns as ContextAgentRun[] | null | undefined));
-      setJobs((nextJobs ?? []) as JobDescription[]);
-      const firstSource = (nextSources as CandidateSource[] | undefined)?.[0];
-      if (!selectedSourceID && firstSource) {
-        setSelectedSourceID(firstSource.id);
-      }
-      const firstJob = (nextJobs as JobDescription[] | undefined)?.[0];
+      const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results;
+      setHealth(nh as Health);
+      setSettings(ns as Settings);
+      setToolStatus(nst as ToolStatus);
+      setEvents((ne ?? []) as AppEvent[]);
+      setProfile(normalizeProfile(nprof as CandidateProfile));
+      setSources(normalizeSources(nsrc as CandidateSource[] | null | undefined));
+      setSections((nsec ?? []) as SourceSection[]);
+      setFacts(normalizeFacts(nf as EvidenceFact[] | null | undefined));
+      setClaims(normalizeClaims(ncl as CandidateClaim[] | null | undefined));
+      setBlockedClaims(normalizeBlockedClaims(nblk as BlockedClaim[] | null | undefined));
+      setContextRuns(normalizeContextRuns(ncr as ContextAgentRun[] | null | undefined));
+      setJobs((nj ?? []) as JobDescription[]);
+      setApplications((na ?? []) as Application[]);
+      const firstSrc = (nsrc as CandidateSource[] | undefined)?.[0];
+      if (!selectedSourceID && firstSrc) setSelectedSourceID(firstSrc.id);
+      const firstJob = (nj as JobDescription[] | undefined)?.[0];
       if (!selectedJobID && firstJob) {
         setSelectedJobID(firstJob.id);
-        setJobDraft({
-          company: firstJob.company,
-          title: firstJob.title,
-          url: firstJob.url,
-          raw_text: firstJob.raw_text,
-        });
+        setJobDraft({company: firstJob.company, title: firstJob.title, url: firstJob.url, raw_text: firstJob.raw_text});
         await refreshJobContext(firstJob.id);
       }
       setLoadState('ready');
     } catch (err) {
       setLoadState('error');
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      setError('Load failed: ' + msg);
+      setRuntimeError(msg);
+      console.error('App load error:', err);
     }
   }
 
   async function refreshEvents() {
-    const nextEvents = await GetRecentEvents();
-    setEvents((nextEvents ?? []) as AppEvent[]);
+    const ne = await GetRecentEvents();
+    setEvents((ne ?? []) as AppEvent[]);
   }
 
   async function refreshContextRuns(sourceID = 0) {
     const runs = (await ListContextAgentRuns(sourceID)) as ContextAgentRun[];
-    setContextRuns((previous) => {
+    setContextRuns((prev) => {
       const scoped = normalizeContextRuns(runs);
-      if (sourceID <= 0) return scoped;
-      return normalizeContextRuns([
-        ...scoped,
-        ...previous.filter((run) => run.source_id !== sourceID),
-      ]);
+      return sourceID <= 0 ? scoped : normalizeContextRuns([...scoped, ...prev.filter((r) => r.source_id !== sourceID)]);
     });
     const latest = normalizeContextRuns(runs)[0];
     if (latest) {
       const steps = (await ListContextAgentSteps(latest.id)) as ContextAgentStep[];
-      setContextSteps((previous) => normalizeContextSteps([
-        ...previous.filter((step) => step.run_id !== latest.id),
-        ...steps,
-      ]));
+      setContextSteps((prev) => normalizeContextSteps([...prev.filter((s) => s.run_id !== latest.id), ...steps]));
     }
-  }
-
-  async function startContextAgent(sourceID: number) {
-    if (!sourceID) return;
-    await runAction(`context-agent-${sourceID}`, async () => {
-      await beginContextAgent(sourceID);
-      await refreshEvents();
-    });
-  }
-
-  async function stopContextAgent(runID: number) {
-  if (!runID) return;
-
-  await runAction(`stop-context-agent-${runID}`, async () => {
-    const stopped = (await StopContextAgent(runID)) as ContextAgentRun;
-
-    setContextRuns((previous) =>
-      normalizeContextRuns([
-        stopped,
-        ...previous.filter((item) => item.id !== stopped.id),
-      ]),
-    );
-
-    const steps = (await ListContextAgentSteps(runID)) as ContextAgentStep[];
-
-    setContextSteps((previous) =>
-      normalizeContextSteps([
-        ...previous.filter((step) => step.run_id !== runID),
-        ...steps,
-      ]),
-    );
-
-    await refreshWorkflow();
-    await refreshEvents();
-  });
-}
-
-  async function beginContextAgent(sourceID: number) {
-    const run = (await StartContextAgent(sourceID)) as ContextAgentRun;
-    setContextRuns((previous) => normalizeContextRuns([run, ...previous.filter((item) => item.id !== run.id)]));
-    const steps = (await ListContextAgentSteps(run.id)) as ContextAgentStep[];
-    setContextSteps((previous) => normalizeContextSteps([...previous.filter((step) => step.run_id !== run.id), ...steps]));
-    if (run.status === 'running') {
-      ensureContextAgentPolling(run.id, sourceID);
-    }
-    return run;
   }
 
   function ensureContextAgentPolling(runID: number, sourceID: number) {
-    if (!runID || pollingContextRunIDs.current.has(runID)) {
-      return;
-    }
+    if (!runID || pollingContextRunIDs.current.has(runID)) return;
     pollingContextRunIDs.current.add(runID);
-    void pollContextAgent(runID, sourceID).finally(() => {
-      pollingContextRunIDs.current.delete(runID);
-    });
+    void pollContextAgent(runID, sourceID).finally(() => pollingContextRunIDs.current.delete(runID));
   }
 
   async function pollContextAgent(runID: number, sourceID: number) {
     let waitMS = 1000;
-
     for (;;) {
       await delay(waitMS);
-
       let normalizedRun: ContextAgentRun;
       let steps: ContextAgentStep[];
-
       try {
-        const [run, nextSteps] = await Promise.all([
-          GetContextAgentRun(runID),
-          ListContextAgentSteps(runID),
-        ]);
-
-        normalizedRun = normalizeContextRun(run as ContextAgentRun);
-        steps = normalizeContextSteps(nextSteps as ContextAgentStep[]);
-      } catch (err) {
-        setLoadState('error');
-        setError(err instanceof Error ? err.message : String(err));
-        return;
-      }
-
-      setContextRuns((previous) =>
-        normalizeContextRuns([
-          normalizedRun,
-          ...previous.filter((item) => item.id !== normalizedRun.id),
-        ]),
-      );
-
-      setContextSteps((previous) =>
-        normalizeContextSteps([
-          ...previous.filter((step) => step.run_id !== runID),
-          ...steps,
-        ]),
-      );
-
+        const [run, ns] = await Promise.all([GetContextAgentRun(runID), ListContextAgentSteps(runID)]);
+        normalizedRun = run as ContextAgentRun;
+        steps = normalizeContextSteps(ns as ContextAgentStep[]);
+      } catch (err) { setLoadState('error'); setError(err instanceof Error ? err.message : String(err)); return; }
+      setContextRuns((prev) => normalizeContextRuns([normalizedRun, ...prev.filter((r) => r.id !== normalizedRun.id)]));
+      setContextSteps((prev) => normalizeContextSteps([...prev.filter((s) => s.run_id !== runID), ...steps]));
       if (normalizedRun.status !== 'running') {
         await refreshWorkflow();
-
         if (normalizedRun.status === 'complete') {
-          const completedSourceID = sourceID || normalizedRun.source_id;
-          const sourceSections = (await ListSourceSections(completedSourceID)) as SourceSection[];
-          if (sourceSections[0]) {
-            setSelectedSectionID(sourceSections[0].id);
-          }
-
-          const nextProfile = (await GetCandidateProfile()) as CandidateProfile;
-          setProfile(normalizeProfile(nextProfile));
-
-          await BuildResumeContext(completedSourceID).catch(() => null);
+          const sid = sourceID || normalizedRun.source_id;
+          const secs = (await ListSourceSections(sid)) as SourceSection[];
+          if (secs[0]) setSelectedJobID(selectedJobID);
+          const np = (await GetCandidateProfile()) as CandidateProfile;
+          setProfile(normalizeProfile(np));
+          await BuildResumeContext(sid).catch(() => null);
         } else if (normalizedRun.status === 'failed' && normalizedRun.error) {
-          setLoadState('error');
-          setError(normalizedRun.error);
+          setLoadState('error'); setError(normalizedRun.error);
         }
-
         return;
       }
-
       waitMS = Math.min(3000, waitMS + 500);
     }
   }
 
+  async function beginContextAgent(sourceID: number) {
+    const run = (await StartContextAgent(sourceID)) as ContextAgentRun;
+    setContextRuns((prev) => normalizeContextRuns([run, ...prev.filter((r) => r.id !== run.id)]));
+    const steps = (await ListContextAgentSteps(run.id)) as ContextAgentStep[];
+    setContextSteps((prev) => normalizeContextSteps([...prev.filter((s) => s.run_id !== run.id), ...steps]));
+    if (run.status === 'running') ensureContextAgentPolling(run.id, sourceID);
+    return run;
+  }
+
   async function refreshWorkflow() {
-    const [nextSources, nextSections, nextFacts, nextClaims, nextRuns, nextJobs] = await Promise.all([
-      ListCandidateSources(),
-      ListSourceSections(0),
-      ListEvidenceFacts('all'),
-      ListCandidateClaims('all'),
-      ListContextAgentRuns(0),
-      ListJobDescriptions(),
+    const [nSrc, nSec, nF, nCl, nRuns, nJobs] = await Promise.all([
+      ListCandidateSources(), ListSourceSections(0), ListEvidenceFacts('all'),
+      ListCandidateClaims('all'), ListContextAgentRuns(0), ListJobDescriptions(),
     ]);
-    setSources(normalizeSources(nextSources as CandidateSource[] | null | undefined));
-    setSections((nextSections ?? []) as SourceSection[]);
-    setFacts(normalizeFacts(nextFacts as EvidenceFact[] | null | undefined));
-    setClaims(normalizeClaims(nextClaims as CandidateClaim[] | null | undefined));
-    setContextRuns(normalizeContextRuns(nextRuns as ContextAgentRun[] | null | undefined));
-    setJobs((nextJobs ?? []) as JobDescription[]);
+    setSources(normalizeSources(nSrc as CandidateSource[] | null | undefined));
+    setSections((nSec ?? []) as SourceSection[]);
+    setFacts(normalizeFacts(nF as EvidenceFact[] | null | undefined));
+    setClaims(normalizeClaims(nCl as CandidateClaim[] | null | undefined));
+    setContextRuns(normalizeContextRuns(nRuns as ContextAgentRun[] | null | undefined));
+    setJobs((nJobs ?? []) as JobDescription[]);
+    const na = (await ListApplications()) as Application[];
+    setApplications(na);
     await refreshEvents();
   }
 
-  async function refreshJobContext(jobID = selectedJobID) {
-    if (!jobID) {
-      setJobRequirements([]);
-      setJobMatches([]);
-      setBulletDrafts([]);
-      setBulletEvents([]);
-      setJobAnalysis(null);
-      setFitAnalysis(null);
-      setApplicationStrategy(null);
-      return;
-    }
-    const [requirements, matches, drafts, generationEvents, analysis, fit, strategy] = await Promise.all([
-      ListJobRequirements(jobID),
-      ListJobFactMatches(jobID),
-      ListTailoredBulletDrafts(jobID),
-      ListBulletGenerationEvents(jobID),
-      GetJobAnalysis(jobID).catch(() => null),
-      GetFitAnalysis(jobID).catch(() => null),
-      GetApplicationStrategy(jobID).catch(() => null),
-    ]);
-    setJobRequirements(normalizeRequirements(requirements as JobRequirement[] | null | undefined));
-    setJobMatches(normalizeMatches(matches as JobFactMatch[] | null | undefined));
-    setBulletDrafts(normalizeDrafts(drafts as TailoredBulletDraft[] | null | undefined));
-    setBulletEvents(normalizeBulletEvents(generationEvents as BulletGenerationEvent[] | null | undefined));
-    setJobAnalysis(normalizeJobAnalysis(analysis as JobAnalysis | null | undefined));
-    setFitAnalysis(normalizeFitAnalysis(fit as JobFitAnalysis | null | undefined));
-    setApplicationStrategy(normalizeApplicationStrategy(strategy as ApplicationStrategy | null | undefined));
-  }
-
-  async function runAction(name: string, action: () => Promise<void>) {
-    setBusyAction(name);
-    setError('');
-    try {
-      await action();
-      setLoadState('ready');
-    } catch (err) {
-      setLoadState('error');
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusyAction('');
-    }
-  }
-
-  async function saveProfile(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await runAction('save-profile', async () => {
-      const saved = await SaveCandidateProfile(profile);
-      setProfile(normalizeProfile(saved as CandidateProfile));
-      await refreshEvents();
+  async function generateResume() {
+    if (!selectedJobID) return;
+    await runAction('generate-resume', async () => {
+      const input: GenerateResumeJSONInput = {
+        job_id: selectedJobID,
+        selected_bullet_ids: bulletDrafts.filter((d) => d.selected_for_resume).map((d) => d.id),
+      };
+      const resume = (await GenerateResumeJSON(input)) as ResumeJSON;
+      setActiveResume(resume);
+      const validation = (await ValidateResumeJSON(resume, selectedJobID)) as ValidationResult;
+      setActiveValidation(validation);
+      const version = (await SaveResumeVersion({
+        job_id: selectedJobID, resume_json: resume, tex_source: '', pdf_path: '', validation_result: validation,
+      })) as ResumeVersion;
+      setResumeVersions((prev) => [version, ...prev]);
+      setPipelineStep('resume');
     });
   }
 
-  async function draftProfileFromSource() {
-    if (!selectedSourceID) {
-      return;
-    }
-    await runAction('draft-profile', async () => {
-      const draft = normalizeProfile((await DraftCandidateProfileFromSource(selectedSourceID)) as CandidateProfile);
-      setProfile((current) => ({
-        contact: {
-          ...current.contact,
-          full_name: draft.contact.full_name || current.contact.full_name,
-          email: draft.contact.email || current.contact.email,
-          phone: draft.contact.phone || current.contact.phone,
-          location: draft.contact.location || current.contact.location,
-          linkedin: draft.contact.linkedin || current.contact.linkedin,
-          github: draft.contact.github || current.contact.github,
-          portfolio: draft.contact.portfolio || current.contact.portfolio,
-          links: draft.contact.links.length ? draft.contact.links : current.contact.links,
-          verified: false,
-        },
-        records: [...current.records, ...draft.records],
-      }));
-      await refreshEvents();
+  async function exportResumeJSON() {
+    if (!activeResume) return;
+    const blob = new Blob([JSON.stringify(activeResume, null, 2)], {type: 'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'resume.json'; a.click(); URL.revokeObjectURL(url);
+  }
+
+  async function renderPDF() {
+    if (!activeResume) return;
+    await runAction('render-pdf', async () => {
+      const result = (await RenderResumePDF(activeResume)) as RenderPDFResult;
+      if (!result.success && result.error) setError(result.error);
     });
   }
 
-  async function applyDraftFromSource(sourceID: number) {
-    const draft = normalizeProfile((await DraftCandidateProfileFromSource(sourceID)) as CandidateProfile);
-    setProfile((current) => ({
-      contact: {
-        ...current.contact,
-        full_name: draft.contact.full_name || current.contact.full_name,
-        email: draft.contact.email || current.contact.email,
-        phone: draft.contact.phone || current.contact.phone,
-        location: draft.contact.location || current.contact.location,
-        linkedin: draft.contact.linkedin || current.contact.linkedin,
-        github: draft.contact.github || current.contact.github,
-        portfolio: draft.contact.portfolio || current.contact.portfolio,
-          links: draft.contact.links.length ? draft.contact.links : current.contact.links,
-        verified: false,
-      },
-      records: mergeDraftRecords(current.records, draft.records),
-    }));
-  }
-
-  async function createSource(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await runAction('create-source', async () => {
-      const source = (await CreateCandidateSource(sourceDraft)) as CandidateSource;
-      setSelectedSourceID(source.id);
-      setSourceDraft({...sourceDraft, title: '', raw_text: ''});
-      await beginContextAgent(source.id);
-      await refreshWorkflow();
-      setActiveTab('sources');
+  async function saveApplication() {
+    if (!selectedJobID) return;
+    await runAction('save-application', async () => {
+      const app = {
+        id: selectedApplicationID || 0, job_id: selectedJobID, status: 'draft',
+        fit_score: fitAnalysis?.overall_score || 0, resume_version_id: resumeVersions[0]?.id || 0,
+        cover_letter_version_id: 0, notes: applicationNotes,
+      } as Application;
+      const saved = (await SaveApplication(app)) as Application;
+      setSelectedApplicationID(saved.id);
+      const na = (await ListApplications()) as Application[];
+      setApplications(na);
     });
   }
 
-  async function deleteSource(sourceID: number) {
-    await runAction(`delete-source-${sourceID}`, async () => {
-      await DeleteCandidateSource({id: sourceID});
-      if (selectedSourceID === sourceID) {
-        setSelectedSourceID(0);
-        setSelectedSectionID(0);
+  async function updateApplicationStatus(id: number, status: string) {
+    await runAction(`upd-app-${id}`, async () => {
+      const u = (await UpdateApplicationStatus(id, status)) as Application;
+      setApplications((prev) => prev.map((a) => a.id === id ? u : a));
+    });
+  }
+
+  async function deleteJob(jobID: number) {
+    await runAction(`del-job-${jobID}`, async () => {
+      await DeleteJobDescription({id: jobID});
+      if (selectedJobID === jobID) {
+        setSelectedJobID(0); setActiveResume(null); setActiveValidation(null);
       }
-      await refreshWorkflow();
-    });
-  }
-
-  async function importFile(file?: File) {
-    if (!file) {
-      return;
-    }
-    await runAction('import-file', async () => {
-      const rawText = await file.text();
-      const source = (await CreateCandidateSource({
-        source_type: sourceDraft.source_type,
-        trust_tier: sourceDraft.trust_tier,
-        title: sourceDraft.title || file.name.replace(/\.(txt|md|markdown|tex|latex)$/i, ''),
-        raw_text: rawText,
-      })) as CandidateSource;
-      setSelectedSourceID(source.id);
-      await beginContextAgent(source.id);
-      await refreshWorkflow();
-      setActiveTab('sources');
-    });
-  }
-
-  async function detectSections() {
-    if (!selectedSourceID) {
-      return;
-    }
-    await runAction('detect-sections', async () => {
-      const detected = (await DetectSourceSections(selectedSourceID)) as SourceSection[];
-      setSections((previous) => [
-        ...detected,
-        ...previous.filter((section) => section.source_id !== selectedSourceID),
-      ]);
-      if (detected[0]) {
-        setSelectedSectionID(detected[0].id);
-      }
-      await refreshEvents();
-    });
-  }
-
-  async function saveSection(section: SourceSection) {
-    await runAction(`save-section-${section.id}`, async () => {
-      const saved = (await UpdateSourceSection({
-        id: section.id,
-        heading: section.heading,
-        section_type: section.section_type,
-        content: section.content,
-      })) as SourceSection;
-      setSections((previous) => previous.map((item) => item.id === saved.id ? saved : item));
-      await refreshEvents();
-    });
-  }
-
-  async function deleteSection(sectionID: number) {
-    await runAction(`delete-section-${sectionID}`, async () => {
-      await DeleteSourceSection({id: sectionID});
-      if (selectedSectionID === sectionID) {
-        setSelectedSectionID(0);
-      }
-      await refreshWorkflow();
-    });
-  }
-
-  async function extractFacts() {
-    if (!selectedSection) {
-      return;
-    }
-    await runAction('extract-facts', async () => {
-      await ExtractEvidenceFacts({
-        source_id: selectedSection.source_id,
-        section_id: selectedSection.id,
-      });
-      const nextFacts = (await ListEvidenceFacts('all')) as EvidenceFact[];
-      setFacts(normalizeFacts(nextFacts));
-      await refreshEvents();
-      setActiveTab('facts');
-    });
-  }
-
-  async function reviewFact(fact: EvidenceFact, status: string) {
-    await runAction(`review-fact-${fact.id}`, async () => {
-      const saved = (await UpdateEvidenceFactReview({
-        id: fact.id,
-        fact_text: fact.fact_text,
-        evidence_quote: fact.evidence_quote,
-        technologies: fact.technologies,
-        confidence: fact.confidence,
-        risk_flags: fact.risk_flags,
-        status,
-        review_note: fact.review_note,
-      })) as EvidenceFact;
-      setFacts((previous) => normalizeFacts(previous.map((item) => item.id === saved.id ? saved : item)));
-      await refreshEvents();
-    });
-  }
-
-  async function deleteFact(factID: number) {
-    await runAction(`delete-fact-${factID}`, async () => {
-      await DeleteEvidenceFact({id: factID});
-      const nextFacts = (await ListEvidenceFacts('all')) as EvidenceFact[];
-      setFacts(normalizeFacts(nextFacts));
-      setClaims([]);
-      await refreshEvents();
-    });
-  }
-
-  async function deleteAllFacts() {
-    if (!window.confirm('Delete all evidence facts, match maps, and bullet drafts?')) {
-      return;
-    }
-    await runAction('delete-all-facts', async () => {
-      await DeleteAllEvidenceFacts();
-      setFacts([]);
-      setClaims([]);
-      setJobMatches([]);
-      setBulletDrafts([]);
-      setBulletEvents([]);
-      setFitAnalysis(null);
-      setApplicationStrategy(null);
-      await refreshEvents();
-    });
-  }
-
-  async function generateClaims() {
-    await runAction('generate-claims', async () => {
-      const nextClaims = (await GenerateCandidateClaims()) as CandidateClaim[];
-      setClaims(normalizeClaims(nextClaims));
-      await refreshEvents();
-    });
-  }
-
-  async function updateClaim(claim: CandidateClaim, status = claim.status) {
-    await runAction(`update-claim-${claim.id}`, async () => {
-      const saved = (await UpdateCandidateClaimReview({
-        id: claim.id,
-        claim_text: claim.claim_text,
-        claim_type: claim.claim_type,
-        actions: claim.actions,
-        capabilities: claim.capabilities,
-        objects: claim.objects,
-        technologies: claim.technologies,
-        domains: claim.domains,
-        artifacts: claim.artifacts,
-        scope: claim.scope,
-        metrics: claim.metrics,
-        outcomes: claim.outcomes,
-        profile_context: claim.profile_context,
-        evidence_strength: claim.evidence_strength,
-        strength: claim.strength,
-        allowed_use: claim.allowed_use,
-        allowed_contexts: claim.allowed_contexts,
-        blocked_contexts: claim.blocked_contexts,
-        safe_phrasings: claim.safe_phrasings,
-        unsafe_phrasings: claim.unsafe_phrasings,
-        status,
-        risk_flags: claim.risk_flags,
-        review_note: claim.review_note,
-      })) as CandidateClaim;
-      setClaims((previous) => normalizeClaims(previous.map((item) => item.id === saved.id ? saved : item)));
-      await refreshEvents();
-    });
-  }
-
-  async function deleteClaim(claimID: number) {
-    await runAction(`delete-claim-${claimID}`, async () => {
-      await DeleteCandidateClaim({id: claimID});
-      setClaims((previous) => previous.filter((claim) => claim.id !== claimID));
-      await refreshEvents();
-    });
-  }
-
-  async function deleteAllClaims() {
-    if (!window.confirm('Delete all candidate claims?')) {
-      return;
-    }
-    await runAction('delete-all-claims', async () => {
-      await DeleteAllCandidateClaims();
-      setClaims([]);
-      await refreshEvents();
-    });
-  }
-
-  async function saveBlockedClaim(blocked: BlockedClaim) {
-    await runAction(`save-blocked-${blocked.id}`, async () => {
-      const saved = (await UpdateBlockedClaim({
-        id: blocked.id,
-        pattern: blocked.pattern,
-        reason: blocked.reason,
-        severity: blocked.severity,
-        source: blocked.source,
-        enabled: blocked.enabled,
-      })) as BlockedClaim;
-      setBlockedClaims((previous) => normalizeBlockedClaims(previous.map((item) => item.id === saved.id ? saved : item)));
-      await refreshEvents();
-    });
-  }
-
-  async function addBlockedClaim() {
-    await runAction('add-blocked-claim', async () => {
-      const saved = (await CreateBlockedClaim({
-        pattern: 'new blocked claim',
-        reason: 'Describe why this claim is unsafe.',
-        severity: 'medium',
-        source: 'manual',
-        enabled: true,
-      })) as BlockedClaim;
-      setBlockedClaims((previous) => normalizeBlockedClaims([saved, ...previous]));
-      await refreshEvents();
-    });
-  }
-
-  async function deleteBlockedClaim(id: number) {
-    await runAction(`delete-blocked-${id}`, async () => {
-      await DeleteBlockedClaim({id});
-      setBlockedClaims((previous) => previous.filter((item) => item.id !== id));
-      await refreshEvents();
+      setJobs((await ListJobDescriptions()) as JobDescription[]);
     });
   }
 
@@ -852,2726 +529,1084 @@ function App() {
         ? (await UpdateJobDescription({id: selectedJobID, ...jobDraft})) as JobDescription
         : (await CreateJobDescription(jobDraft)) as JobDescription;
       setSelectedJobID(saved.id);
-      setJobDraft({
-        company: saved.company,
-        title: saved.title,
-        url: saved.url,
-        raw_text: saved.raw_text,
-      });
-      const nextJobs = (await ListJobDescriptions()) as JobDescription[];
-      setJobs(nextJobs);
+      setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
+      setJobs((await ListJobDescriptions()) as JobDescription[]);
       await refreshJobContext(saved.id);
-      await refreshEvents();
+      setShowAddJob(false);
     });
   }
 
-  async function selectJob(job: JobDescription) {
+  function selectJob(job: JobDescription) {
     setSelectedJobID(job.id);
-    setJobDraft({
-      company: job.company,
-      title: job.title,
-      url: job.url,
-      raw_text: job.raw_text,
-    });
-    await refreshJobContext(job.id);
-  }
-
-  async function newJob() {
-    setSelectedJobID(0);
-    setJobDraft({company: '', title: '', url: '', raw_text: ''});
-    setJobRequirements([]);
-    setJobMatches([]);
-    setBulletDrafts([]);
-    setJobAnalysis(null);
-    setFitAnalysis(null);
-    setApplicationStrategy(null);
+    setJobDraft({company: job.company, title: job.title, url: job.url, raw_text: job.raw_text});
+    setActiveResume(null); setActiveValidation(null);
+    setPipelineStep('job');
+    refreshJobContext(job.id);
   }
 
   function updateJobDraft(nextDraft: JobDraft) {
-    setJobDraft((previous) => {
-      if (nextDraft.raw_text === previous.raw_text) {
-        return nextDraft;
-      }
-      const inferred = inferJobDetailsFromText(nextDraft.raw_text);
-      return {
-        ...nextDraft,
-        company: nextDraft.company.trim() ? nextDraft.company : inferred.company,
-        title: nextDraft.title.trim() ? nextDraft.title : inferred.title,
-      };
+    setJobDraft((prev) => {
+      if (nextDraft.raw_text === prev.raw_text) return nextDraft;
+      const inf = inferJobDetailsFromText(nextDraft.raw_text);
+      return {...nextDraft, company: nextDraft.company.trim() ? nextDraft.company : inf.company, title: nextDraft.title.trim() ? nextDraft.title : inf.title};
     });
   }
 
-  async function deleteJob(jobID: number) {
-    await runAction(`delete-job-${jobID}`, async () => {
-      await DeleteJobDescription({id: jobID});
-      if (selectedJobID === jobID) {
-        await newJob();
-      }
-      const nextJobs = (await ListJobDescriptions()) as JobDescription[];
-      setJobs(nextJobs);
-      await refreshEvents();
+  async function refreshJobContext(jobID = selectedJobID) {
+    if (!jobID) { setJobRequirements([]); setJobMatches([]); setBulletDrafts([]); setJobAnalysis(null); setFitAnalysis(null); setApplicationStrategy(null); return; }
+    const [req, mat, dra, gen, ana, fit, strat] = await Promise.all([
+      ListJobRequirements(jobID), ListJobFactMatches(jobID), ListTailoredBulletDrafts(jobID),
+      ListBulletGenerationEvents(jobID).catch(() => []),
+      GetJobAnalysis(jobID).catch(() => null), GetFitAnalysis(jobID).catch(() => null),
+      GetApplicationStrategy(jobID).catch(() => null),
+    ]);
+    setJobRequirements(normalizeRequirements(req as JobRequirement[] | null | undefined));
+    setJobMatches(normalizeMatches(mat as JobFactMatch[] | null | undefined));
+    setBulletDrafts(normalizeDrafts(dra as TailoredBulletDraft[] | null | undefined));
+    setJobAnalysis(normalizeJobAnalysis(ana as JobAnalysis | null | undefined));
+    setFitAnalysis(normalizeFitAnalysis(fit as JobFitAnalysis | null | undefined));
+    setApplicationStrategy(normalizeApplicationStrategy(strat as ApplicationStrategy | null | undefined));
+  }
+
+  async function runAction(name: string, action: () => Promise<void>) {
+    setBusyAction(name); setError('');
+    try { await action(); setLoadState('ready'); }
+    catch (err) { setLoadState('error'); setError(err instanceof Error ? err.message : String(err)); }
+    finally { setBusyAction(''); }
+  }
+
+  function handleSaveJob(e: FormEvent) {
+    e.preventDefault();
+    void runAction('save-job', async () => {
+      const saved = selectedJobID
+        ? (await UpdateJobDescription({id: selectedJobID, ...jobDraft})) as JobDescription
+        : (await CreateJobDescription(jobDraft)) as JobDescription;
+      setSelectedJobID(saved.id);
+      setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
+      setJobs((await ListJobDescriptions()) as JobDescription[]);
+      await refreshJobContext(saved.id);
+      setShowAddJob(false);
     });
   }
 
-  async function parseJob() {
+  function handleParseJD() {
     if (!selectedJobID) return;
-    await runAction('parse-job', async () => {
-      const requirements = (await ParseJobDescription(selectedJobID)) as JobRequirement[];
-      setJobRequirements(normalizeRequirements(requirements));
-      const analysis = (await AnalyzeJobDescription(selectedJobID)) as JobAnalysis;
-      setJobAnalysis(normalizeJobAnalysis(analysis));
-      setJobMatches([]);
-      setBulletDrafts([]);
-      setFitAnalysis(null);
-      setApplicationStrategy(null);
-      await refreshEvents();
+    void runAction('parse', async () => {
+      const r = (await ParseJobDescription(selectedJobID)) as JobRequirement[];
+      setJobRequirements(normalizeRequirements(r));
+      const a = (await AnalyzeJobDescription(selectedJobID)) as JobAnalysis;
+      setJobAnalysis(normalizeJobAnalysis(a));
+      setJobMatches([]); setBulletDrafts([]); setFitAnalysis(null); setApplicationStrategy(null);
     });
   }
 
-  async function buildMatchMap() {
+  function handleMatch() {
     if (!selectedJobID) return;
-    await runAction('build-match-map', async () => {
-      const matches = (await BuildJobMatchMap(selectedJobID)) as JobFactMatch[];
-      setJobMatches(normalizeMatches(matches));
-      setFitAnalysis(null);
-      setApplicationStrategy(null);
-      await refreshEvents();
+    void runAction('match', async () => {
+      const m = (await BuildJobMatchMap(selectedJobID)) as JobFactMatch[];
+      setJobMatches(normalizeMatches(m));
+      setFitAnalysis(null); setApplicationStrategy(null);
     });
   }
 
-  async function generateFit() {
+  function handleFit() {
     if (!selectedJobID) return;
-    await runAction('generate-fit', async () => {
-      const fit = (await GenerateFitAnalysis(selectedJobID)) as JobFitAnalysis;
-      setFitAnalysis(normalizeFitAnalysis(fit));
-      setApplicationStrategy(null);
-      await refreshEvents();
+    void runAction('fit', async () => {
+      const f = (await GenerateFitAnalysis(selectedJobID)) as JobFitAnalysis;
+      setFitAnalysis(normalizeFitAnalysis(f));
     });
   }
 
-  async function generateStrategy() {
+  function handleBullets() {
     if (!selectedJobID) return;
-    await runAction('generate-strategy', async () => {
-      const strategy = (await GenerateApplicationStrategy(selectedJobID)) as ApplicationStrategy;
-      setApplicationStrategy(normalizeApplicationStrategy(strategy));
-      await refreshEvents();
+    void runAction('bullets', async () => {
+      const d = (await GenerateTailoredBulletDrafts(selectedJobID)) as TailoredBulletDraft[];
+      setBulletDrafts(normalizeDrafts(d));
+      const ev = (await ListBulletGenerationEvents(selectedJobID)) as BulletGenerationEvent[];
+      setBulletEvents(normalizeBulletEvents(ev));
     });
   }
 
-  async function generateBulletDrafts() {
+  function handleStrategy() {
     if (!selectedJobID) return;
-    await runAction('generate-bullets', async () => {
-      const drafts = (await GenerateTailoredBulletDrafts(selectedJobID)) as TailoredBulletDraft[];
-      setBulletDrafts(normalizeDrafts(drafts));
-      const generationEvents = (await ListBulletGenerationEvents(selectedJobID)) as BulletGenerationEvent[];
-      setBulletEvents(normalizeBulletEvents(generationEvents));
-      await refreshEvents();
+    void runAction('strategy', async () => {
+      const s = (await GenerateApplicationStrategy(selectedJobID)) as ApplicationStrategy;
+      setApplicationStrategy(normalizeApplicationStrategy(s));
     });
   }
 
-  async function updateBulletDraft(draft: TailoredBulletDraft, status = draft.status) {
-    await runAction(`update-draft-${draft.id}`, async () => {
+  function handleEditBullet(draft: TailoredBulletDraft, newText: string) {
+    void runAction(`edit-${draft.id}`, async () => {
       const saved = (await UpdateTailoredBulletDraft({
-        id: draft.id,
-        draft_text: draft.draft_text,
-        rationale: draft.rationale,
-        status,
-        risk_flags: draft.risk_flags,
+        id: draft.id, draft_text: newText, rationale: draft.rationale, status: draft.status, risk_flags: draft.risk_flags,
       })) as TailoredBulletDraft;
-      setBulletDrafts((previous) => normalizeDrafts(previous.map((item) => item.id === saved.id ? saved : item)));
-      await refreshEvents();
+      setBulletDrafts((prev) => normalizeDrafts(prev.map((x) => x.id === saved.id ? saved : x)));
     });
   }
 
-  async function selectBulletDraft(draft: TailoredBulletDraft, selected: boolean) {
-    await runAction(`select-draft-${draft.id}`, async () => {
-      const saved = (await SelectTailoredBulletDraft({id: draft.id, selected})) as TailoredBulletDraft;
-      setBulletDrafts((previous) => normalizeDrafts(previous.map((item) => item.id === saved.id ? saved : item)));
-      await refreshEvents();
-    });
-  }
-
-  async function autoSelectBulletDrafts() {
-    if (!selectedJobID) return;
-    await runAction('auto-select-drafts', async () => {
-      const drafts = (await AutoSelectResumeBullets(selectedJobID)) as TailoredBulletDraft[];
-      setBulletDrafts(normalizeDrafts(drafts));
-      const generationEvents = (await ListBulletGenerationEvents(selectedJobID)) as BulletGenerationEvent[];
-      setBulletEvents(normalizeBulletEvents(generationEvents));
-      await refreshEvents();
-    });
-  }
-
-  async function deleteBulletDraft(draftID: number) {
-    await runAction(`delete-draft-${draftID}`, async () => {
+  function handleDeleteBullet(draftID: number) {
+    void runAction(`del-${draftID}`, async () => {
       await DeleteTailoredBulletDraft({id: draftID});
-      setBulletDrafts((previous) => previous.filter((draft) => draft.id !== draftID));
-      await refreshEvents();
+      setBulletDrafts((prev) => prev.filter((d) => d.id !== draftID));
     });
   }
 
-  async function saveSettings(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await runAction('save-settings', async () => {
-      const nextSettings = await SaveSettings({
-        provider: settings.provider,
-        model: settings.model,
-        embedding_model: settings.embedding_model,
-      });
-      setSettings(nextSettings as Settings);
+  function handleAutoSelect() {
+    if (!selectedJobID) return;
+    void runAction('auto-sel', async () => {
+      const d = (await AutoSelectResumeBullets(selectedJobID)) as TailoredBulletDraft[];
+      setBulletDrafts(normalizeDrafts(d));
+    });
+  }
+
+  function handleToggleBullet(draft: TailoredBulletDraft) {
+    void runAction(`sel-${draft.id}`, async () => {
+      const s = (await SelectTailoredBulletDraft({id: draft.id, selected: !draft.selected_for_resume})) as TailoredBulletDraft;
+      setBulletDrafts((prev) => normalizeDrafts(prev.map((x) => x.id === s.id ? s : x)));
+    });
+  }
+
+  function handleAddSource(e: FormEvent) {
+    e.preventDefault();
+    void runAction('add-src', async () => {
+      const result = (await CreateCandidateSource(sourceDraft)) as CandidateSource;
+      setSelectedSourceID(result.id);
+      setSourceDraft({...sourceDraft, title: '', raw_text: ''});
+      await beginContextAgent(result.id);
+      setShowImportSource(false);
+    });
+  }
+
+  function handleStopAgent(run: ContextAgentRun) {
+    void runAction(`stop-agent-${run.id}`, async () => {
+      const s = (await StopContextAgent(run.id)) as ContextAgentRun;
+      setContextRuns((prev) => normalizeContextRuns([s, ...prev.filter((r) => r.id !== s.id)]));
+    });
+  }
+
+  function handleDeleteSource(sourceID: number) {
+    void runAction(`del-src-${sourceID}`, async () => {
+      await DeleteCandidateSource({id: sourceID});
+      await refreshWorkflow();
+    });
+  }
+
+  function handleTestSettings() {
+    void (async () => {
+      const r = (await SaveSettings({provider: settings.provider, model: settings.model, embedding_model: settings.embedding_model})) as Settings;
+      setSettings(r);
       await load();
-    });
+    })();
   }
 
-  async function saveAPIKey(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await runAction('save-key', async () => {
-      const nextStatus = await SaveAPIKey({api_key: apiKey, provider: settings.provider});
-      setToolStatus(nextStatus as ToolStatus);
-      setSettings({...settings, api_key_configured: (nextStatus as ToolStatus).api_key_configured});
-      setAPIKey('');
-      await refreshEvents();
-    });
+  function handleSaveProfile() {
+    void (async () => {
+      const s = await SaveCandidateProfile(profile);
+      setProfile(normalizeProfile(s as CandidateProfile));
+      setEditingProfile(false);
+    })();
   }
 
-  async function runLLMTest() {
-    await runAction('test-llm', async () => {
-      const result = (await TestLLM()) as LLMTestResult;
-      setLLMResult(result);
-      await refreshEvents();
-    });
+  useEffect(() => { load(); }, []);
+
+  useEffect(() => { for (const run of runningContextRuns) ensureContextAgentPolling(run.id, run.source_id); }, [contextRuns]);
+
+  const statusText = loadState === 'loading' ? 'Loading' : loadState === 'error' ? 'Needs attention' : 'Ready';
+
+  const pipelineSteps: {key: PipelineStep; label: string; icon: React.ReactNode}[] = [
+    {key: 'job', label: 'Job', icon: <BriefcaseBusiness size={14} />},
+    {key: 'bullets', label: 'Bullets', icon: <ListChecks size={14} />},
+    {key: 'resume', label: 'Resume', icon: <FileText size={14} />},
+    {key: 'tracker', label: 'Tracker', icon: <Gauge size={14} />},
+  ];
+
+  function getJobProgress(jobID: number): {step: PipelineStep; pct: number} {
+    const app = jobAppsMap.get(jobID);
+    if (app && app.status !== 'draft') return {step: 'tracker', pct: 100};
+    if (resumeVersions.some((v) => v.job_id === jobID)) return {step: 'resume', pct: 75};
+    if (bulletDrafts.filter((d) => d.job_id === jobID).length > 0) return {step: 'bullets', pct: 50};
+    return {step: 'job', pct: 10};
   }
-
-  async function installTectonic() {
-    await runAction('install-tectonic', async () => {
-      await InstallTectonic();
-      await load();
-    });
-  }
-
-  async function renderSamplePDF() {
-    await runAction('render-pdf', async () => {
-      const result = (await RenderSamplePDF()) as RenderPDFResult;
-      setPDFResult(result);
-      await load();
-    });
-  }
-
-  async function savePromptRule(rule: PromptRule) {
-    await runAction(`save-rule-${rule.id}`, async () => {
-      const saved = (await UpdatePromptRule({
-        id: rule.id,
-        content: rule.content,
-        enabled: rule.enabled,
-      })) as PromptRule;
-      setPromptRules((previous) => previous.map((item) => item.id === saved.id ? saved : item));
-      await refreshEvents();
-    });
-  }
-
-  useEffect(() => {
-    load();
-  }, []);
-
-  useEffect(() => {
-    for (const run of runningContextRuns) {
-      ensureContextAgentPolling(run.id, run.source_id);
-    }
-  }, [contextRuns]);
 
   return (
-    <main className="min-h-screen bg-[#f6f8fb]">
-      <section className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
-              JD Tailor
-            </p>
-            <h1 className="mt-1 text-2xl font-semibold text-slate-950">
-              Candidate context builder
-            </h1>
-          </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <StatusPill state={loadState} text={statusText} />
-            <IconButton label="Refresh" onClick={load} disabled={busyAction !== ''}>
-              <RefreshCcw size={16} />
-            </IconButton>
+    <div className="flex h-screen bg-[#f6f8fb]">
+      <aside className="flex w-80 shrink-0 flex-col border-r border-slate-200 bg-white">
+        <div className="border-b border-slate-200 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-md bg-slate-900 text-white">
+                <FileText size={16} />
+              </div>
+              <span className="text-sm font-semibold text-slate-950">JD Tailor</span>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className={`inline-block h-2 w-2 rounded-full ${loadState === 'ready' ? 'bg-green-500' : loadState === 'error' ? 'bg-red-500' : 'bg-amber-400'}`} />
+              <span className="text-xs text-slate-400">{statusText}</span>
+            </div>
           </div>
         </div>
-      </section>
 
-      <section className="border-b border-slate-200 bg-white">
-        <nav className="mx-auto flex max-w-7xl gap-2 overflow-x-auto px-5 py-3">
-          <TabButton active={activeTab === 'jobs'} label="Jobs" icon={<BriefcaseBusiness size={16} />} onClick={() => setActiveTab('jobs')} />
-          <TabButton active={activeTab === 'sources'} label="Sources" icon={<Upload size={16} />} onClick={() => setActiveTab('sources')} />
-          <TabButton active={activeTab === 'profile'} label="Profile" icon={<UserRound size={16} />} onClick={() => setActiveTab('profile')} />
-          <TabButton active={activeTab === 'sections'} label="Sections" icon={<Layers3 size={16} />} onClick={() => setActiveTab('sections')} />
-          <TabButton active={activeTab === 'facts'} label={`Fact Review${queuedFacts.length ? ` ${queuedFacts.length}` : ''}`} icon={<ListChecks size={16} />} onClick={() => setActiveTab('facts')} />
-          <TabButton active={activeTab === 'claims'} label={`Claim Bank${claims.filter((claim) => claim.status === 'needs_review').length ? ` ${claims.filter((claim) => claim.status === 'needs_review').length}` : ''}`} icon={<ShieldCheck size={16} />} onClick={() => setActiveTab('claims')} />
-          <TabButton active={activeTab === 'settings'} label="Settings" icon={<SettingsIcon size={16} />} onClick={() => setActiveTab('settings')} />
-        </nav>
-      </section>
+        <div className="flex border-b border-slate-200">
+          <button
+            className={`flex-1 py-2.5 text-xs font-medium ${activeView === 'pipeline' ? 'border-b-2 border-slate-900 text-slate-950' : 'text-slate-500 hover:text-slate-700'}`}
+            onClick={() => setActiveView('pipeline')}
+          >
+            Workspace
+          </button>
+          <button
+            className={`flex-1 py-2.5 text-xs font-medium ${activeView === 'sources' ? 'border-b-2 border-slate-900 text-slate-950' : 'text-slate-500 hover:text-slate-700'}`}
+            onClick={() => setActiveView('sources')}
+          >
+            Sources
+          </button>
+          <button
+            className={`flex-1 py-2.5 text-xs font-medium ${activeView === 'settings' ? 'border-b-2 border-slate-900 text-slate-950' : 'text-slate-500 hover:text-slate-700'}`}
+            onClick={() => setActiveView('settings')}
+          >
+            Settings
+          </button>
+        </div>
 
-      <section className="mx-auto max-w-7xl px-5 py-5">
+        <div className="flex-1 overflow-y-auto px-3 py-3">
+          <div className="mb-3 flex items-center justify-between px-1">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Jobs</span>
+            <button className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600" onClick={() => setShowAddJob(!showAddJob)}>
+              <Plus size={14} />
+            </button>
+          </div>
+
+          {showAddJob && (
+            <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <form onSubmit={saveJob} className="space-y-2">
+                <TextInput label="Company" value={jobDraft.company} onChange={(v) => updateJobDraft({...jobDraft, company: v})} />
+                <TextInput label="Role" value={jobDraft.title} onChange={(v) => updateJobDraft({...jobDraft, title: v})} />
+                <TextArea label="Job description" rows={6} value={jobDraft.raw_text} onChange={(v) => updateJobDraft({...jobDraft, raw_text: v})} />
+                <div className="flex gap-2">
+                  <button type="submit" className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800">Save</button>
+                  <button type="button" className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100" onClick={() => setShowAddJob(false)}>Cancel</button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {jobs.length === 0 ? (
+            <p className="px-1 py-4 text-center text-xs text-slate-400">No jobs yet.</p>
+          ) : (
+            <div className="space-y-1">
+              {jobs.map((job) => {
+                const app = jobAppsMap.get(job.id);
+                const prog = getJobProgress(job.id);
+                const isSelected = job.id === selectedJobID;
+                return (
+                  <button
+                    key={job.id}
+                    className={`w-full rounded-lg p-2.5 text-left transition-colors ${isSelected ? 'bg-slate-100 ring-1 ring-slate-300' : 'hover:bg-slate-50'}`}
+                    onClick={() => selectJob(job)}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-xs font-semibold text-slate-950">{job.title || 'Untitled'}</p>
+                        <p className="truncate text-xs text-slate-500">{job.company || 'No company'}</p>
+                      </div>
+                      <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${app ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
+                        {app ? APP_STATUS_LABELS[app.status] || app.status : `${prog.pct}%`}
+                      </span>
+                    </div>
+                    <div className="mt-2 h-1.5 w-full rounded-full bg-slate-200">
+                      <div className="h-1.5 rounded-full bg-slate-600 transition-all" style={{width: `${prog.pct}%`}} />
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="border-t border-slate-200 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <span className={`inline-block h-2 w-2 rounded-full ${apiConfigured ? 'bg-green-500' : 'bg-slate-300'}`} />
+            <span className="text-xs text-slate-500">{apiConfigured ? 'API ready' : 'API key needed'}</span>
+          </div>
+          {tectonicStatus === 'installed' && (
+            <div className="mt-1 flex items-center gap-1">
+              <span className="inline-block h-2 w-2 rounded-full bg-green-500" />
+              <span className="text-xs text-slate-500">PDF ready</span>
+            </div>
+          )}
+        </div>
+      </aside>
+
+      <main className="flex flex-1 flex-col overflow-hidden">
         {error && (
-          <div className="mb-4 flex items-start gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
-            <AlertCircle className="mt-0.5 shrink-0" size={18} />
-            <span>{error}</span>
+          <div className="mx-6 mt-4 flex items-start gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+            <AlertCircle className="mt-0.5 shrink-0" size={16} />
+            <div className="flex-1">
+              <span>{error}</span>
+              {runtimeError && <pre className="mt-2 text-xs whitespace-pre-wrap text-red-700">{runtimeError}</pre>}
+            </div>
+            <button onClick={() => { setError(''); setRuntimeError(''); }}><X size={14} /></button>
           </div>
         )}
 
         {activeWorkItems.length > 0 && (
-          <WorkBanner
-            busyAction={busyAction}
-            items={activeWorkItems}
-            onStopAgent={stopContextAgent}
-          />
+          <WorkBanner busyAction={busyAction} items={activeWorkItems} onStopAgent={() => {}} />
         )}
 
-        {activeTab === 'profile' && (
-          <ProfileView
-            busy={busyAction === 'save-profile'}
-            onAddRecord={(type) => setProfile({...profile, records: [...profile.records, newRecord(type)]})}
-            onChange={setProfile}
-            onDraftFromSource={draftProfileFromSource}
-            onSave={saveProfile}
-            profile={profile}
-            selectedSourceID={selectedSourceID}
-            sources={sources}
-          />
-        )}
-
-        {activeTab === 'sources' && (
-          <SourcesView
-            busy={busyAction === 'create-source' || busyAction === 'import-file'}
-            busyAction={busyAction}
-            contextRuns={contextRuns}
-            contextSteps={contextSteps}
-            draft={sourceDraft}
-            onDraftChange={setSourceDraft}
-            onDelete={deleteSource}
-            onFile={importFile}
-            onRunAgent={startContextAgent}
-            onSave={createSource}
-            onStopAgent={stopContextAgent}
-            onSelect={(id) => {
-              setSelectedSourceID(id);
-              setActiveTab('sections');
-            }}
-            sources={sources}
-            
-          />
-        )}
-
-        {activeTab === 'jobs' && (
-          <JobsView
-            busyAction={busyAction}
-            applicationStrategy={applicationStrategy}
-            bulletEvents={bulletEvents}
-            draft={jobDraft}
-            facts={facts}
-            fitAnalysis={fitAnalysis}
-            jobAnalysis={jobAnalysis}
-            jobs={jobs}
-            matches={jobMatches}
-            onAutoSelectDrafts={autoSelectBulletDrafts}
-            onBuildMatchMap={buildMatchMap}
-            onChangeDraft={(draft) => setBulletDrafts((previous) => normalizeDrafts(previous.map((item) => item.id === draft.id ? draft : item)))}
-            onDeleteDraft={deleteBulletDraft}
-            onDeleteJob={deleteJob}
-            onDraftChange={updateJobDraft}
-            onGenerateDrafts={generateBulletDrafts}
-            onGenerateFit={generateFit}
-            onGenerateStrategy={generateStrategy}
-            onNewJob={newJob}
-            onParseJob={parseJob}
-            onSaveDraft={(draft) => updateBulletDraft(draft)}
-            onSaveJob={saveJob}
-            onSelectJob={selectJob}
-            onSelectDraft={selectBulletDraft}
-            onSetDraftStatus={updateBulletDraft}
-            requirements={jobRequirements}
-            selectedJobID={selectedJobID}
-            tailoredDrafts={bulletDrafts}
-          />
-        )}
-
-        {activeTab === 'sections' && (
-          <SectionsView
-            busyAction={busyAction}
-            onDetect={detectSections}
-            onDelete={deleteSection}
-            onExtract={extractFacts}
-            onSave={saveSection}
-            onSectionChange={(section) => setSections((previous) => previous.map((item) => item.id === section.id ? section : item))}
-            onSelectSection={setSelectedSectionID}
-            onSelectSource={setSelectedSourceID}
-            sections={sections.filter((section) => !selectedSourceID || section.source_id === selectedSourceID)}
-            selectedSectionID={selectedSectionID}
-            selectedSource={selectedSource}
-            selectedSourceID={selectedSourceID}
-            sources={sources}
-          />
-        )}
-
-        {activeTab === 'facts' && (
-          <FactsView
-            busyAction={busyAction}
-            facts={facts}
-            onChange={(fact) => setFacts((previous) => normalizeFacts(previous.map((item) => item.id === fact.id ? fact : item)))}
-            onDelete={deleteFact}
-            onDeleteAll={deleteAllFacts}
-            onReview={reviewFact}
-          />
-        )}
-
-        {activeTab === 'claims' && (
-          <ClaimsView
-            blockedClaims={blockedClaims}
-            busyAction={busyAction}
-            claims={claims}
-            onAddBlocked={addBlockedClaim}
-            onBlockedChange={(blocked) => setBlockedClaims((previous) => normalizeBlockedClaims(previous.map((item) => item.id === blocked.id ? blocked : item)))}
-            onClaimChange={(claim) => setClaims((previous) => normalizeClaims(previous.map((item) => item.id === claim.id ? claim : item)))}
-            onDeleteAllClaims={deleteAllClaims}
-            onDeleteBlocked={deleteBlockedClaim}
-            onDeleteClaim={deleteClaim}
-            onGenerateClaims={generateClaims}
-            onSaveBlocked={saveBlockedClaim}
-            onSaveClaim={(claim) => updateClaim(claim)}
-            onSetClaimStatus={updateClaim}
-          />
-        )}
-
-        {activeTab === 'settings' && (
-          <SettingsView
-            apiConfigured={apiConfigured}
-            apiKey={apiKey}
-            busyAction={busyAction}
-            events={events}
-            health={health}
-            llmResult={llmResult}
-            onAPIKeyChange={setAPIKey}
-            onInstallTectonic={installTectonic}
-            onRenderSamplePDF={renderSamplePDF}
-            onRunLLMTest={runLLMTest}
-            onPromptRuleChange={(rule) => setPromptRules((previous) => previous.map((item) => item.id === rule.id ? rule : item))}
-            onSaveAPIKey={saveAPIKey}
-            onSavePromptRule={savePromptRule}
-            onSaveSettings={saveSettings}
-            pdfResult={pdfResult}
-            promptRules={promptRules}
-            promptSources={promptSources}
-            settings={settings}
-            setSettings={setSettings}
-            tectonicStatus={tectonicStatus}
-            toolStatus={toolStatus}
-          />
-        )}
-      </section>
-    </main>
-  );
-}
-
-function ProfileView({
-  busy,
-  onAddRecord,
-  onChange,
-  onDraftFromSource,
-  onSave,
-  profile,
-  selectedSourceID,
-  sources,
-}: {
-  busy: boolean;
-  onAddRecord: (type: string) => void;
-  onChange: (profile: CandidateProfile) => void;
-  onDraftFromSource: () => void;
-  onSave: (event: FormEvent<HTMLFormElement>) => void;
-  profile: CandidateProfile;
-  selectedSourceID: number;
-  sources: CandidateSource[];
-}) {
-  const updateContact = (field: keyof CandidateProfile['contact'], value: string) => {
-    onChange({...profile, contact: {...profile.contact, [field]: value}});
-  };
-  const updateRecord = (index: number, record: CandidateProfileRecord) => {
-    onChange({...profile, records: profile.records.map((item, itemIndex) => itemIndex === index ? record : item)});
-  };
-  const removeRecord = (index: number) => {
-    onChange({...profile, records: profile.records.filter((_, itemIndex) => itemIndex !== index)});
-  };
-
-  return (
-    <form className="grid gap-4 lg:grid-cols-[0.85fr_1.15fr]" onSubmit={onSave}>
-      <Panel icon={<UserRound size={18} />} title="Locked identity" subtitle="Fields the model must preserve exactly.">
-        <div className="space-y-4">
-          <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="text-sm font-semibold text-slate-950">Draft from source</p>
-                <p className="mt-1 text-sm text-slate-500">{sourceName(sources, selectedSourceID)}</p>
-              </div>
-              <IconButton label="Draft profile" onClick={onDraftFromSource} disabled={!selectedSourceID || busy}>
-                <Sparkles size={16} />
-              </IconButton>
-            </div>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            <TextInput label="Full name" value={profile.contact.full_name} onChange={(value) => updateContact('full_name', value)} />
-            <TextInput label="Email" value={profile.contact.email} onChange={(value) => updateContact('email', value)} />
-            <TextInput label="Phone" value={profile.contact.phone} onChange={(value) => updateContact('phone', value)} />
-            <TextInput label="Location" value={profile.contact.location} onChange={(value) => updateContact('location', value)} />
-            <TextInput label="LinkedIn" value={profile.contact.linkedin} onChange={(value) => updateContact('linkedin', value)} />
-            <TextInput label="GitHub" value={profile.contact.github} onChange={(value) => updateContact('github', value)} />
-            <div className="md:col-span-2">
-              <TextInput label="Portfolio" value={profile.contact.portfolio} onChange={(value) => updateContact('portfolio', value)} />
-            </div>
-          </div>
-          <CheckInput
-            checked={profile.contact.verified}
-            label="Verified locked identity"
-            onChange={(checked) => onChange({...profile, contact: {...profile.contact, verified: checked}})}
-          />
-        </div>
-      </Panel>
-
-      <Panel icon={<ListChecks size={18} />} title="Structured records" subtitle="Education, employment, projects, aliases, and blocked aliases.">
-        <div className="space-y-4">
-          <div className="flex flex-wrap gap-2">
-            {['education', 'employment', 'project', 'allowed_alias', 'blocked_alias'].map((type) => (
-              <SecondaryButton key={type} label={recordTypeLabel(type)} onClick={() => onAddRecord(type)} />
-            ))}
-          </div>
-          <div className="space-y-3">
-            {profile.records.length === 0 ? (
-              <EmptyState text="No locked records yet." />
-            ) : (
-              profile.records.map((record, index) => (
-                <RecordEditor
-                  key={`${record.id}-${index}`}
-                  onChange={(next) => updateRecord(index, next)}
-                  onRemove={() => removeRecord(index)}
-                  record={record}
-                />
-              ))
-            )}
-          </div>
-          <IconButton label="Save profile" submit full disabled={busy}>
-            <Save size={16} />
-          </IconButton>
-        </div>
-      </Panel>
-    </form>
-  );
-}
-
-function SourcesView({
-  busy,
-  busyAction,
-  contextRuns,
-  contextSteps,
-  draft,
-  onDraftChange,
-  onDelete,
-  onFile,
-  onRunAgent,
-  onSave,
-  onSelect,
-  onStopAgent,
-  sources,
-}: {
-  busy: boolean;
-  busyAction: string;
-  contextRuns: ContextAgentRun[];
-  contextSteps: ContextAgentStep[];
-  draft: {source_type: string; trust_tier: string; title: string; raw_text: string};
-  onDraftChange: (draft: {source_type: string; trust_tier: string; title: string; raw_text: string}) => void;
-  onDelete: (id: number) => void;
-  onFile: (file?: File) => void;
-  onRunAgent: (id: number) => void;
-  onSave: (event: FormEvent<HTMLFormElement>) => void;
-  onSelect: (id: number) => void;
-  onStopAgent: (runID: number) => void;
-  sources: CandidateSource[];
-}) {
-  const latestRunForSource = (sourceID: number) => contextRuns
-    .filter((run) => run.source_id === sourceID)
-    .sort((a, b) => b.id - a.id)[0];
-  const latestStepForRun = (runID?: number) => runID ? contextSteps.filter((step) => step.run_id === runID).slice(-1)[0] : undefined;
-  return (
-    <div className="grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
-      <Panel icon={<Upload size={18} />} title="Import source" subtitle="Paste raw context or import TXT/MD material.">
-        <form className="space-y-4" onSubmit={onSave}>
-          {busy && (
-            <InlineProgress
-              title={busyAction === 'import-file' ? 'Importing source' : 'Saving source'}
-              detail="Preparing the upload, then the context agent starts automatically."
-              progress={busyAction === 'import-file' ? 36 : 28}
-            />
-          )}
-          <div className="grid gap-3 md:grid-cols-3">
-            <SelectInput
-              label="Source type"
-              value={draft.source_type}
-              onChange={(value) => onDraftChange({...draft, source_type: value, trust_tier: defaultSourceTrust(value)})}
-              options={[
-                ['current_resume', 'Current resume'],
-                ['extended_resume', 'Extended resume'],
-                ['old_resume', 'Old resume'],
-                ['project_notes', 'Project notes'],
-                ['readme', 'README'],
-                ['architecture_notes', 'Architecture notes'],
-                ['interview_notes', 'Interview notes'],
-                ['manual_notes', 'Manual notes'],
-              ]}
-            />
-            <SelectInput
-              label="Trust"
-              value={draft.trust_tier}
-              onChange={(value) => onDraftChange({...draft, trust_tier: value})}
-              options={[
-                ['verified', 'Verified'],
-                ['trusted_ai_summary', 'Trusted AI summary'],
-                ['raw_source', 'Raw source'],
-                ['unverified_ai', 'Unverified AI'],
-              ]}
-            />
-            <TextInput label="Title" value={draft.title} onChange={(value) => onDraftChange({...draft, title: value})} />
-          </div>
-          <TextArea label="Raw source text" rows={14} value={draft.raw_text} onChange={(value) => onDraftChange({...draft, raw_text: value})} />
-          <div className="grid gap-3 md:grid-cols-2">
-            <IconButton label="Save source" submit disabled={busy || draft.raw_text.trim() === ''}>
-              <Save size={16} />
-            </IconButton>
-            <label className="inline-flex h-10 cursor-pointer items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-800 shadow-sm hover:bg-slate-50">
-              <Upload size={16} />
-              Import TXT/MD/TeX
-              <input
-                className="hidden"
-                type="file"
-                accept=".txt,.md,.markdown,.tex,.latex,text/plain,text/markdown,application/x-tex"
-                onChange={(event) => onFile(event.currentTarget.files?.[0])}
-              />
-            </label>
-          </div>
-        </form>
-      </Panel>
-
-      <Panel icon={<FileText size={18} />} title="Source library" subtitle="Stored raw text can be sectioned and reprocessed.">
-        <div className="space-y-3">
-          {sources.length === 0 ? (
-            <EmptyState text="No sources imported yet." />
-          ) : (
-            sources.map((source) => (
-              <div
-                key={source.id}
-                className="rounded-md border border-slate-200 bg-slate-50 p-3"
-              >
-                {(() => {
-                  const run = latestRunForSource(source.id);
-                  const step = latestStepForRun(run?.id);
-                  const progress = contextRunProgress(run, step);
-                  return (
-                    <div className="space-y-3">
-                      <div className="flex items-start justify-between gap-3">
-                        <button type="button" onClick={() => onSelect(source.id)} className="min-w-0 flex-1 text-left">
-                          <span className="text-sm font-semibold text-slate-950">{source.title}</span>
-                          <span className="mt-2 line-clamp-3 block text-sm text-slate-600">{source.raw_text}</span>
-                          {run && (
-                            <span className="mt-2 flex flex-wrap gap-2">
-                              <StatusBadge text={`agent ${run.status}`} />
-                              <StatusBadge text={`${run.facts_created} facts`} />
-                              <StatusBadge text={`${run.claims_created} claims`} />
-                              {step && <StatusBadge text={contextStageLabel(step.stage)} />}
-                            </span>
-                          )}
-                          {run?.error && <span className="mt-2 block text-xs text-rose-700">{run.error}</span>}
-                          {step?.message && !run?.error && <span className="mt-2 block text-xs text-slate-500">{step.message}</span>}
-                          <time className="mt-2 block text-xs text-slate-500">{formatDate(source.imported_at)}</time>
-                        </button>
-                        <div className="flex shrink-0 items-center gap-2">
-                          <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-slate-600">{sourceTypeLabel(source.source_type)}</span>
-                          <span className="rounded-md bg-white px-2 py-1 text-xs font-medium text-slate-600">{sourceTrustLabel(source.trust_tier)}</span>
-                          <IconOnlyButton
-                          label="Run context agent"
-                          onClick={() => onRunAgent(source.id)}
-                          disabled={busyAction === `context-agent-${source.id}` || run?.status === 'running'}
-                        >
-                          <Bot size={16} />
-                        </IconOnlyButton>
-
-                        {run?.status === 'running' && (
-                          <IconOnlyButton
-                            label="Stop context agent"
-                            onClick={() => onStopAgent(run.id)}
-                            disabled={busyAction === `stop-context-agent-${run.id}`}
-                          >
-                            <Square size={16} />
-                          </IconOnlyButton>
-                        )}
-
-                        <IconOnlyButton label="Delete source" onClick={() => onDelete(source.id)}>
-                          <Trash2 size={16} />
-                        </IconOnlyButton>
-                        </div>
-                      </div>
-                      {run?.status === 'running' && (
-                        <InlineProgress
-                          title="Building resume context"
-                          detail={step?.message || contextStageLabel(step?.stage || 'queued')}
-                          progress={progress}
-                        />
-                      )}
-                    </div>
-                  );
-                })()}
-              </div>
-            ))
-          )}
-        </div>
-      </Panel>
-    </div>
-  );
-}
-
-function JobsView({
-  busyAction,
-  applicationStrategy,
-  bulletEvents,
-  draft,
-  facts,
-  fitAnalysis,
-  jobAnalysis,
-  jobs,
-  matches,
-  onAutoSelectDrafts,
-  onBuildMatchMap,
-  onChangeDraft,
-  onDeleteDraft,
-  onDeleteJob,
-  onDraftChange,
-  onGenerateDrafts,
-  onGenerateFit,
-  onGenerateStrategy,
-  onNewJob,
-  onParseJob,
-  onSaveDraft,
-  onSaveJob,
-  onSelectJob,
-  onSelectDraft,
-  onSetDraftStatus,
-  requirements,
-  selectedJobID,
-  tailoredDrafts,
-}: {
-  busyAction: string;
-  applicationStrategy: ApplicationStrategy | null;
-  bulletEvents: BulletGenerationEvent[];
-  draft: JobDraft;
-  facts: EvidenceFact[];
-  fitAnalysis: JobFitAnalysis | null;
-  jobAnalysis: JobAnalysis | null;
-  jobs: JobDescription[];
-  matches: JobFactMatch[];
-  onAutoSelectDrafts: () => void;
-  onBuildMatchMap: () => void;
-  onChangeDraft: (draft: TailoredBulletDraft) => void;
-  onDeleteDraft: (id: number) => void;
-  onDeleteJob: (id: number) => void;
-  onDraftChange: (draft: JobDraft) => void;
-  onGenerateDrafts: () => void;
-  onGenerateFit: () => void;
-  onGenerateStrategy: () => void;
-  onNewJob: () => void;
-  onParseJob: () => void;
-  onSaveDraft: (draft: TailoredBulletDraft) => void;
-  onSaveJob: (event: FormEvent<HTMLFormElement>) => void;
-  onSelectJob: (job: JobDescription) => void;
-  onSelectDraft: (draft: TailoredBulletDraft, selected: boolean) => void;
-  onSetDraftStatus: (draft: TailoredBulletDraft, status: string) => void;
-  requirements: JobRequirement[];
-  selectedJobID: number;
-  tailoredDrafts: TailoredBulletDraft[];
-}) {
-  const [jobSearch, setJobSearch] = useState('');
-  const [activeJobView, setActiveJobView] = useState<'overview' | 'requirements' | 'drafts' | 'diagnostics'>('overview');
-  const [agentOptions, setAgentOptions] = useState({
-    parse: true,
-    match: true,
-    fit: true,
-    strategy: true,
-    drafts: false,
-    select: false,
-  });
-  const matchesByRequirement = new Map<number, JobFactMatch[]>();
-  matches.forEach((match) => {
-    matchesByRequirement.set(match.requirement_id, [...(matchesByRequirement.get(match.requirement_id) ?? []), match]);
-  });
-  const requirementLabel = (id: number) => requirements.find((req) => req.id === id)?.requirement_text ?? `Requirement ${id}`;
-  const jobWork = jobWorkItem(busyAction);
-  const selectedJob = jobs.find((job) => job.id === selectedJobID);
-  const filteredJobs = jobs.filter((job) => {
-    const query = jobSearch.trim().toLowerCase();
-    if (!query) return true;
-    return [job.title, job.company, job.url, job.raw_text].some((value) => value.toLowerCase().includes(query));
-  });
-  const matchedRequirementCount = requirements.filter((requirement) => (matchesByRequirement.get(requirement.id) ?? []).length > 0).length;
-  const selectedDraftCount = tailoredDrafts.filter((draftItem) => draftItem.selected_for_resume).length;
-  const acceptedDraftCount = tailoredDrafts.filter((draftItem) => draftItem.status === 'accepted').length;
-  const readyToMatch = selectedJobID > 0 && requirements.length > 0 && facts.length > 0;
-  const readyForFit = selectedJobID > 0 && requirements.length > 0;
-  const readyForStrategy = selectedJobID > 0 && Boolean(fitAnalysis);
-  const readyForDrafts = selectedJobID > 0 && matches.length > 0;
-  const pipelineBusy = busyAction !== '';
-  const pipelineSteps = [
-    {key: 'parse' as const, label: 'Parse', icon: <Sparkles size={15} />, enabled: agentOptions.parse, ready: selectedJobID > 0, action: onParseJob},
-    {key: 'match' as const, label: 'Match', icon: <ListChecks size={15} />, enabled: agentOptions.match, ready: readyToMatch, action: onBuildMatchMap},
-    {key: 'fit' as const, label: 'Fit', icon: <Activity size={15} />, enabled: agentOptions.fit, ready: readyForFit, action: onGenerateFit},
-    {key: 'strategy' as const, label: 'Strategy', icon: <Wrench size={15} />, enabled: agentOptions.strategy, ready: readyForStrategy, action: onGenerateStrategy},
-    {key: 'drafts' as const, label: 'Draft', icon: <FileText size={15} />, enabled: agentOptions.drafts, ready: readyForDrafts, action: onGenerateDrafts},
-    {key: 'select' as const, label: 'Select', icon: <CheckCircle2 size={15} />, enabled: agentOptions.select, ready: tailoredDrafts.length > 0, action: onAutoSelectDrafts},
-  ];
-  async function runAgentPipeline() {
-    for (const step of pipelineSteps) {
-      if (!step.enabled || !step.ready) continue;
-      await Promise.resolve(step.action());
-      await delay(80);
-    }
-  }
-
-  return (
-    <div className="grid gap-4 xl:grid-cols-[380px_1fr]">
-      <aside className="space-y-4">
-        <Panel icon={<BriefcaseBusiness size={18} />} title="Applications" subtitle={`${jobs.length} saved JD${jobs.length === 1 ? '' : 's'}`}>
-          <div className="space-y-3">
-            <div className="grid gap-2 sm:grid-cols-[1fr_auto] xl:grid-cols-1">
-              <label className="relative block">
-                <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                <input
-                  value={jobSearch}
-                  onChange={(event) => setJobSearch(event.target.value)}
-                  placeholder="Search title, company, keywords"
-                  className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
-                />
-              </label>
-              <IconButton label="New JD" onClick={onNewJob} full>
-                <FilePlus2 size={16} />
-              </IconButton>
-            </div>
-
-            <div className="max-h-[540px] space-y-2 overflow-y-auto pr-1">
-              {filteredJobs.length === 0 ? (
-                <EmptyState text={jobs.length === 0 ? 'No jobs saved yet.' : 'No jobs match the search.'} />
-              ) : (
-                filteredJobs.map((job) => {
-                  const active = job.id === selectedJobID;
-                  return (
-                    <div key={job.id} className={`group rounded-md border ${active ? 'border-sky-300 bg-sky-50' : 'border-slate-200 bg-white hover:border-slate-300'}`}>
-                      <button type="button" onClick={() => onSelectJob(job)} className="block w-full p-3 text-left">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-semibold text-slate-950">{job.title}</p>
-                            <p className="mt-0.5 truncate text-xs font-medium text-slate-600">{job.company || 'Company not set'}</p>
-                          </div>
-                          <ChevronRight className={`mt-0.5 shrink-0 ${active ? 'text-sky-600' : 'text-slate-300 group-hover:text-slate-500'}`} size={16} />
-                        </div>
-                        <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-500">{job.raw_text}</p>
-                        <div className="mt-3 flex flex-wrap gap-1.5">
-                          {active && requirements.length > 0 && <StatusBadge text={`${requirements.length} reqs`} />}
-                          {active && matches.length > 0 && <StatusBadge text={`${matchedRequirementCount}/${requirements.length} matched`} />}
-                          {active && fitAnalysis && <StatusBadge text={`${fitAnalysis.overall_score}% fit`} />}
-                          {active && tailoredDrafts.length > 0 && <StatusBadge text={`${tailoredDrafts.length} drafts`} />}
-                        </div>
-                      </button>
-                      <div className="flex justify-end border-t border-slate-200 px-2 py-2">
-                        <IconOnlyButton label="Delete job" onClick={() => onDeleteJob(job.id)}>
-                          <Trash2 size={15} />
-                        </IconOnlyButton>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-          </div>
-        </Panel>
-
-        <Panel icon={<SlidersHorizontal size={18} />} title="Agent run" subtitle="Choose the stages this JD should run.">
-          <div className="space-y-3">
-            {jobWork && <InlineProgress compact title={jobWork.title} detail={jobWork.detail} progress={jobWork.progress} />}
-            <div className="grid gap-2">
-              {pipelineSteps.map((step) => (
-                <ToggleSwitch
-                  key={step.key}
-                  checked={step.enabled}
-                  disabled={pipelineBusy}
-                  label={step.label}
-                  meta={step.ready ? 'ready' : 'waiting'}
-                  icon={step.icon}
-                  onChange={(checked) => setAgentOptions((previous) => ({...previous, [step.key]: checked}))}
-                />
-              ))}
-            </div>
-            <IconButton label="Run selected stages" onClick={runAgentPipeline} disabled={!selectedJobID || pipelineBusy} full>
-              <Play size={16} />
-            </IconButton>
-            <StageRail
-              current={busyAction}
-              stages={[
-                ['parse-job', 'Parse'],
-                ['build-match-map', 'Match'],
-                ['generate-fit', 'Fit'],
-                ['generate-strategy', 'Strategy'],
-                ['generate-bullets', 'Draft'],
-                ['auto-select-drafts', 'Select'],
-              ]}
-            />
-          </div>
-        </Panel>
-      </aside>
-
-      <div className="space-y-4">
-        <Panel icon={<Gauge size={18} />} title={selectedJob ? `${selectedJob.company || 'Untitled company'} - ${selectedJob.title}` : 'JD workspace'} subtitle="Intake, matching, fit, strategy, and resume bullets in one place.">
-          <div className="space-y-4">
-            <form className="space-y-3" onSubmit={onSaveJob}>
-              <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1.2fr_auto]">
-                <TextInput label="Company" value={draft.company} onChange={(value) => onDraftChange({...draft, company: value})} />
-                <TextInput label="Title" value={draft.title} onChange={(value) => onDraftChange({...draft, title: value})} />
-                <TextInput label="URL" value={draft.url} onChange={(value) => onDraftChange({...draft, url: value})} />
-                <div className="flex items-end">
-                  <IconButton label={selectedJobID ? 'Update JD' : 'Save JD'} submit disabled={busyAction === 'save-job' || draft.raw_text.trim() === ''} full>
-                    <Save size={16} />
-                  </IconButton>
+        {activeView === 'pipeline' && selectedJob && (
+          <div className="flex flex-1 flex-col overflow-hidden">
+            <div className="border-b border-slate-200 bg-white px-6 py-3">
+              <div className="flex items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold text-slate-950">{selectedJob.title || 'Untitled'}</p>
+                  <p className="truncate text-xs text-slate-500">{selectedJob.company || 'No company'}</p>
                 </div>
-              </div>
-              <TextArea label="Raw JD text" rows={6} value={draft.raw_text} onChange={(value) => onDraftChange({...draft, raw_text: normalizePastedText(value)})} />
-            </form>
-
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              <JobMetric label="Requirements" value={`${requirements.length}`} detail={requirements.length ? `${matchedRequirementCount} with evidence` : 'parse JD first'} />
-              <JobMetric label="Fit" value={fitAnalysis ? `${fitAnalysis.overall_score}%` : '--'} detail={fitAnalysis?.recommendation ?? 'generate after matches'} />
-              <JobMetric label="Drafts" value={`${tailoredDrafts.length}`} detail={`${acceptedDraftCount} accepted, ${selectedDraftCount} selected`} />
-              <JobMetric label="Gaps" value={`${applicationStrategy?.do_not_overclaim.length ?? fitAnalysis?.critical_gaps.length ?? 0}`} detail="do-not-overclaim items" />
-            </div>
-
-            <div className="grid gap-2 md:grid-cols-6">
-              {pipelineSteps.map((step) => (
-                <IconButton key={step.key} label={step.label} onClick={step.action} disabled={!step.ready || pipelineBusy} full>
-                  {step.icon}
+                <div className="flex gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
+                  {pipelineSteps.map((s, i) => (
+                    <button
+                      key={s.key}
+                      className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${pipelineStep === s.key ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                      onClick={() => setPipelineStep(s.key)}
+                    >
+                      <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold ${pipelineStep === s.key ? 'bg-slate-900 text-white' : 'bg-slate-200 text-slate-500'}`}>{i + 1}</span>
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+                <IconButton label="Refresh" onClick={load} disabled={busyAction !== ''}>
+                  <RefreshCcw size={14} />
                 </IconButton>
-              ))}
+              </div>
             </div>
-          </div>
-        </Panel>
 
-        <div className="flex flex-wrap gap-2 rounded-md border border-slate-200 bg-white p-2 shadow-sm">
-          {[
-            ['overview', 'Overview'],
-            ['requirements', `Requirements ${requirements.length}`],
-            ['drafts', `Drafts ${tailoredDrafts.length}`],
-            ['diagnostics', `Diagnostics ${bulletEvents.length}`],
-          ].map(([value, label]) => (
-            <button
-              key={value}
-              type="button"
-              onClick={() => setActiveJobView(value as typeof activeJobView)}
-              className={`h-9 rounded-md px-3 text-sm font-medium ${activeJobView === value ? 'bg-slate-950 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+            <div className="flex-1 overflow-y-auto p-6">
+              {pipelineStep === 'job' && (
+                <div className="mx-auto max-w-3xl space-y-4">
+                  <Panel icon={<BriefcaseBusiness size={16} />} title="Job Description" compact>
+                    <form onSubmit={handleSaveJob} className="space-y-3">
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <TextInput label="Company" value={jobDraft.company} onChange={(v) => updateJobDraft({...jobDraft, company: v})} />
+                        <TextInput label="Role" value={jobDraft.title} onChange={(v) => updateJobDraft({...jobDraft, title: v})} />
+                      </div>
+                      <TextInput label="URL" value={jobDraft.url} onChange={(v) => updateJobDraft({...jobDraft, url: v})} />
+                      <TextArea label="Description" rows={12} value={jobDraft.raw_text} onChange={(v) => updateJobDraft({...jobDraft, raw_text: v})} />
+                      <div className="flex gap-2">
+                        <IconButton label="Save" submit><Save size={14} /></IconButton>
+                        {selectedJobID > 0 && (
+                          <IconButton label="Delete" onClick={() => deleteJob(selectedJobID)}><Trash2 size={14} /></IconButton>
+                        )}
+                      </div>
+                    </form>
+                  </Panel>
 
-        {activeJobView === 'overview' && (
-          <div className="grid gap-4 xl:grid-cols-3">
-            <SummaryBlock title="Top pain points" empty="Parse a saved JD." items={jobAnalysis?.top_pain_points ?? []} />
-            <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-              <p className="text-sm font-semibold text-slate-950">Fit</p>
-              {fitAnalysis ? (
-                <div className="mt-3 space-y-2 text-sm text-slate-700">
                   <div className="flex flex-wrap gap-2">
-                    <StatusBadge text={`${fitAnalysis.overall_score}%`} />
-                    <StatusBadge text={fitAnalysis.recommendation} />
+                    <PipelineButton label="Extract" onClick={handleParseJD} tone="primary" />
+                    <PipelineButton label="Match" onClick={handleMatch} />
+                    <PipelineButton label="Fit" onClick={handleFit} />
+                    <PipelineButton label="Strategy" onClick={handleStrategy} />
+                    <PipelineButton label="Bullets" onClick={handleBullets} />
                   </div>
-                  <p>{fitAnalysis.reality_check}</p>
-                </div>
-              ) : (
-                <p className="mt-3 text-sm text-slate-500">Generate fit after building matches.</p>
-              )}
-            </div>
-            <div className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-              <p className="text-sm font-semibold text-slate-950">Strategy</p>
-              {applicationStrategy ? (
-                <div className="mt-3 space-y-2 text-sm text-slate-700">
-                  <p className="font-medium text-slate-900">{applicationStrategy.resume_headline}</p>
-                  <p>{applicationStrategy.positioning_strategy}</p>
-                </div>
-              ) : (
-                <p className="mt-3 text-sm text-slate-500">Generate strategy after fit.</p>
-              )}
-            </div>
-            <SummaryBlock title="Keywords" empty="No keywords yet." items={(applicationStrategy?.keywords ?? jobAnalysis?.keywords ?? []).slice(0, 12)} />
-            <SummaryBlock title="Do not overclaim" empty="No blocked gaps yet." items={applicationStrategy?.do_not_overclaim ?? fitAnalysis?.critical_gaps ?? []} />
-            <SummaryBlock title="Required skills" empty="No required skills yet." items={jobAnalysis?.required_skills ?? []} />
-          </div>
-        )}
 
-        {activeJobView === 'requirements' && (
-          <Panel icon={<ListChecks size={18} />} title="Requirements and matches" subtitle={`${requirements.length} parsed requirements, ${matches.length} evidence links`}>
-            <div className="space-y-3">
-              {requirements.length === 0 ? (
-                <EmptyState text="Parse a saved JD to create requirements." />
-              ) : (
-                requirements.map((requirement) => (
-                  <div key={requirement.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                    <div className="mb-2 flex flex-wrap items-center gap-2">
-                      <StatusBadge text={requirement.priority} />
-                      <StatusBadge text={requirement.category} />
-                      {asStringArray(requirement.keywords).slice(0, 6).map((keyword) => <StatusBadge key={keyword} text={keyword} />)}
-                    </div>
-                    <p className="text-sm font-semibold text-slate-950">{requirement.requirement_text}</p>
-                    <div className="mt-3 grid gap-2 lg:grid-cols-2">
-                      {(matchesByRequirement.get(requirement.id) ?? []).length === 0 ? (
-                        <p className="rounded-md border border-dashed border-slate-300 bg-white px-3 py-4 text-sm text-slate-500">No matches yet.</p>
-                      ) : (
-                        (matchesByRequirement.get(requirement.id) ?? []).map((match) => (
-                          <div key={match.id} className="rounded-md border border-slate-200 bg-white p-3">
-                            <div className="mb-2 flex flex-wrap items-center gap-2">
-                              <StatusBadge text={match.coverage_status} />
-                              <StatusBadge text={`${Math.round(match.score * 100)}%`} />
-                              <StatusBadge text={match.fact_status} />
-                            </div>
-                            <p className="text-sm text-slate-900">{match.fact_text}</p>
-                            <p className="mt-1 text-xs text-slate-500">{match.rationale}</p>
+                  {jobAnalysis && (
+                    <CollapsibleSection label={`Analysis — ${jobAnalysis.role_archetype}`}>
+                      <div className="mt-2 space-y-2 text-xs text-slate-600">
+                        {jobAnalysis.company && <p><span className="font-medium text-slate-700">Company:</span> {jobAnalysis.company}</p>}
+                        {jobAnalysis.location && <p><span className="font-medium text-slate-700">Location:</span> {jobAnalysis.location}</p>}
+                        {jobAnalysis.seniority_level && <p><span className="font-medium text-slate-700">Seniority:</span> {jobAnalysis.seniority_level}</p>}
+                        {jobAnalysis.work_arrangement && <p><span className="font-medium text-slate-700">Work:</span> {jobAnalysis.work_arrangement}</p>}
+                        {jobAnalysis.salary && <p><span className="font-medium text-slate-700">Salary:</span> {jobAnalysis.salary}</p>}
+                        {jobAnalysis.responsibilities.length > 0 && (
+                          <div>
+                            <p className="font-medium text-slate-700">Responsibilities:</p>
+                            {jobAnalysis.responsibilities.map((r, i) => <p key={i} className="mt-0.5">• {r}</p>)}
                           </div>
-                        ))
-                      )}
-                    </div>
+                        )}
+                        {jobAnalysis.required_skills.length > 0 && (
+                          <div>
+                            <p className="font-medium text-slate-700">Required skills:</p>
+                            <p className="mt-0.5">{jobAnalysis.required_skills.join(', ')}</p>
+                          </div>
+                        )}
+                        {jobAnalysis.preferred_skills.length > 0 && (
+                          <div>
+                            <p className="font-medium text-slate-700">Preferred skills:</p>
+                            <p className="mt-0.5">{jobAnalysis.preferred_skills.join(', ')}</p>
+                          </div>
+                        )}
+                        {jobAnalysis.top_pain_points.length > 0 && (
+                          <div>
+                            <p className="font-medium text-slate-700">Pain points:</p>
+                            {jobAnalysis.top_pain_points.map((p, i) => <p key={i} className="mt-0.5">• {p}</p>)}
+                          </div>
+                        )}
+                      </div>
+                    </CollapsibleSection>
+                  )}
+
+                  {jobRequirements.length > 0 && (
+                    <CollapsibleSection label={`Requirements (${jobRequirements.length})`}>
+                      <div className="mt-2 space-y-1">
+                        {jobRequirements.map((req) => (
+                          <div key={req.id} className="flex items-start gap-2 text-xs">
+                            <span className={`mt-1 shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-bold ${req.priority === 'required' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500'}`}>{req.priority === 'required' ? 'REQ' : 'pref'}</span>
+                            <span className="text-slate-600">{req.requirement_text}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </CollapsibleSection>
+                  )}
+
+                  {jobMatches.length > 0 && (
+                    <CollapsibleSection label={`Match map (${jobMatches.length})`}>
+                      <div className="mt-2 space-y-2">
+                        {jobMatches.map((m) => (
+                          <div key={m.id} className="flex items-start gap-2 text-xs">
+                            <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${m.coverage_status === 'covered' ? 'bg-green-100 text-green-800' : m.coverage_status === 'partial' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'}`}>
+                              {m.coverage_status}
+                            </span>
+                            <div className="min-w-0">
+                              <p className="text-slate-700">{m.fact_text}</p>
+                              {m.rationale && <p className="text-slate-400">{m.rationale}</p>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </CollapsibleSection>
+                  )}
+
+                  {applicationStrategy && (
+                    <CollapsibleSection label="Strategy">
+                      <div className="mt-2 space-y-2 text-xs text-slate-600">
+                        {applicationStrategy.resume_headline && <p><span className="font-medium text-slate-700">Headline:</span> {applicationStrategy.resume_headline}</p>}
+                        {applicationStrategy.weak_or_missing_requirements.length > 0 && (
+                          <div>
+                            <p className="font-medium text-slate-700">Weak/missing:</p>
+                            {applicationStrategy.weak_or_missing_requirements.map((w, i) => <p key={i} className="mt-0.5">• {w}</p>)}
+                          </div>
+                        )}
+                      </div>
+                    </CollapsibleSection>
+                  )}
+
+                  {fitAnalysis && (
+                    <Panel icon={<Gauge size={16} />} title={`Fit: ${fitAnalysis.overall_score}% — ${fitAnalysis.recommendation}`} compact summary={fitAnalysis.reality_check}>
+                      <div className="space-y-2 mt-3 text-xs text-slate-600">
+                        {fitAnalysis.strengths.length > 0 && (
+                          <div>
+                            <p className="font-medium text-slate-700">Strengths:</p>
+                            {fitAnalysis.strengths.map((s, i) => <p key={i} className="mt-0.5">• {s}</p>)}
+                          </div>
+                        )}
+                        {fitAnalysis.critical_gaps.length > 0 && (
+                          <div>
+                            <p className="font-medium text-slate-700">Gaps:</p>
+                            {fitAnalysis.critical_gaps.map((g, i) => <p key={i} className="mt-0.5">• {g}</p>)}
+                          </div>
+                        )}
+                      </div>
+                    </Panel>
+                  )}
+
+                  <div className="pt-2">
+                    <button className="w-full rounded-lg border-2 border-dashed border-slate-300 py-3 text-xs font-medium text-slate-500 hover:border-slate-400 hover:text-slate-600" onClick={() => setPipelineStep('bullets')}>
+                      → Continue to bullet selection
+                    </button>
                   </div>
-                ))
-              )}
-            </div>
-          </Panel>
-        )}
-
-        {activeJobView === 'drafts' && (
-          <Panel icon={<Sparkles size={18} />} title="Saved bullet drafts" subtitle={`${tailoredDrafts.length} suggestions; selected drafts can be copied into the resume.`}>
-            <div className="space-y-3">
-              {tailoredDrafts.length === 0 ? (
-                <EmptyState text="Generate drafts after building a match map." />
-              ) : (
-                tailoredDrafts.map((item) => (
-                  <div key={item.id} className={`rounded-md border p-3 ${item.selected_for_resume ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-slate-50'}`}>
-                    <div className="mb-3 flex flex-wrap items-center gap-2">
-                      <StatusBadge text={item.status} />
-                      {item.selected_for_resume && <StatusBadge text="selected" />}
-                      <StatusBadge text={`${Math.round(item.selection_score * 100)} score`} />
-                      <StatusBadge text={item.origin_heading || 'unknown origin'} />
-                      {item.value_theme && <StatusBadge text={item.value_theme.replaceAll('_', ' ')} />}
-                    </div>
-                    <TextArea label="Draft bullet" rows={3} value={item.draft_text} onChange={(value) => onChangeDraft({...item, draft_text: value})} />
-                    <p className="mt-2 text-xs text-slate-600">{item.rationale}</p>
-                    <div className="mt-3 grid gap-2 md:grid-cols-6">
-                      <IconButton label="Save" onClick={() => onSaveDraft(item)} disabled={busyAction === `update-draft-${item.id}`}><Save size={16} /></IconButton>
-                      <SecondaryButton label="Accept" onClick={() => onSetDraftStatus(item, 'accepted')} />
-                      <SecondaryButton label="Review" onClick={() => onSetDraftStatus(item, 'needs_review')} />
-                      <DangerButton label="Reject" onClick={() => onSetDraftStatus(item, 'rejected')} />
-                      <SecondaryButton label={item.selected_for_resume ? 'Unselect' : 'Select'} onClick={() => onSelectDraft(item, !item.selected_for_resume)} />
-                      <IconButton label="Copy" onClick={() => navigator.clipboard?.writeText(item.draft_text)}><Clipboard size={16} /></IconButton>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </Panel>
-        )}
-
-        {activeJobView === 'diagnostics' && (
-          <Panel icon={<Activity size={18} />} title="Bullet diagnostics" subtitle="Generation, rejection, insertion, and selection events.">
-            <div className="space-y-2">
-              {bulletEvents.length === 0 ? (
-                <EmptyState text="No bullet diagnostics yet." />
-              ) : (
-                bulletEvents.slice(0, 60).map((event) => (
-                  <div key={event.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                    <div className="mb-2 flex flex-wrap items-center gap-2">
-                      <StatusBadge text={event.stage} />
-                      <StatusBadge text={event.status} />
-                      {event.origin_heading && <StatusBadge text={event.origin_heading} />}
-                    </div>
-                    {event.reason && <p className="text-xs text-slate-600">{event.reason}</p>}
-                    {event.draft_text && <p className="mt-1 text-sm text-slate-900">{event.draft_text}</p>}
-                  </div>
-                ))
-              )}
-            </div>
-          </Panel>
-        )}
-      </div>
-    </div>
-  );
-
-}
-
-function SectionsView({
-  busyAction,
-  onDetect,
-  onDelete,
-  onExtract,
-  onSave,
-  onSectionChange,
-  onSelectSection,
-  onSelectSource,
-  sections,
-  selectedSectionID,
-  selectedSource,
-  selectedSourceID,
-  sources,
-}: {
-  busyAction: string;
-  onDetect: () => void;
-  onDelete: (id: number) => void;
-  onExtract: () => void;
-  onSave: (section: SourceSection) => void;
-  onSectionChange: (section: SourceSection) => void;
-  onSelectSection: (id: number) => void;
-  onSelectSource: (id: number) => void;
-  sections: SourceSection[];
-  selectedSectionID: number;
-  selectedSource?: CandidateSource;
-  selectedSourceID: number;
-  sources: CandidateSource[];
-}) {
-  const selectedSection = sections.find((section) => section.id === selectedSectionID) ?? sections[0];
-
-  return (
-    <div className="grid gap-4 lg:grid-cols-[340px_1fr]">
-      <Panel icon={<Layers3 size={18} />} title="Source sections" subtitle="Split raw sources into editable chunks.">
-        <div className="space-y-4">
-          {busyAction === 'detect-sections' && (
-            <InlineProgress title="Detecting sections" detail="Reading headings and splitting source text into editable chunks." progress={45} />
-          )}
-          <SelectInput
-            label="Source"
-            value={String(selectedSourceID || '')}
-            onChange={(value) => onSelectSource(Number(value))}
-            options={sources.map((source) => [String(source.id), source.title])}
-          />
-          <IconButton label="Detect sections" onClick={onDetect} full disabled={!selectedSourceID || busyAction === 'detect-sections'}>
-            <Sparkles size={16} />
-          </IconButton>
-          <div className="space-y-2">
-            {sections.length === 0 ? (
-              <EmptyState text={selectedSource ? 'No sections detected for this source.' : 'Import a source first.'} />
-            ) : (
-              sections.map((section) => (
-                <div
-                  key={section.id}
-                  className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm ${section.id === selectedSection?.id ? 'border-sky-300 bg-sky-50 text-sky-950' : 'border-slate-200 bg-slate-50 text-slate-800'}`}
-                >
-                  <button type="button" onClick={() => onSelectSection(section.id)} className="min-w-0 flex-1 text-left">
-                    <span className="font-semibold">{section.heading}</span>
-                    <span className="mt-1 block text-xs text-slate-500">{sectionTypeLabel(section.section_type)}</span>
-                  </button>
-                  <IconOnlyButton label="Delete section" onClick={() => onDelete(section.id)}>
-                    <Trash2 size={16} />
-                  </IconOnlyButton>
                 </div>
-              ))
-            )}
-          </div>
-        </div>
-      </Panel>
+              )}
 
-      <Panel icon={<FileText size={18} />} title="Section editor" subtitle="Fix obvious section mistakes before extracting facts.">
-        {!selectedSection ? (
-          <EmptyState text="Select or detect a section to edit." />
-        ) : (
-          <div className="space-y-4">
-            {busyAction === 'extract-facts' && (
-              <InlineProgress title="Extracting evidence facts" detail="Converting section text into compact quote-backed atoms." progress={62} />
-            )}
-            <div className="grid gap-3 md:grid-cols-2">
-              <TextInput label="Heading" value={selectedSection.heading} onChange={(value) => onSectionChange({...selectedSection, heading: value})} />
-              <SelectInput
-                label="Section type"
-                value={selectedSection.section_type}
-                onChange={(value) => onSectionChange({...selectedSection, section_type: value})}
-                options={[
-                  ['summary', 'Summary'],
-                  ['skills', 'Skills'],
-                  ['experience', 'Experience'],
-                  ['project', 'Project'],
-                  ['education', 'Education'],
-                  ['certification', 'Certification'],
-                  ['misc', 'Misc'],
-                ]}
-              />
-            </div>
-            <TextArea label="Content" rows={16} value={selectedSection.content} onChange={(value) => onSectionChange({...selectedSection, content: value})} />
-            <div className="grid gap-3 md:grid-cols-2">
-              <IconButton label="Save section" onClick={() => onSave(selectedSection)} disabled={busyAction === `save-section-${selectedSection.id}`}>
-                <Save size={16} />
-              </IconButton>
-              <IconButton label="Extract facts" onClick={onExtract} disabled={busyAction === 'extract-facts'}>
-                <Sparkles size={16} />
-              </IconButton>
-              <div className="md:col-span-2">
-                <DangerButton label="Delete section" onClick={() => onDelete(selectedSection.id)} />
-              </div>
-            </div>
-          </div>
-        )}
-      </Panel>
-    </div>
-  );
-}
-
-function FactsView({
-  busyAction,
-  facts,
-  onChange,
-  onDelete,
-  onDeleteAll,
-  onReview,
-}: {
-  busyAction: string;
-  facts: EvidenceFact[];
-  onChange: (fact: EvidenceFact) => void;
-  onDelete: (id: number) => void;
-  onDeleteAll: () => void | Promise<void>;
-  onReview: (fact: EvidenceFact, status: string) => void | Promise<void>;
-}) {
-  const [filter, setFilter] = useState('needs_review');
-  const counts = {
-    all: facts.length,
-    needs_review: facts.filter((fact) => fact.status === 'needs_review').length,
-    approved: facts.filter((fact) => fact.status === 'approved').length,
-    rejected: facts.filter((fact) => fact.status === 'rejected').length,
-  };
-  const filteredFacts = facts.filter((fact) => filter === 'all' || fact.status === filter);
-  const visibleFacts = filteredFacts.slice(0, 40);
-  const approveVisible = async () => {
-    for (const fact of visibleFacts.filter((item) => item.status === 'needs_review')) {
-      await onReview(fact, 'approved');
-    }
-  };
-
-  return (
-    <Panel icon={<ListChecks size={18} />} title="Fact review queue" subtitle="Approve the compact atoms; keep the quote as source evidence. Notes are optional.">
-      <div className="space-y-4">
-        {busyAction === 'delete-all-facts' && (
-          <InlineProgress title="Clearing fact bank" detail="Removing facts and dependent match/draft outputs." progress={54} />
-        )}
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
-          <div className="flex flex-wrap gap-2">
-            {[
-              ['needs_review', `Needs review ${counts.needs_review}`],
-              ['approved', `Approved ${counts.approved}`],
-              ['rejected', `Rejected ${counts.rejected}`],
-              ['all', `All ${counts.all}`],
-            ].map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => setFilter(value)}
-                className={`h-9 rounded-md border px-3 text-sm font-medium ${filter === value ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'}`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <SecondaryButton label="Approve visible" onClick={approveVisible} />
-            <DangerButton label="Delete all facts" onClick={() => {
-              if (facts.length > 0 && busyAction !== 'delete-all-facts') {
-                void onDeleteAll();
-              }
-            }} />
-          </div>
-        </div>
-
-        {facts.length === 0 ? (
-          <EmptyState text="No evidence facts extracted yet." />
-        ) : filteredFacts.length === 0 ? (
-          <EmptyState text="Nothing in this queue." />
-        ) : (
-          <>
-          {filteredFacts.length > visibleFacts.length && (
-            <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-              Showing first {visibleFacts.length} of {filteredFacts.length}. Approve or delete some to continue through the queue.
-            </p>
-          )}
-          {visibleFacts.map((fact) => (
-            <div key={fact.id} className="rounded-md border border-slate-200 bg-slate-50 p-4">
-              <div className="mb-3 flex items-start justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <StatusBadge text={fact.status} />
-                  <StatusBadge text={fact.confidence} />
-                  {fact.auto_approved && <StatusBadge text="auto approved" />}
-                  {fact.duplicate_of_id > 0 && <StatusBadge text={`duplicate of ${fact.duplicate_of_id}`} />}
-                  {fact.similarity_score < 1 && <StatusBadge text={`${Math.round(fact.similarity_score * 100)} similar`} />}
-                  {fact.origin_type && <StatusBadge text={fact.origin_type} />}
-                  {asStringArray(fact.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
+              {pipelineStep === 'bullets' && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-slate-500">{bulletDrafts.filter((d) => d.job_id === selectedJobID).length} bullets · {bulletDrafts.filter((d) => d.job_id === selectedJobID && d.selected_for_resume).length} selected</p>
+                    <SecondaryButton label="Auto-select" onClick={handleAutoSelect} />
+                  </div>
+                  {bulletEvents.length > 0 && (
+                    <CollapsibleSection label={`Generation log (${bulletEvents.length})`}>
+                      <div className="mt-2 space-y-1">
+                        {bulletEvents.slice(-5).map((ev) => (
+                          <div key={ev.id} className="flex items-start gap-2 text-xs">
+                            <span className={`mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${ev.status === 'selected' ? 'bg-green-100 text-green-700' : ev.status === 'rejected' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500'}`}>
+                              {ev.status}
+                            </span>
+                            <div className="min-w-0">
+                              <p className="text-slate-700">{ev.draft_text || ev.origin_heading}</p>
+                              {ev['reason'] && <p className="text-slate-400">{ev['reason']}</p>}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </CollapsibleSection>
+                  )}
+                  {bulletDrafts.filter((d) => d.job_id === selectedJobID).length === 0 ? (
+                    <EmptyState text="No bullets yet. Generate bullets from the Job step." />
+                  ) : (
+                    <div className="space-y-2">
+                      {bulletDrafts.filter((d) => d.job_id === selectedJobID).map((draft) => (
+                        <BulletCard key={draft.id} draft={draft} onToggle={() => handleToggleBullet(draft)} onEdit={handleEditBullet} onDelete={handleDeleteBullet} />
+                      ))}
+                    </div>
+                  )}
+                  <div className="pt-2">
+                    <button className="w-full rounded-lg border-2 border-dashed border-slate-300 py-3 text-xs font-medium text-slate-500 hover:border-slate-400 hover:text-slate-600" onClick={() => setPipelineStep('resume')}>
+                      → Continue to resume assembly
+                    </button>
+                  </div>
                 </div>
-                <IconOnlyButton label="Delete fact" onClick={() => onDelete(fact.id)}>
-                  <Trash2 size={16} />
-                </IconOnlyButton>
-              </div>
-              {(fact.origin_heading || asStringArray(fact.context).length > 0) && (
-                <div className="mb-3 rounded-md border border-slate-200 bg-white px-3 py-2">
-                  <p className="text-xs font-semibold uppercase text-slate-500">Origin</p>
-                  {fact.origin_heading && <p className="mt-1 text-sm font-medium text-slate-800">{fact.origin_heading}</p>}
-                  {asStringArray(fact.context).length > 0 && (
-                    <p className="mt-1 text-xs text-slate-500">{asStringArray(fact.context).join(' | ')}</p>
+              )}
+
+              {pipelineStep === 'resume' && (
+                <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+                  <div className="space-y-4">
+                    {!activeResume ? (
+                      <div className="rounded-lg border border-slate-200 bg-white p-6 text-center">
+                        <p className="text-sm text-slate-600">{bulletDrafts.filter((d) => d.selected_for_resume).length} bullets ready.</p>
+                        <div className="mt-4 flex justify-center gap-2">
+                          <IconButton label="Generate Resume" onClick={generateResume}><Sparkles size={14} /></IconButton>
+                          <SecondaryButton label="Edit bullets" onClick={() => setPipelineStep('bullets')} />
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="rounded-lg border border-slate-200 bg-white p-5">
+                          <h3 className="text-base font-semibold text-slate-950">{activeResume.headline}</h3>
+                          <p className="mt-1 text-xs text-slate-500">{activeResume.summary}</p>
+                          {activeResume.experience.length > 0 && (
+                            <div className="mt-4">
+                              <CollapsibleSection label={`Experience (${activeResume.experience.length})`} defaultOpen>
+                                <div className="space-y-3">
+                                  {activeResume.experience.map((e, i) => (
+                                    <div key={i}>
+                                      <p className="text-xs font-semibold text-slate-900">{e.title}</p>
+                                      {e.bullets.map((b, bi) => <p key={bi} className="mt-0.5 text-xs text-slate-600">• {b}</p>)}
+                                    </div>
+                                  ))}
+                                </div>
+                              </CollapsibleSection>
+                            </div>
+                          )}
+                          {activeResume.projects.length > 0 && (
+                            <div className="mt-3">
+                              <CollapsibleSection label={`Projects (${activeResume.projects.length})`}>
+                                <div className="space-y-3">
+                                  {activeResume.projects.map((e, i) => (
+                                    <div key={i}>
+                                      <p className="text-xs font-semibold text-slate-900">{e.title}</p>
+                                      {e.bullets.map((b, bi) => <p key={bi} className="mt-0.5 text-xs text-slate-600">• {b}</p>)}
+                                    </div>
+                                  ))}
+                                </div>
+                              </CollapsibleSection>
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {resumeVersions.length > 1 && (
+                            <select className="rounded border border-slate-200 px-2 py-1 text-xs" value={resumeVersions[0]?.id ?? 0} onChange={async (e) => {
+                              const v = resumeVersions.find((rv) => rv.id === Number(e.target.value));
+                              if (v) { setActiveResume(v.resume_json); setActiveValidation(v.validation_result); }
+                            }}>
+                              {resumeVersions.map((v) => <option key={v.id} value={v.id}>v{v.id} — {v.created_at?.slice(0, 16)}</option>)}
+                            </select>
+                          )}
+                          <IconButton label="Export JSON" onClick={exportResumeJSON}><FileText size={14} /></IconButton>
+                          <IconButton label="PDF" onClick={renderPDF}><FilePlus2 size={14} /></IconButton>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <div className="space-y-4">
+                    {activeValidation && (
+                      <div className={`rounded-lg border p-4 ${activeValidation.passed ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'}`}>
+                        <p className={`text-xs font-semibold ${activeValidation.passed ? 'text-green-900' : 'text-red-900'}`}>
+                          {activeValidation.passed ? 'Passed' : 'Issues found'}
+                        </p>
+                        {activeValidation.errors.length > 0 && (
+                          <CollapsibleSection label={`${activeValidation.errors.length} errors`}>
+                            {activeValidation.errors.map((e, i) => <p key={i} className="mt-1 text-xs text-red-700">• {e}</p>)}
+                          </CollapsibleSection>
+                        )}
+                        {activeValidation.warnings.length > 0 && (
+                          <CollapsibleSection label={`${activeValidation.warnings.length} warnings`}>
+                            {activeValidation.warnings.slice(0, 3).map((w, i) => <p key={i} className="mt-1 text-xs text-amber-700">• {w}</p>)}
+                            {activeValidation.warnings.length > 3 && <p className="mt-1 text-xs text-amber-600">+{activeValidation.warnings.length - 3} more</p>}
+                          </CollapsibleSection>
+                        )}
+                      </div>
+                    )}
+                    <Panel icon={<BriefcaseBusiness size={14} />} title="Application" compact>
+                      <div className="space-y-2 mt-2">
+                        <TextInput label="Notes" value={applicationNotes} onChange={setApplicationNotes} />
+                        <IconButton label="Save" onClick={saveApplication} disabled={!selectedJobID}><Save size={14} /></IconButton>
+                      </div>
+                    </Panel>
+                  </div>
+                </div>
+              )}
+
+              {pipelineStep === 'tracker' && (
+                <div className="space-y-4">
+                  {applications.length === 0 ? (
+                    <EmptyState text="No applications yet. Save one from the Resume step." />
+                  ) : (
+                    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-200 text-left font-semibold text-slate-500">
+                            <th className="px-4 py-3">Company</th>
+                            <th className="px-4 py-3">Role</th>
+                            <th className="px-4 py-3">Status</th>
+                            <th className="px-4 py-3">Fit</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {applications.map((app) => {
+                            const j = jobs.find((jj) => jj.id === app.job_id);
+                            return (
+                              <tr key={app.id} className="border-b border-slate-100 hover:bg-slate-50">
+                                <td className="px-4 py-3 font-medium">{j?.company || '—'}</td>
+                                <td className="px-4 py-3">{j?.title || '—'}</td>
+                                 <td className="px-4 py-3">
+                                  <select className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-medium focus:border-slate-400 focus:outline-none" value={app.status} onChange={(e) => updateApplicationStatus(app.id, e.target.value)}>
+                                     {Object.entries(APP_STATUS_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+                                  </select>
+                                 </td>
+                                <td className="px-4 py-3">{app.fit_score}%</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   )}
                 </div>
               )}
-              <div className="grid gap-3 lg:grid-cols-2">
-                <TextArea label="Evidence atoms" rows={3} value={fact.fact_text} onChange={(value) => onChange({...fact, fact_text: value})} />
-                <TextArea label="Evidence quote" rows={3} value={fact.evidence_quote} onChange={(value) => onChange({...fact, evidence_quote: value})} />
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-3">
-                <TextInput label="Technologies" value={asStringArray(fact.technologies).join(', ')} onChange={(value) => onChange({...fact, technologies: splitList(value)})} />
-                <SelectInput
-                  label="Confidence"
-                  value={fact.confidence}
-                  onChange={(value) => onChange({...fact, confidence: value})}
-                  options={[
-                    ['high', 'High'],
-                    ['medium', 'Medium'],
-                    ['low', 'Low'],
-                  ]}
-                />
-                <TextInput label="Review note (optional)" placeholder="Why changed/rejected, or leave blank." value={fact.review_note} onChange={(value) => onChange({...fact, review_note: value})} />
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-3">
-                <IconButton label="Approve" onClick={() => onReview(fact, 'approved')} disabled={busyAction === `review-fact-${fact.id}`}>
-                  <CheckCircle2 size={16} />
-                </IconButton>
-                <SecondaryButton label="Needs review" onClick={() => onReview(fact, 'needs_review')} />
-                <DangerButton label="Reject" onClick={() => onReview(fact, 'rejected')} />
-              </div>
             </div>
-          ))}
-          </>
+          </div>
+        )}
+
+        {activeView === 'pipeline' && !selectedJob && (
+          <div className="flex flex-1 items-center justify-center">
+            <div className="text-center">
+              <BriefcaseBusiness size={40} className="mx-auto text-slate-300" />
+              <p className="mt-3 text-sm text-slate-500">Select a job from the sidebar</p>
+              <p className="text-xs text-slate-400">or add a new one to get started</p>
+            </div>
+          </div>
+        )}
+
+        {activeView === 'sources' && (
+          <div className="flex-1 overflow-y-auto p-6">
+            <div className="mx-auto max-w-4xl space-y-4">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-slate-500">{sources.length} sources · {facts.length} facts · {claims.length} claims</p>
+                <button className="flex items-center gap-1 rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800" onClick={() => setShowImportSource(!showImportSource)}>
+                  <Plus size={14} /> Add source
+                </button>
+              </div>
+              {showImportSource && (
+                <div className="rounded-lg border border-slate-200 bg-white p-4">
+                  <form onSubmit={handleAddSource} className="space-y-3">
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <SelectInput label="Type" value={sourceDraft.source_type} onChange={(v) => setSourceDraft({...sourceDraft, source_type: v, trust_tier: defaultSourceTrust(v)})} options={[['current_resume', 'Current resume'], ['extended_resume', 'Extended'], ['project_notes', 'Project notes'], ['manual_notes', 'Manual']]} />
+                      <SelectInput label="Trust" value={sourceDraft.trust_tier} onChange={(v) => setSourceDraft({...sourceDraft, trust_tier: v})} options={[['verified', 'Verified'], ['trusted_ai_summary', 'AI summary'], ['raw_source', 'Raw'], ['unverified_ai', 'Unverified']]} />
+                      <TextInput label="Title" value={sourceDraft.title} onChange={(v) => setSourceDraft({...sourceDraft, title: v})} />
+                    </div>
+                    <TextArea label="Raw text" rows={8} value={sourceDraft.raw_text} onChange={(v) => setSourceDraft({...sourceDraft, raw_text: v})} />
+                    <div className="flex gap-2">
+                      <button type="submit" className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800">Save</button>
+                      <button type="button" className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100" onClick={() => setShowImportSource(false)}>Cancel</button>
+                    </div>
+                  </form>
+                </div>
+              )}
+              {sources.map((source) => {
+                const run = contextRuns.filter((r) => r.source_id === source.id).sort((a, b) => b.id - a.id)[0];
+                const step = run ? latestContextStep(contextSteps, run.id) : undefined;
+                return (
+                  <div key={source.id} className="rounded-lg border border-slate-200 bg-white p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs font-semibold text-slate-950">{source.title}</p>
+                        <p className="mt-1 line-clamp-2 text-xs text-slate-500">{source.raw_text}</p>
+                        {run && (
+                          <div className="mt-2 flex items-center gap-2">
+                            <span className={`inline-block h-2 w-2 rounded-full ${run.status === 'complete' ? 'bg-green-500' : run.status === 'running' ? 'bg-blue-500 animate-pulse' : 'bg-red-400'}`} />
+                            <span className="text-xs text-slate-500">{run.facts_created} facts · {run.claims_created} claims</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 items-center gap-1">
+                        {run?.status === 'running' ? (
+                          <button className="rounded p-1.5 text-slate-400 hover:bg-slate-100" onClick={() => handleStopAgent(run)}>
+                            <Square size={14} />
+                          </button>
+                        ) : (
+                          <button className="rounded p-1.5 text-slate-400 hover:bg-slate-100" onClick={() => beginContextAgent(source.id)}>
+                            <Play size={14} />
+                          </button>
+                        )}
+                        <button className="rounded p-1.5 text-slate-400 hover:bg-slate-100" onClick={() => handleDeleteSource(source.id)}>
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                    {run?.status === 'running' && (
+                      <div className="mt-3">
+                        <div className="h-1.5 w-full rounded-full bg-slate-200">
+                          <div className="h-1.5 rounded-full bg-blue-500 transition-all" style={{width: `${contextRunProgress(run, step)}%`}} />
+                        </div>
+                        <p className="mt-1 text-xs text-slate-400">{step?.message || '...'}</p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <TestLLMBanner />
+            </div>
+          </div>
+        )}
+
+        {activeView === 'settings' && (
+          <div className="flex-1 overflow-y-auto p-6">
+            <div className="mx-auto max-w-2xl space-y-4">
+              <p className="text-xs text-slate-500">Configure LLM provider, API keys, and profile</p>
+              <Panel icon={<KeyRound size={14} />} title="API" compact>
+                <div className="space-y-2 mt-2">
+                  <SelectInput label="Provider" value={settings.provider} onChange={(v) => setSettings({...settings, provider: v})} options={[['openrouter', 'OpenRouter'], ['openai', 'OpenAI']]} />
+                  <TextInput label="Model" value={settings.model} onChange={(v) => setSettings({...settings, model: v})} />
+                  <TextInput label="API Key" value={apiKey} onChange={setAPIKey} />
+                  <button className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800" onClick={handleTestSettings}>Save</button>
+                </div>
+              </Panel>
+              <Panel icon={<UserRound size={14} />} title="Profile" compact>
+                <div className="mt-2">
+                  {editingProfile ? (
+                    <div className="space-y-2">
+                      <TextInput label="Name" value={profile.contact.full_name} onChange={(v) => setProfile({...profile, contact: {...profile.contact, full_name: v}})} />
+                      <TextInput label="Email" value={profile.contact.email} onChange={(v) => setProfile({...profile, contact: {...profile.contact, email: v}})} />
+                      <button className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800" onClick={handleSaveProfile}>Save</button>
+                    </div>
+                  ) : (
+                    <button className="text-xs text-slate-600 hover:text-slate-900" onClick={() => setEditingProfile(true)}>{profile.contact.full_name || 'Edit profile'}</button>
+                  )}
+                </div>
+              </Panel>
+              <Panel icon={<Wrench size={14} />} title="Tools" compact>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <SecondaryButton label="Install Tectonic" onClick={async () => { await InstallTectonic(); await load(); }} />
+                  <SecondaryButton label="Render test PDF" onClick={async () => { const r = (await RenderSamplePDF()) as RenderPDFResult; setPDFResult(r); }} />
+                </div>
+                {pdfResult && <p className={`mt-1 text-xs ${pdfResult.success ? 'text-green-600' : 'text-red-600'}`}>{pdfResult.success ? 'PDF rendered' : pdfResult.error}</p>}
+              </Panel>
+              {events.length > 0 && (
+                <CollapsibleSection label={`Events (${events.length})`}>
+                  <div className="mt-2 max-h-48 space-y-1 overflow-y-auto">
+                    {events.slice(-20).reverse().map((ev) => (
+                      <div key={ev.id} className="flex items-start gap-2 text-xs">
+                        <span className={`mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${ev.level === 'error' ? 'bg-red-100 text-red-700' : ev.level === 'warn' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>
+                          {ev.level}
+                        </span>
+                        <p className="min-w-0 text-slate-600">{ev.message}</p>
+                        <span className="shrink-0 text-slate-400">{ev.created_at?.slice(11, 19)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </CollapsibleSection>
+              )}
+              <TestLLMBanner />
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+function CollapsibleSection({label, children, defaultOpen = false}: {label: string; children: React.ReactNode; defaultOpen?: boolean}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="border-l-2 border-slate-200 pl-3">
+      <button className="flex items-center gap-1 text-xs font-semibold text-slate-700 hover:text-slate-900" onClick={() => setOpen(!open)}>
+        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        {label}
+      </button>
+      {open && <div className="mt-2">{children}</div>}
+    </div>
+  );
+}
+
+function BulletCard({draft, onToggle, onEdit, onDelete}: {draft: TailoredBulletDraft; onToggle: () => void; onEdit: (draft: TailoredBulletDraft, text: string) => void; onDelete: (id: number) => void}) {
+  const [expanded, setExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState(draft.draft_text);
+  const riskFlags = draft.risk_flags.filter((f) => f !== 'style_too_long' && f !== 'style_too_thin');
+  return (
+    <div className={`rounded-lg border bg-white ${draft.selected_for_resume ? 'border-blue-300 ring-1 ring-blue-100' : 'border-slate-200'}`}>
+      <div className="flex items-start gap-2 p-3">
+        <button className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded border-2 transition-colors ${draft.selected_for_resume ? 'border-blue-500 bg-blue-500 text-white' : 'border-slate-300 hover:border-slate-400'}`} onClick={onToggle}>
+          {draft.selected_for_resume && <CheckCircle2 size={13} />}
+        </button>
+        <div className="min-w-0 flex-1">
+          {editing ? (
+            <div className="flex items-center gap-2">
+              <input className="w-full rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-900 focus:border-slate-400 focus:outline-none" value={editText} onChange={(e) => setEditText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { onEdit(draft, editText); setEditing(false); } if (e.key === 'Escape') setEditing(false); }} autoFocus />
+              <button className="shrink-0 rounded-lg bg-slate-900 px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-slate-800" onClick={() => { onEdit(draft, editText); setEditing(false); }}>Save</button>
+              <button className="shrink-0 rounded-lg border border-slate-200 px-2.5 py-1 text-[10px] font-medium text-slate-500 hover:bg-slate-50" onClick={() => setEditing(false)}>Cancel</button>
+            </div>
+          ) : (
+            <p className="text-xs text-slate-900">{draft.draft_text}</p>
+          )}
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">{draft.origin_heading || draft.origin_type}</span>
+            <span className="text-[10px] text-slate-400">{Math.round(draft.selection_score * 100)}%</span>
+            {riskFlags.map((f) => <span key={f} className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">{f}</span>)}
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <button className="rounded-md p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600" onClick={() => setExpanded(!expanded)} title="Details">
+            <Eye size={13} />
+          </button>
+          <button className="rounded-md p-1.5 text-slate-400 transition-colors hover:bg-blue-50 hover:text-blue-600" onClick={() => { setEditText(draft.draft_text); setEditing(true); }} title="Edit">
+            <Pencil size={13} />
+          </button>
+          <button className="rounded-md p-1.5 text-slate-400 transition-colors hover:bg-red-50 hover:text-red-500" onClick={() => onDelete(draft.id)} title="Delete">
+            <Trash2 size={13} />
+          </button>
+        </div>
+        {expanded && draft.rationale && (
+          <div className="border-t border-slate-100 bg-slate-50 px-3 py-2">
+            <p className="text-xs text-slate-500">{draft.rationale}</p>
+          </div>
         )}
       </div>
-    </Panel>
+    </div>
   );
 }
 
-function ClaimsView({
-  blockedClaims,
-  busyAction,
-  claims,
-  onAddBlocked,
-  onBlockedChange,
-  onClaimChange,
-  onDeleteAllClaims,
-  onDeleteBlocked,
-  onDeleteClaim,
-  onGenerateClaims,
-  onSaveBlocked,
-  onSaveClaim,
-  onSetClaimStatus,
-}: {
-  blockedClaims: BlockedClaim[];
-  busyAction: string;
-  claims: CandidateClaim[];
-  onAddBlocked: () => void | Promise<void>;
-  onBlockedChange: (blocked: BlockedClaim) => void;
-  onClaimChange: (claim: CandidateClaim) => void;
-  onDeleteAllClaims: () => void | Promise<void>;
-  onDeleteBlocked: (id: number) => void | Promise<void>;
-  onDeleteClaim: (id: number) => void | Promise<void>;
-  onGenerateClaims: () => void | Promise<void>;
-  onSaveBlocked: (blocked: BlockedClaim) => void | Promise<void>;
-  onSaveClaim: (claim: CandidateClaim) => void | Promise<void>;
-  onSetClaimStatus: (claim: CandidateClaim, status: string) => void | Promise<void>;
-}) {
-  const [filter, setFilter] = useState('needs_review');
-  const counts = {
-    all: claims.length,
-    needs_review: claims.filter((claim) => claim.status === 'needs_review').length,
-    approved: claims.filter((claim) => claim.status === 'approved').length,
-    approved_restricted: claims.filter((claim) => claim.status === 'approved_restricted').length,
-    blocked: claims.filter((claim) => claim.status === 'blocked').length,
-    has_metrics: claims.filter((claim) => asStringArray(claim.metrics).length > 0).length,
-    has_risk: claims.filter((claim) => asStringArray(claim.risk_flags).length > 0).length,
+function TestLLMBanner() {
+  const [result, setResult] = useState<LLMTestResult | null>(null);
+  function handleTestLLM() {
+    void (async () => { setResult((await TestLLM()) as LLMTestResult); })();
+  }
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-4">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium text-slate-700">LLM Connection</p>
+        <button className="rounded px-2 py-1 text-xs text-blue-600 hover:bg-blue-50" onClick={handleTestLLM}>Test</button>
+      </div>
+      {result && <p className={`mt-1 text-xs ${result.success ? 'text-green-600' : 'text-red-600'}`}>{result.success ? `${result.provider} OK` : result.error}</p>}
+    </div>
+  );
+}
+
+function Panel({icon, title, subtitle, children, compact, summary}: {icon?: React.ReactNode; title: string; subtitle?: string; children?: React.ReactNode; compact?: boolean; summary?: string}) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white">
+      <div className={`flex items-center gap-2 ${compact ? 'px-4 py-2.5' : 'px-4 py-3'}`}>
+        {icon && <span className="text-slate-500">{icon}</span>}
+        <span className={`font-semibold text-slate-950 ${compact ? 'text-xs' : 'text-sm'}`}>{title}</span>
+        {subtitle && <span className="text-xs text-slate-400">{subtitle}</span>}
+      </div>
+      {summary && <p className="border-t border-slate-100 px-4 py-2 text-xs text-slate-500">{summary}</p>}
+      {children && <div className={`border-t border-slate-100 ${compact ? 'px-4 py-2.5' : 'px-4 py-3'}`}>{children}</div>}
+    </div>
+  );
+}
+
+function SecondaryButton({label, onClick, icon, disabled, variant}: {label: string; onClick: () => void; icon?: React.ReactNode; disabled?: boolean; variant?: 'default' | 'blue' | 'green' | 'amber' | 'red'}) {
+  const variants = {
+    default: 'border-slate-300 text-slate-700 before:bg-slate-400 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900',
+    blue: 'border-slate-300 text-slate-700 before:bg-blue-500 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900',
+    green: 'border-slate-300 text-slate-700 before:bg-emerald-500 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900',
+    amber: 'border-slate-300 text-slate-700 before:bg-amber-500 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900',
+    red: 'border-red-300 text-red-700 before:bg-red-500 hover:border-red-400 hover:bg-red-50 hover:text-red-800',
   };
-  const visibleClaims = claims.filter((claim) => {
-    if (filter === 'all') return true;
-    if (filter === 'has_metrics') return asStringArray(claim.metrics).length > 0;
-    if (filter === 'has_risk') return asStringArray(claim.risk_flags).length > 0;
-    return claim.status === filter;
-  }).slice(0, 50);
-  const approveVisible = async () => {
-    for (const claim of visibleClaims.filter((item) => item.status === 'needs_review')) {
-      await onSetClaimStatus(claim, 'approved');
-    }
+  return (
+    <button onClick={onClick} disabled={disabled} className={`relative flex items-center gap-1.5 overflow-hidden rounded-md border bg-white px-3 py-1.5 pl-3.5 text-xs font-semibold shadow-sm shadow-slate-200/70 ring-1 ring-white/70 transition-all before:absolute before:left-0 before:top-0 before:h-full before:w-0.5 active:translate-y-px active:shadow-none disabled:pointer-events-none disabled:opacity-40 ${variants[variant ?? 'default']}`}>
+      {icon}{label}
+    </button>
+  );
+}
+
+function PipelineButton({label, onClick, tone}: {label: string; onClick: () => void; tone?: 'primary'}) {
+  const classes = tone === 'primary'
+    ? 'border-slate-950 bg-slate-900 text-white shadow-slate-300/80 hover:bg-slate-800 hover:shadow-slate-400/80'
+    : 'border-slate-300 bg-white text-slate-800 shadow-slate-200/90 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-950 hover:shadow-slate-300/90';
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`inline-flex min-w-20 items-center justify-center rounded-md border px-4 py-2 text-xs font-bold shadow-sm transition-all active:translate-y-px active:shadow-none ${classes}`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function IconButton({label, onClick, children, submit, full, disabled}: {label: string; onClick?: () => void; children?: React.ReactNode; submit?: boolean; full?: boolean; disabled?: boolean}) {
+  return (
+    <button onClick={onClick} disabled={disabled || submit} type={submit ? 'submit' : 'button'}
+      className={`flex items-center gap-1.5 rounded-md border border-slate-950 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white shadow-sm shadow-slate-300/80 transition-all hover:bg-slate-800 active:translate-y-px active:shadow-none disabled:pointer-events-none disabled:opacity-40 ${full ? 'flex-1 justify-center' : ''}`}>
+      {children}{label}
+    </button>
+  );
+}
+
+function StatusPill({state, text}: {state: string; text: string}) {
+  const color = state === 'ready' ? 'bg-green-100 text-green-700' : state === 'error' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700';
+  return <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${color}`}>{text}</span>;
+}
+
+function StatusBadge({text, color}: {text: string; color?: 'slate' | 'green' | 'blue' | 'amber' | 'red'}) {
+  const colors = {
+    slate: 'bg-slate-100 text-slate-600',
+    green: 'bg-green-100 text-green-700',
+    blue: 'bg-blue-100 text-blue-700',
+    amber: 'bg-amber-100 text-amber-700',
+    red: 'bg-red-100 text-red-700',
   };
+  return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${colors[color ?? 'slate']}`}>{text}</span>;
+}
 
+function TextInput({label, value, onChange}: {label: string; value: string; onChange: (v: string) => void}) {
   return (
-    <div className="grid gap-4 xl:grid-cols-[1fr_420px]">
-      <Panel icon={<ShieldCheck size={18} />} title="Claim Bank" subtitle="Approved atom records become the permission layer for future resume generation.">
-        <div className="space-y-4">
-          {busyAction === 'generate-claims' && (
-            <InlineProgress title="Generating claim bank" detail="Merging approved facts into deduped, permission-aware claim atoms." progress={68} />
-          )}
-          {busyAction === 'delete-all-claims' && (
-            <InlineProgress title="Clearing claim bank" detail="Removing generated claims while keeping source evidence intact." progress={50} />
-          )}
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
-            <div className="flex flex-wrap gap-2">
-              {[
-                ['needs_review', `Needs review ${counts.needs_review}`],
-                ['approved', `Approved ${counts.approved}`],
-                ['approved_restricted', `Restricted ${counts.approved_restricted}`],
-                ['blocked', `Blocked ${counts.blocked}`],
-                ['has_metrics', `Metrics ${counts.has_metrics}`],
-                ['has_risk', `Risk ${counts.has_risk}`],
-                ['all', `All ${counts.all}`],
-              ].map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => setFilter(value)}
-                  className={`h-9 rounded-md border px-3 text-sm font-medium ${filter === value ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'}`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <div className="flex flex-wrap gap-2">
-              <IconButton label="Generate bank" onClick={onGenerateClaims} disabled={busyAction === 'generate-claims'}>
-                <Sparkles size={16} />
-              </IconButton>
-              <SecondaryButton label="Approve visible" onClick={approveVisible} />
-              <DangerButton label="Delete all" onClick={() => void onDeleteAllClaims()} />
-            </div>
-          </div>
-
-          {claims.length === 0 ? (
-            <EmptyState text="Generate the claim bank after approving evidence facts." />
-          ) : visibleClaims.length === 0 ? (
-            <EmptyState text="Nothing in this claim queue." />
-          ) : (
-            visibleClaims.map((claim) => (
-              <div key={claim.id} className="rounded-md border border-slate-200 bg-slate-50 p-4">
-                <div className="mb-3 flex items-start justify-between gap-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <StatusBadge text={claim.status} />
-                    <StatusBadge text={claim.strength} />
-                    <StatusBadge text={claim.claim_type} />
-                    {claim.source_fact_ids.length > 1 && <StatusBadge text={`${claim.source_fact_ids.length} merged facts`} />}
-                    {claim.duplicate_of_id > 0 && <StatusBadge text={`duplicate of ${claim.duplicate_of_id}`} />}
-                    {asStringArray(claim.risk_flags).map((flag) => <StatusBadge key={flag} text={flag} />)}
-                  </div>
-                  <IconOnlyButton label="Delete claim" onClick={() => onDeleteClaim(claim.id)}>
-                    <Trash2 size={16} />
-                  </IconOnlyButton>
-                </div>
-                <TextInput label="Label" value={claim.claim_text} onChange={(value) => onClaimChange({...claim, claim_text: value})} />
-                <div className="mt-3 grid gap-3 md:grid-cols-3">
-                  <SelectInput
-                    label="Status"
-                    value={claim.status}
-                    onChange={(value) => onClaimChange({...claim, status: value})}
-                    options={[
-                      ['approved', 'Approved'],
-                      ['approved_restricted', 'Approved restricted'],
-                      ['needs_review', 'Needs review'],
-                      ['rejected', 'Rejected'],
-                      ['blocked', 'Blocked'],
-                    ]}
-                  />
-                  <SelectInput
-                    label="Strength"
-                    value={claim.strength}
-                    onChange={(value) => onClaimChange({...claim, strength: value})}
-                    options={[
-                      ['strong', 'Strong'],
-                      ['moderate', 'Moderate'],
-                      ['weak', 'Weak'],
-                    ]}
-                  />
-                  <SelectInput
-                    label="Evidence"
-                    value={claim.evidence_strength}
-                    onChange={(value) => onClaimChange({...claim, evidence_strength: value})}
-                    options={[
-                      ['direct', 'Direct'],
-                      ['inferred', 'Inferred'],
-                      ['weak', 'Weak'],
-                    ]}
-                  />
-                </div>
-                <div className="mt-3 grid gap-3 md:grid-cols-2">
-                  <TextInput label="Actions" value={asStringArray(claim.actions).join(', ')} onChange={(value) => onClaimChange({...claim, actions: splitList(value)})} />
-                  <TextInput label="Capabilities" value={asStringArray(claim.capabilities).join(', ')} onChange={(value) => onClaimChange({...claim, capabilities: splitList(value)})} />
-                  <TextInput label="Objects" value={asStringArray(claim.objects).join(', ')} onChange={(value) => onClaimChange({...claim, objects: splitList(value)})} />
-                  <TextInput label="Tools" value={asStringArray(claim.technologies).join(', ')} onChange={(value) => onClaimChange({...claim, technologies: splitList(value)})} />
-                  <TextInput label="Scope" value={asStringArray(claim.scope).join(', ')} onChange={(value) => onClaimChange({...claim, scope: splitList(value)})} />
-                  <TextInput label="Domains" value={asStringArray(claim.domains).join(', ')} onChange={(value) => onClaimChange({...claim, domains: splitList(value)})} />
-                  <TextInput label="Artifacts" value={asStringArray(claim.artifacts).join(', ')} onChange={(value) => onClaimChange({...claim, artifacts: splitList(value)})} />
-                  <TextInput label="Metrics" value={asStringArray(claim.metrics).join(', ')} onChange={(value) => onClaimChange({...claim, metrics: splitList(value)})} />
-                  <TextInput label="Outcomes" value={asStringArray(claim.outcomes).join(', ')} onChange={(value) => onClaimChange({...claim, outcomes: splitList(value)})} />
-                  <TextInput label="Context tags" value={asStringArray(claim.profile_context).join(', ')} onChange={(value) => onClaimChange({...claim, profile_context: splitList(value)})} />
-                  <TextInput label="Allowed use" value={asStringArray(claim.allowed_use).join(', ')} onChange={(value) => onClaimChange({...claim, allowed_use: splitList(value)})} />
-                  <TextInput label="Allowed contexts" value={asStringArray(claim.allowed_contexts).join(', ')} onChange={(value) => onClaimChange({...claim, allowed_contexts: splitList(value)})} />
-                  <TextInput label="Blocked contexts" value={asStringArray(claim.blocked_contexts).join(', ')} onChange={(value) => onClaimChange({...claim, blocked_contexts: splitList(value)})} />
-                  <TextInput label="Risk flags" value={asStringArray(claim.risk_flags).join(', ')} onChange={(value) => onClaimChange({...claim, risk_flags: splitList(value)})} />
-                </div>
-                <div className="mt-3 grid gap-3 md:grid-cols-2">
-                  <TextInput label="Origin" value={[claim.origin_type, claim.origin_heading].filter(Boolean).join(' | ')} onChange={() => undefined} disabled />
-                  <TextArea label="Evidence quotes" rows={2} value={asStringArray(claim.evidence_quotes).join('\n')} onChange={() => undefined} disabled />
-                  <TextArea label="Safe phrasings" rows={2} value={asStringArray(claim.safe_phrasings).join('\n')} onChange={(value) => onClaimChange({...claim, safe_phrasings: splitList(value.replace(/\n/g, ','))})} />
-                  <TextArea label="Unsafe phrasings" rows={2} value={asStringArray(claim.unsafe_phrasings).join('\n')} onChange={(value) => onClaimChange({...claim, unsafe_phrasings: splitList(value.replace(/\n/g, ','))})} />
-                  <TextArea label="Review note" rows={2} value={claim.review_note} onChange={(value) => onClaimChange({...claim, review_note: value})} />
-                </div>
-                <div className="mt-3 grid gap-3 md:grid-cols-5">
-                  <IconButton label="Save" onClick={() => onSaveClaim(claim)} disabled={busyAction === `update-claim-${claim.id}`}>
-                    <Save size={16} />
-                  </IconButton>
-                  <SecondaryButton label="Approve" onClick={() => onSetClaimStatus(claim, 'approved')} />
-                  <SecondaryButton label="Restricted" onClick={() => onSetClaimStatus(claim, 'approved_restricted')} />
-                  <SecondaryButton label="Needs review" onClick={() => onSetClaimStatus(claim, 'needs_review')} />
-                  <DangerButton label="Block" onClick={() => onSetClaimStatus(claim, 'blocked')} />
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </Panel>
-
-      <Panel icon={<AlertCircle size={18} />} title="Blocked claims" subtitle="Negative profile guardrails enforced during claim validation.">
-        <div className="space-y-3">
-          <IconButton label="Add blocked claim" onClick={onAddBlocked} disabled={busyAction === 'add-blocked-claim'}>
-            <ShieldCheck size={16} />
-          </IconButton>
-          {blockedClaims.map((blocked) => (
-            <div key={blocked.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <StatusBadge text={blocked.severity} />
-                  {blocked.enabled && <StatusBadge text="enabled" />}
-                </div>
-                <IconOnlyButton label="Delete blocked claim" onClick={() => onDeleteBlocked(blocked.id)}>
-                  <Trash2 size={16} />
-                </IconOnlyButton>
-              </div>
-              <TextInput label="Pattern" value={blocked.pattern} onChange={(value) => onBlockedChange({...blocked, pattern: value})} />
-              <div className="mt-3 grid gap-3 md:grid-cols-2">
-                <SelectInput
-                  label="Severity"
-                  value={blocked.severity}
-                  onChange={(value) => onBlockedChange({...blocked, severity: value})}
-                  options={[
-                    ['high', 'High'],
-                    ['medium', 'Medium'],
-                    ['low', 'Low'],
-                  ]}
-                />
-                <CheckInput checked={blocked.enabled} label="Enabled" onChange={(checked) => onBlockedChange({...blocked, enabled: checked})} />
-              </div>
-              <div className="mt-3">
-                <TextArea label="Reason" rows={2} value={blocked.reason} onChange={(value) => onBlockedChange({...blocked, reason: value})} />
-              </div>
-              <div className="mt-3">
-                <IconButton label="Save blocked claim" onClick={() => onSaveBlocked(blocked)} disabled={busyAction === `save-blocked-${blocked.id}`}>
-                  <Save size={16} />
-                </IconButton>
-              </div>
-            </div>
-          ))}
-        </div>
-      </Panel>
+    <div>
+      <label className="mb-1 block text-xs font-medium text-slate-500">{label}</label>
+      <input type="text" value={value} onChange={(e) => onChange(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-950 focus:border-slate-400 focus:outline-none" />
     </div>
   );
 }
 
-function SettingsView({
-  apiConfigured,
-  apiKey,
-  busyAction,
-  events,
-  health,
-  llmResult,
-  onAPIKeyChange,
-  onInstallTectonic,
-  onPromptRuleChange,
-  onRenderSamplePDF,
-  onRunLLMTest,
-  onSaveAPIKey,
-  onSavePromptRule,
-  onSaveSettings,
-  pdfResult,
-  promptRules,
-  promptSources,
-  settings,
-  setSettings,
-  tectonicStatus,
-  toolStatus,
-}: {
-  apiConfigured: boolean;
-  apiKey: string;
-  busyAction: string;
-  events: AppEvent[];
-  health: Health | null;
-  llmResult: LLMTestResult | null;
-  onAPIKeyChange: (value: string) => void;
-  onInstallTectonic: () => void;
-  onPromptRuleChange: (rule: PromptRule) => void;
-  onRenderSamplePDF: () => void;
-  onRunLLMTest: () => void;
-  onSaveAPIKey: (event: FormEvent<HTMLFormElement>) => void;
-  onSavePromptRule: (rule: PromptRule) => void;
-  onSaveSettings: (event: FormEvent<HTMLFormElement>) => void;
-  pdfResult: RenderPDFResult | null;
-  promptRules: PromptRule[];
-  promptSources: PromptResearchSource[];
-  settings: Settings;
-  setSettings: (settings: Settings) => void;
-  tectonicStatus: string;
-  toolStatus: ToolStatus | null;
-}) {
+function TextArea({label, value, onChange, rows}: {label: string; value: string; onChange: (v: string) => void; rows?: number}) {
   return (
-    <div className="grid gap-4 lg:grid-cols-[1fr_1fr]">
-      <Panel icon={<SettingsIcon size={18} />} title="LLM" subtitle="Provider and key used for fact extraction.">
-        <div className="space-y-4">
-          <form className="space-y-4" onSubmit={onSaveSettings}>
-            <SelectInput
-              label="Provider"
-              value={settings.provider}
-              onChange={(value) => setSettings({...settings, provider: value})}
-              options={[
-                ['openrouter', 'OpenRouter'],
-                ['openai', 'OpenAI direct'],
-              ]}
-            />
-            <TextInput
-              label="Model"
-              value={settings.model}
-              placeholder={modelPlaceholder(settings.provider)}
-              onChange={(value) => setSettings({...settings, model: value})}
-            />
-            <TextInput
-              label="Embedding model"
-              value={settings.embedding_model}
-              placeholder={embeddingModelPlaceholder(settings.provider)}
-              onChange={(value) => setSettings({...settings, embedding_model: value})}
-            />
-            <IconButton label="Save settings" submit full disabled={busyAction === 'save-settings'}>
-              <Save size={16} />
-            </IconButton>
-          </form>
-
-          <form className="space-y-3 border-t border-slate-200 pt-4" onSubmit={onSaveAPIKey}>
-            <MetricRow label="API key" value={apiConfigured ? `configured${toolStatus?.api_key_source ? ` (${toolStatus.api_key_source})` : ''}` : 'missing'} />
-            <TextInput
-              label="Update key"
-              type="password"
-              value={apiKey}
-              placeholder={apiKeyPlaceholder(settings.provider)}
-              onChange={onAPIKeyChange}
-            />
-            <IconButton label="Save key" submit full disabled={busyAction === 'save-key' || apiKey.trim() === ''}>
-              <KeyRound size={16} />
-            </IconButton>
-          </form>
-
-          <div className="space-y-3 border-t border-slate-200 pt-4">
-            <IconButton label="Test call" onClick={onRunLLMTest} full disabled={busyAction === 'test-llm'}>
-              <Play size={16} />
-            </IconButton>
-            <ResultBox
-              ok={llmResult?.success}
-              title={llmResult ? `${llmResult.model} - ${llmResult.latency_ms}ms` : 'Last result'}
-              text={llmResult ? (llmResult.success ? llmResult.text : llmResult.error) : 'No test run yet.'}
-            />
-          </div>
-        </div>
-      </Panel>
-
-      <div className="space-y-4">
-        <Panel icon={<ListChecks size={18} />} title="Prompt rules" subtitle="Compact rule digests used by JD, fit, strategy, and resume prompts.">
-          <div className="space-y-3">
-            {promptRules.length === 0 ? (
-              <EmptyState text="No prompt rules seeded yet." />
-            ) : (
-              promptRules.map((rule) => (
-                <div key={rule.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <StatusBadge text={rule.category} />
-                      <StatusBadge text={`v${rule.version}`} />
-                      <span className="text-sm font-semibold text-slate-950">{rule.title}</span>
-                    </div>
-                    <CheckInput
-                      checked={rule.enabled}
-                      label="Enabled"
-                      onChange={(checked) => onPromptRuleChange({...rule, enabled: checked})}
-                    />
-                  </div>
-                  <TextArea rows={3} label="Rule" value={rule.content} onChange={(value) => onPromptRuleChange({...rule, content: value})} />
-                  <div className="mt-3">
-                    <IconButton label="Save rule" onClick={() => onSavePromptRule(rule)} disabled={busyAction === `save-rule-${rule.id}`}>
-                      <Save size={16} />
-                    </IconButton>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </Panel>
-
-        <Panel icon={<FileText size={18} />} title="Prompt research" subtitle="Distilled source patterns used to shape app-specific prompts.">
-          <div className="space-y-2">
-            {promptSources.length === 0 ? (
-              <EmptyState text="No research sources seeded yet." />
-            ) : (
-              promptSources.map((source) => (
-                <div key={source.id} className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm">
-                  <div className="mb-2 flex flex-wrap items-center gap-2">
-                    <StatusBadge text={source.trust_tier} />
-                    <StatusBadge text={source.source_type} />
-                    <span className="font-semibold text-slate-950">{source.title}</span>
-                  </div>
-                  <p className="text-slate-700">{source.app_adaptation}</p>
-                </div>
-              ))
-            )}
-          </div>
-        </Panel>
-
-        <Panel icon={<Database size={18} />} title="Storage and PDF" subtitle="Foundation paths and render gate.">
-          <div className="space-y-4">
-            <div className="grid gap-3 md:grid-cols-2">
-              <PathRow label="Database" value={health?.db_path} icon={<Database size={16} />} />
-              <PathRow label="Log file" value={health?.log_path} icon={<FileText size={16} />} />
-              <PathRow label="Generated" value={health?.generated_path} icon={<Folder size={16} />} />
-              <PathRow label="Tectonic" value={toolStatus?.tectonic_path} icon={<Cpu size={16} />} />
-            </div>
-            <MetricRow label="Renderer" value={tectonicStatus} />
-            <div className="grid gap-3 md:grid-cols-2">
-              <IconButton label="Install" onClick={onInstallTectonic} disabled={busyAction === 'install-tectonic'}>
-                <Wrench size={16} />
-              </IconButton>
-              <IconButton label="Render sample" onClick={onRenderSamplePDF} disabled={busyAction === 'render-pdf'}>
-                <FileText size={16} />
-              </IconButton>
-            </div>
-            <ResultBox
-              ok={pdfResult?.success}
-              title="Sample PDF"
-              text={pdfResult ? (pdfResult.success ? pdfResult.pdf_path : pdfResult.error) : 'No render yet.'}
-            />
-          </div>
-        </Panel>
-
-        <Panel icon={<Activity size={18} />} title="Recent events" subtitle="Backend actions and failures.">
-          <div className="overflow-hidden rounded-md border border-slate-200">
-            {events.length === 0 ? (
-              <p className="px-4 py-5 text-sm text-slate-500">No events yet.</p>
-            ) : (
-              <ul className="divide-y divide-slate-200">
-                {events.map((event) => (
-                  <li key={event.id} className="grid gap-2 px-4 py-3 sm:grid-cols-[88px_1fr_180px]">
-                    <span className="text-xs font-semibold uppercase text-slate-500">
-                      {event.level}
-                    </span>
-                    <span className="text-sm text-slate-900">{event.message}</span>
-                    <time className="text-xs text-slate-500">{formatDate(event.created_at)}</time>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </Panel>
-      </div>
+    <div>
+      <label className="mb-1 block text-xs font-medium text-slate-500">{label}</label>
+      <textarea value={value} onChange={(e) => onChange(e.target.value)} rows={rows || 4} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-950 focus:border-slate-400 focus:outline-none" />
     </div>
   );
 }
 
-function RecordEditor({
-  onChange,
-  onRemove,
-  record,
-}: {
-  onChange: (record: CandidateProfileRecord) => void;
-  onRemove: () => void;
-  record: CandidateProfileRecord;
-}) {
-  const locked = record.verified;
+function SelectInput({label, value, onChange, options}: {label: string; value: string; onChange: (v: string) => void; options: [string, string][]}) {
   return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <span className="text-sm font-semibold text-slate-950">{recordTypeLabel(record.record_type)}</span>
-        <button
-          type="button"
-          onClick={onRemove}
-          disabled={locked}
-          className="text-sm font-medium text-red-700 hover:text-red-900 disabled:cursor-not-allowed disabled:text-slate-400"
-        >
-          Remove
-        </button>
-      </div>
-      <div className="grid gap-3 md:grid-cols-2">
-        <SelectInput
-          label="Type"
-          value={record.record_type}
-          onChange={(value) => onChange({...record, record_type: value})}
-          disabled={locked}
-          options={[
-            ['education', 'Education'],
-            ['employment', 'Employment'],
-            ['project', 'Project'],
-            ['allowed_alias', 'Allowed alias'],
-            ['blocked_alias', 'Blocked alias'],
-          ]}
-        />
-        <TextInput label="Label" value={record.label} onChange={(value) => onChange({...record, label: value})} disabled={locked} />
-        <TextInput label="Organization" value={record.organization} onChange={(value) => onChange({...record, organization: value})} disabled={locked} />
-        <TextInput label={locked ? 'Tailored role/title' : 'Role/title'} value={record.role} onChange={(value) => onChange({...record, role: value})} />
-        <TextInput label="Start date" value={record.start_date} onChange={(value) => onChange({...record, start_date: value})} disabled={locked} />
-        <TextInput label="End date" value={record.end_date} onChange={(value) => onChange({...record, end_date: value})} disabled={locked} />
-        <div className="md:col-span-2">
-          <TextArea label="Locked value" rows={3} value={record.value} onChange={(value) => onChange({...record, value})} disabled={locked} />
-        </div>
-        <div className="md:col-span-2">
-          <CheckInput
-            checked={record.verified}
-            label="Verified locked record"
-            onChange={(checked) => onChange({...record, verified: checked})}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function StatusPill({state, text}: {state: LoadState; text: string}) {
-  const styles = {
-    loading: 'border-amber-200 bg-amber-50 text-amber-800',
-    ready: 'border-emerald-200 bg-emerald-50 text-emerald-800',
-    error: 'border-red-200 bg-red-50 text-red-800',
-  }[state];
-
-  return (
-    <span className={`inline-flex h-10 items-center gap-2 rounded-md border px-3 text-sm font-medium ${styles}`}>
-      {state === 'ready' ? <CheckCircle2 size={16} /> : <AlertCircle size={16} />}
-      {text}
-    </span>
-  );
-}
-
-function SummaryBlock({empty, items, title}: {empty: string; items: string[]; title: string}) {
-  const visible = asStringArray(items).slice(0, 6);
-  return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
-      <p className="text-sm font-semibold text-slate-950">{title}</p>
-      {visible.length === 0 ? (
-        <p className="mt-2 text-sm text-slate-500">{empty}</p>
-      ) : (
-        <div className="mt-2 flex flex-wrap gap-2">
-          {visible.map((item) => <StatusBadge key={item} text={item} />)}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TabButton({active, icon, label, onClick}: {active: boolean; icon: JSX.Element; label: string; onClick: () => void}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`inline-flex h-10 shrink-0 items-center gap-2 rounded-md border px-3 text-sm font-medium ${active ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'}`}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
-function IconButton({
-  children,
-  disabled,
-  full,
-  label,
-  onClick,
-  submit,
-}: {
-  children: JSX.Element;
-  disabled?: boolean;
-  full?: boolean;
-  label: string;
-  onClick?: () => void;
-  submit?: boolean;
-}) {
-  return (
-    <button
-      type={submit ? 'submit' : 'button'}
-      onClick={onClick}
-      disabled={disabled}
-      className={`inline-flex h-10 items-center justify-center gap-2 rounded-md bg-slate-950 px-3 text-sm font-medium text-white shadow-sm hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400 ${full ? 'w-full' : ''}`}
-      title={label}
-    >
-      {children}
-      {label}
-    </button>
-  );
-}
-
-function SecondaryButton({label, onClick}: {label: string; onClick: () => void}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="inline-flex h-10 items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-sm font-medium text-slate-800 shadow-sm hover:bg-slate-50"
-    >
-      {label}
-    </button>
-  );
-}
-
-function IconOnlyButton({children, disabled = false, label, onClick}: {children: JSX.Element; disabled?: boolean; label: string; onClick: () => void}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={label}
-      disabled={disabled}
-      className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 shadow-sm hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-    >
-      {children}
-    </button>
-  );
-}
-
-function DangerButton({label, onClick}: {label: string; onClick: () => void}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="inline-flex h-10 items-center justify-center rounded-md border border-red-200 bg-red-50 px-3 text-sm font-medium text-red-800 shadow-sm hover:bg-red-100"
-    >
-      {label}
-    </button>
-  );
-}
-
-function ToggleSwitch({
-  checked,
-  disabled,
-  icon,
-  label,
-  meta,
-  onChange,
-}: {
-  checked: boolean;
-  disabled?: boolean;
-  icon: JSX.Element;
-  label: string;
-  meta?: string;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <label className={`flex min-h-11 items-center justify-between gap-3 rounded-md border px-3 py-2 ${checked ? 'border-sky-200 bg-sky-50' : 'border-slate-200 bg-white'} ${disabled ? 'opacity-60' : ''}`}>
-      <span className="flex min-w-0 items-center gap-2 text-sm font-medium text-slate-800">
-        <span className={checked ? 'text-sky-700' : 'text-slate-400'}>{icon}</span>
-        <span className="truncate">{label}</span>
-        {meta && <span className="rounded-md bg-white px-2 py-0.5 text-xs font-medium text-slate-500">{meta}</span>}
-      </span>
-      <input
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
-        className="sr-only"
-      />
-      <span className={`relative h-6 w-10 rounded-full transition ${checked ? 'bg-sky-600' : 'bg-slate-300'}`}>
-        <span className={`absolute top-1 h-4 w-4 rounded-full bg-white transition ${checked ? 'left-5' : 'left-1'}`} />
-      </span>
-    </label>
-  );
-}
-
-function CheckInput({checked, label, onChange}: {checked: boolean; label: string; onChange: (checked: boolean) => void}) {
-  return (
-    <label className="inline-flex min-h-10 items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-medium text-slate-700">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(event) => onChange(event.target.checked)}
-        className="h-4 w-4 rounded border-slate-300"
-      />
-      {label}
-    </label>
-  );
-}
-
-function JobMetric({detail, label, value}: {detail: string; label: string; value: string}) {
-  return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-3">
-      <p className="text-xs font-semibold uppercase text-slate-500">{label}</p>
-      <p className="mt-1 text-2xl font-semibold text-slate-950">{value}</p>
-      <p className="mt-1 truncate text-xs text-slate-500">{detail}</p>
-    </div>
-  );
-}
-
-function Panel({
-  icon,
-  title,
-  subtitle,
-  children,
-}: {
-  icon: JSX.Element;
-  title: string;
-  subtitle: string;
-  children: JSX.Element;
-}) {
-  return (
-    <section className="rounded-md border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="mb-4 flex items-start gap-3">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-slate-100 text-slate-700">
-          {icon}
-        </div>
-        <div>
-          <h2 className="text-base font-semibold text-slate-950">{title}</h2>
-          <p className="mt-1 text-sm text-slate-500">{subtitle}</p>
-        </div>
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function TextInput({
-  disabled,
-  label,
-  onChange,
-  placeholder,
-  type,
-  value,
-}: {
-  disabled?: boolean;
-  label: string;
-  onChange: (value: string) => void;
-  placeholder?: string;
-  type?: string;
-  value: string;
-}) {
-  return (
-    <label className="block">
-      <span className="text-sm font-medium text-slate-700">{label}</span>
-      <input
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        disabled={disabled}
-        placeholder={placeholder}
-        type={type ?? 'text'}
-        className="mt-1 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100 disabled:bg-slate-100 disabled:text-slate-500"
-      />
-    </label>
-  );
-}
-
-function SelectInput({
-  disabled,
-  label,
-  onChange,
-  options,
-  value,
-}: {
-  disabled?: boolean;
-  label: string;
-  onChange: (value: string) => void;
-  options: string[][];
-  value: string;
-}) {
-  return (
-    <label className="block">
-      <span className="text-sm font-medium text-slate-700">{label}</span>
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        disabled={disabled}
-        className="mt-1 h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100 disabled:bg-slate-100 disabled:text-slate-500"
-      >
-        {options.length === 0 && <option value="">None</option>}
-        {options.map(([optionValue, labelText]) => (
-          <option key={optionValue} value={optionValue}>{labelText}</option>
-        ))}
+    <div>
+      <label className="mb-1 block text-xs font-medium text-slate-500">{label}</label>
+      <select value={value} onChange={(e) => onChange(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-950 focus:border-slate-400 focus:outline-none">
+        {options.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
       </select>
-    </label>
+    </div>
   );
 }
 
-function TextArea({
-  disabled,
-  label,
-  onChange,
-  rows,
-  value,
-}: {
-  disabled?: boolean;
-  label: string;
-  onChange: (value: string) => void;
-  rows: number;
-  value: string;
-}) {
+function CheckInput({checked, label, onChange}: {checked: boolean; label: string; onChange: (v: boolean) => void}) {
   return (
-    <label className="block">
-      <span className="text-sm font-medium text-slate-700">{label}</span>
-      <textarea
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        disabled={disabled}
-        rows={rows}
-        className="mt-1 w-full resize-y rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-950 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100 disabled:bg-slate-100 disabled:text-slate-500"
-      />
+    <label className="flex items-center gap-2 text-xs text-slate-700">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="rounded border-slate-300" />
+      {label}
     </label>
   );
 }
 
 function EmptyState({text}: {text: string}) {
-  return (
-    <p className="rounded-md border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
-      {text}
-    </p>
-  );
+  return <div className="rounded-lg border border-dashed border-slate-200 py-8 text-center text-xs text-slate-400">{text}</div>;
 }
 
-function PathRow({label, value, icon}: {label: string; value?: string; icon: JSX.Element}) {
+function WorkBanner({busyAction, items, onStopAgent}: {busyAction: string; items: WorkItem[]; onStopAgent: (id: number) => void}) {
   return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
-      <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase text-slate-500">
-        {icon}
-        {label}
-      </div>
-      <p className="break-all text-sm text-slate-900">{value ?? 'checking'}</p>
-    </div>
-  );
-}
-
-function MetricRow({label, value}: {label: string; value: string}) {
-  return (
-    <div className="flex min-h-10 items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-      <dt className="text-sm font-medium text-slate-600">{label}</dt>
-      <dd className="text-right text-sm font-semibold text-slate-950">{value}</dd>
-    </div>
-  );
-}
-
-function ResultBox({ok, text, title}: {ok?: boolean; text: string; title: string}) {
-  const tone = ok === undefined ? 'border-slate-200 bg-slate-50' : ok ? 'border-emerald-200 bg-emerald-50' : 'border-red-200 bg-red-50';
-  return (
-    <div className={`rounded-md border px-3 py-3 ${tone}`}>
-      <p className="text-xs font-semibold uppercase text-slate-500">{title}</p>
-      <p className="mt-1 break-all text-sm text-slate-900">{text}</p>
-    </div>
-  );
-}
-
-function WorkBanner({
-  busyAction,
-  items,
-  onStopAgent,
-}: {
-  busyAction: string;
-  items: WorkItem[];
-  onStopAgent: (runID: number) => void;
-}) {
-  return (
-    <div className="mb-4 rounded-md border border-sky-200 bg-sky-50 p-3">
-      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-sky-950">
-        <LoaderCircle className="animate-spin" size={16} />
-        Background work
-      </div>
-
-      <div className="grid gap-3 lg:grid-cols-2">
-        {items.map((item) => (
-          <div key={item.key} className="rounded-md border border-slate-200 bg-white p-3">
-            <div className="mb-2 flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-                  <LoaderCircle className="shrink-0 animate-spin text-sky-600" size={15} />
-                  {item.title}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">{item.detail}</p>
-              </div>
-
-              <div className="flex shrink-0 items-center gap-2">
-                <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600">
-                  {Math.round(clampProgress(item.progress))}%
-                </span>
-
-                {item.kind === 'context-agent' && item.runID ? (
-                  <button
-                    type="button"
-                    onClick={() => onStopAgent(item.runID!)}
-                    disabled={busyAction === `stop-context-agent-${item.runID}`}
-                    className="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-white px-2 py-1 text-xs font-semibold text-rose-700 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-60"
-                    title="Stop this background agent"
-                  >
-                    <Square size={12} />
-                    Stop
-                  </button>
-                ) : null}
-              </div>
-            </div>
-
-            <ProgressBar progress={item.progress} />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function InlineProgress({compact = false, detail, progress, title}: {compact?: boolean; detail: string; progress: number; title: string}) {
-  return (
-    <div className={`rounded-md border border-slate-200 bg-white ${compact ? 'p-3' : 'p-4'}`}>
-      <div className="mb-2 flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-            <LoaderCircle className="shrink-0 animate-spin text-sky-600" size={15} />
-            {title}
-          </p>
-          <p className="mt-1 text-xs text-slate-500">{detail}</p>
+    <div className="border-b border-blue-200 bg-blue-50 px-6 py-2">
+      {items.map((item) => (
+        <div key={item.key} className="flex items-center gap-2 text-xs text-blue-700">
+          <LoaderCircle size={12} className="animate-spin" />
+          <span className="font-medium">{item.title}</span>
+          <span className="text-blue-500">{item.detail}</span>
+          {item.runID && <button className="ml-2 text-blue-400" onClick={() => onStopAgent(item.runID!)}>stop</button>}
         </div>
-        <span className="rounded-md bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-600">{Math.round(clampProgress(progress))}%</span>
+      ))}
+    </div>
+  );
+}
+
+function InlineProgress({title, detail, progress}: {title: string; detail: string; progress: number}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs text-slate-500">
+        <span>{title}</span><span>{Math.round(progress)}%</span>
       </div>
-      <ProgressBar progress={progress} />
-    </div>
-  );
-}
-
-function ProgressBar({progress}: {progress: number}) {
-  return (
-    <div className="h-2 overflow-hidden rounded-full bg-slate-100">
-      <div
-        className="h-full rounded-full bg-sky-500 transition-all duration-500"
-        style={{width: `${clampProgress(progress)}%`}}
-      />
-    </div>
-  );
-}
-
-function StageRail({current, stages}: {current: string; stages: Array<[string, string]>}) {
-  const currentIndex = stages.findIndex(([value]) => value === current);
-  return (
-    <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
-      <div className="grid gap-2 md:grid-cols-6">
-        {stages.map(([value, label], index) => {
-          const active = value === current;
-          const done = currentIndex > index;
-          return (
-            <div key={value} className={`min-h-14 rounded-md border px-3 py-2 ${active ? 'border-sky-300 bg-white text-sky-950' : done ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : 'border-slate-200 bg-white text-slate-500'}`}>
-              <p className="text-xs font-semibold">{label}</p>
-              <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
-                <div className={`h-full rounded-full ${active ? 'w-2/3 animate-pulse bg-sky-500' : done ? 'w-full bg-emerald-500' : 'w-0 bg-slate-300'}`} />
-              </div>
-            </div>
-          );
-        })}
+      <div className="mt-1 h-1.5 w-full rounded-full bg-slate-200">
+        <div className="h-1.5 rounded-full bg-blue-500 transition-all" style={{width: `${progress}%`}} />
       </div>
+      {detail && <p className="mt-1 text-xs text-slate-400">{detail}</p>}
     </div>
   );
 }
 
-function StatusBadge({text}: {text: string}) {
-  return (
-    <span className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-medium text-slate-600">
-      {text.replaceAll('_', ' ')}
-    </span>
-  );
-}
-
-function normalizeProfile(value: CandidateProfile): CandidateProfile {
-  const contact = {...emptyProfile.contact, ...(value?.contact ?? {})};
-  return {
-    contact: {
-      ...contact,
-      links: asStringArray(contact.links),
-      verified: Boolean(contact.verified),
-    },
-    records: asArray(value?.records).map((record) => ({
-      ...newRecord(record.record_type || 'project'),
-      ...record,
-      verified: Boolean(record.verified),
-    })),
-  };
-}
-
-function newRecord(recordType: string): CandidateProfileRecord {
-  return {
-    id: 0,
-    record_type: recordType,
-    label: '',
-    organization: '',
-    role: '',
-    start_date: '',
-    end_date: '',
-    value: '',
-    verified: false,
-    created_at: '',
-    updated_at: '',
-  };
-}
-
-function mergeDraftRecords(current: CandidateProfileRecord[], draft: CandidateProfileRecord[]) {
-  const currentRecords = asArray(current);
-  const draftRecords = asArray(draft);
-  const seen = new Set(currentRecords.map((record) => `${record.record_type}|${record.organization}|${record.role}|${record.start_date}|${record.end_date}|${record.value}`.toLowerCase()));
-  const next = [...currentRecords];
-  for (const record of draftRecords) {
-    const key = `${record.record_type}|${record.organization}|${record.role}|${record.start_date}|${record.end_date}|${record.value}`.toLowerCase();
-    if (!seen.has(key)) {
-      next.push({...record, verified: false});
-      seen.add(key);
-    }
-  }
-  return next;
-}
-
-function normalizeSources(value?: CandidateSource[] | null) {
-  return asArray(value).map((source) => ({
-    ...source,
-    trust_tier: source.trust_tier || defaultSourceTrust(source.source_type),
-  }));
-}
-
-function normalizeFacts(value?: EvidenceFact[] | null) {
-  return asArray(value).map((fact) => ({
-    ...fact,
-    technologies: asStringArray(fact.technologies),
-    risk_flags: asStringArray(fact.risk_flags),
-    origin_heading: fact.origin_heading || '',
-    origin_type: fact.origin_type || '',
-    context: asStringArray(fact.context),
-    similarity_key: fact.similarity_key || '',
-    similarity_score: Number(fact.similarity_score ?? 1),
-    duplicate_of_id: Number(fact.duplicate_of_id ?? 0),
-  }));
-}
-
-function normalizeRequirements(value?: JobRequirement[] | null) {
-  return asArray(value).map((requirement) => ({
-    ...requirement,
-    keywords: asStringArray(requirement.keywords),
-  }));
-}
-
-function normalizeMatches(value?: JobFactMatch[] | null) {
-  return asArray(value).map((match) => ({
-    ...match,
-    risk_flags: asStringArray(match.risk_flags),
-  }));
-}
-
-function normalizeDrafts(value?: TailoredBulletDraft[] | null) {
-  return asArray(value).map((draft) => ({
-    ...draft,
-    fact_ids: asArray(draft.fact_ids),
-    claim_ids: asArray(draft.claim_ids),
-    origin_heading: draft.origin_heading || '',
-    origin_type: draft.origin_type || '',
-    value_theme: draft.value_theme || '',
-    risk_flags: asStringArray(draft.risk_flags),
-    selection_score: Number(draft.selection_score ?? 0),
-    resume_value_score: Number(draft.resume_value_score ?? 0),
-    jd_relevance_score: Number(draft.jd_relevance_score ?? 0),
-    origin_weight: Number(draft.origin_weight ?? 1),
-    risk_penalty: Number(draft.risk_penalty ?? 0),
-    unsupported_context_penalty: Number(draft.unsupported_context_penalty ?? 0),
-    selection_reason: draft.selection_reason || '',
-    display_order: Number(draft.display_order ?? 0),
-    selected_for_resume: Boolean(draft.selected_for_resume),
-  }));
-}
-
-function normalizeBulletEvents(value?: BulletGenerationEvent[] | null) {
-  return asArray(value).map((event) => ({
-    ...event,
-    origin_heading: event.origin_heading || '',
-    stage: event.stage || '',
-    status: event.status || '',
-    reason: event.reason || '',
-    draft_text: event.draft_text || '',
-  }));
-}
-
-function normalizeContextRun(run: ContextAgentRun): ContextAgentRun {
-  return {
-    ...run,
-    status: run?.status || '',
-    error: run?.error || '',
-    facts_created: Number(run?.facts_created ?? 0),
-    claims_created: Number(run?.claims_created ?? 0),
-  };
-}
-
-function normalizeContextRuns(value?: ContextAgentRun[] | null) {
-  return asArray(value).map((run) => normalizeContextRun(run)).sort((a, b) => b.id - a.id);
-}
-
-function normalizeContextSteps(value?: ContextAgentStep[] | null) {
-  return asArray(value).map((step) => ({
-    ...step,
-    stage: step.stage || '',
-    status: step.status || '',
-    message: step.message || '',
-  })).sort((a, b) => a.id - b.id);
-}
-
-function normalizeClaims(value?: CandidateClaim[] | null) {
-  return asArray(value).map((claim) => ({
-    ...claim,
-    source_fact_ids: asArray(claim.source_fact_ids),
-    evidence_quotes: asStringArray(claim.evidence_quotes),
-    technologies: asStringArray(claim.technologies),
-    actions: asStringArray(claim.actions),
-    capabilities: asStringArray(claim.capabilities),
-    objects: asStringArray(claim.objects),
-    domains: asStringArray(claim.domains),
-    artifacts: asStringArray(claim.artifacts),
-    scope: asStringArray(claim.scope),
-    metrics: asStringArray(claim.metrics),
-    outcomes: asStringArray(claim.outcomes),
-    profile_context: asStringArray(claim.profile_context),
-    evidence_strength: claim.evidence_strength || 'direct',
-    allowed_use: asStringArray(claim.allowed_use),
-    allowed_contexts: asStringArray(claim.allowed_contexts),
-    blocked_contexts: asStringArray(claim.blocked_contexts),
-    safe_phrasings: asStringArray(claim.safe_phrasings),
-    unsafe_phrasings: asStringArray(claim.unsafe_phrasings),
-    risk_flags: asStringArray(claim.risk_flags),
-    similarity_key: claim.similarity_key || '',
-    similarity_score: Number(claim.similarity_score ?? 1),
-    duplicate_of_id: Number(claim.duplicate_of_id ?? 0),
-  }));
-}
-
-function normalizeBlockedClaims(value?: BlockedClaim[] | null) {
-  return asArray(value).map((blocked) => ({
-    ...blocked,
-    enabled: Boolean(blocked.enabled),
-  }));
-}
-
-function normalizeJobAnalysis(value?: JobAnalysis | null): JobAnalysis | null {
-  if (!value) return null;
-  return {
-    ...value,
-    top_pain_points: asStringArray(value.top_pain_points),
-    required_skills: asStringArray(value.required_skills),
-    preferred_skills: asStringArray(value.preferred_skills),
-    responsibilities: asStringArray(value.responsibilities),
-    keywords: asStringArray(value.keywords),
-    risk_flags: asStringArray(value.risk_flags),
-  };
-}
-
-function normalizeFitAnalysis(value?: JobFitAnalysis | null): JobFitAnalysis | null {
-  if (!value) return null;
-  return {
-    ...value,
-    strengths: asStringArray(value.strengths),
-    critical_gaps: asStringArray(value.critical_gaps),
-    analysis: asArray(value.analysis).map((item) => ({
-      ...item,
-      matching_fact_ids: asArray(item.matching_fact_ids),
-    })),
-  };
-}
-
-function normalizeApplicationStrategy(value?: ApplicationStrategy | null): ApplicationStrategy | null {
-  if (!value) return null;
-  return {
-    ...value,
-    approved_fact_ids: asArray(value.approved_fact_ids),
-    rejected_fact_ids: asArray(value.rejected_fact_ids),
-    weak_or_missing_requirements: asStringArray(value.weak_or_missing_requirements),
-    experience_titles: value.experience_titles ?? {},
-    keywords: asStringArray(value.keywords),
-    do_not_overclaim: asStringArray(value.do_not_overclaim),
-  };
-}
-
-function asArray<T>(value?: T[] | null): T[] {
-  return Array.isArray(value) ? value : [];
-}
-
-function asStringArray(value?: string[] | null): string[] {
-  return Array.isArray(value) ? value : [];
-}
-
-function splitList(value: string) {
-  return value.split(',').map((item) => item.trim()).filter(Boolean);
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function normalizePastedText(rawText: string) {
-  return rawText
-    .replace(/\r\n/g, '\n')
-    .replace(/\r/g, '\n')
-    .replace(/\u00a0/g, ' ')
-    .replace(/Â·/g, '-')
-    .replace(/Â/g, '')
-    .replace(/â€™|â€˜/g, "'")
-    .replace(/â€œ|â€�/g, '"')
-    .replace(/â€”|â€“/g, ' - ')
-    .replace(/â€¢/g, '-')
-    .replace(/â€¦/g, '...');
-}
-
-function inferJobDetailsFromText(rawText: string) {
-  const lines = normalizePastedText(rawText)
-    .split('\n')
-    .map(cleanJobDetailLine)
-    .filter((line) => line && !line.toLowerCase().startsWith('http'))
-    .slice(0, 12);
-  let company = '';
-  let title = '';
-  for (const line of lines) {
-    const lower = line.toLowerCase();
-    for (const prefix of ['company:', 'employer:', 'organisation:', 'organization:']) {
-      if (lower.startsWith(prefix)) {
-        company = line.slice(prefix.length).trim();
-      }
-    }
-    for (const prefix of ['job title:', 'role:', 'title:', 'position:']) {
-      if (lower.startsWith(prefix)) {
-        title = line.slice(prefix.length).trim();
-      }
-    }
-  }
-  if (!title) {
-    title = lines.find(looksLikeRoleTitle) ?? '';
-  }
-  if (!company) {
-    company = lines.find((line) => {
-      const lower = line.toLowerCase();
-      return line !== title &&
-        !looksLikeRoleTitle(line) &&
-        !lower.includes('responsibilities') &&
-        !lower.includes('requirements') &&
-        !lower.includes('about the role') &&
-        line.split(/\s+/).length <= 5;
-    }) ?? '';
-  }
-  if (title.includes(' at ') && !company) {
-    const [role, org] = title.split(/\s+at\s+/, 2);
-    title = role.trim();
-    company = org.trim();
-  }
-  return {company, title};
-}
-
-function cleanJobDetailLine(line: string) {
-  return normalizePastedText(line).replace(/^[-\u2022]\s*/, '').replace(/^[#*_`]+|[#*_`]+$/g, '').replace(/\s+/g, ' ').trim();
-}
-
-function looksLikeRoleTitle(line: string) {
-  if (line.split(/\s+/).length > 9) {
-    return false;
-  }
-  return /engineer|developer|manager|analyst|designer|architect|consultant|specialist|lead|intern|graduate|backend|frontend|full stack|software|data|devops|platform/i.test(line);
-}
-
-function sourceTypeLabel(value: string) {
-  const labels: Record<string, string> = {
-    current_resume: 'Current resume',
-    extended_resume: 'Extended resume',
-    old_resume: 'Old resume',
-    project_notes: 'Project notes',
-    readme: 'README',
-    architecture_notes: 'Architecture notes',
-    interview_notes: 'Interview notes',
-    manual_notes: 'Manual notes',
-  };
-  return labels[value] ?? value;
-}
-
-function defaultSourceTrust(sourceType: string) {
-  if (sourceType === 'current_resume') return 'verified';
-  if (sourceType === 'extended_resume' || sourceType === 'old_resume') return 'trusted_ai_summary';
-  if (['project_notes', 'readme', 'architecture_notes'].includes(sourceType)) return 'raw_source';
-  return 'unverified_ai';
-}
-
-function sourceTrustLabel(value: string) {
-  const labels: Record<string, string> = {
-    verified: 'Verified',
-    trusted_ai_summary: 'Trusted AI summary',
-    raw_source: 'Raw source',
-    unverified_ai: 'Unverified AI',
-  };
-  return labels[value] ?? value;
-}
-
-function sourceName(sources: CandidateSource[], selectedSourceID: number) {
-  return sources.find((source) => source.id === selectedSourceID)?.title ?? 'Select a source in Sources or Sections first.';
-}
-
-function sectionTypeLabel(value: string) {
-  const labels: Record<string, string> = {
-    summary: 'Summary',
-    skills: 'Skills',
-    experience: 'Experience',
-    project: 'Project',
-    education: 'Education',
-    certification: 'Certification',
-    misc: 'Misc',
-  };
-  return labels[value] ?? value;
-}
-
-function recordTypeLabel(value: string) {
-  const labels: Record<string, string> = {
-    education: 'Education',
-    employment: 'Employment',
-    project: 'Project',
-    allowed_alias: 'Allowed alias',
-    blocked_alias: 'Blocked alias',
-  };
-  return labels[value] ?? value;
-}
-
-function modelPlaceholder(provider: string) {
-  return provider === 'openai' ? 'gpt-5.4-mini' : 'deepseek/deepseek-v4-flash';
-}
-
-function embeddingModelPlaceholder(provider: string) {
-  return provider === 'openai' ? 'text-embedding-3-small' : 'openai/text-embedding-3-small';
-}
-
-function apiKeyPlaceholder(provider: string) {
-  return provider === 'openai' ? 'OPENAI_API_KEY' : 'OPENROUTER_API_KEY';
-}
-
-function formatDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString();
-}
-
-function latestContextStep(steps: ContextAgentStep[], runID: number) {
-  return steps.filter((step) => step.run_id === runID).sort((a, b) => b.id - a.id)[0];
+function contextRunProgress(run: ContextAgentRun | undefined, step: ContextAgentStep | undefined) {
+  if (!run) return 0;
+  if (run.status === 'complete') return 100;
+  if (run.status === 'failed' || run.status === 'cancelled') return 0;
+  const stages = ['queued', 'source_preprocess', 'section_detect', 'fact_extract', 'fact_compact', 'profile_draft', 'claim_generate', 'claim_compact', 'dedupe', 'done'];
+  const idx = stages.indexOf(step?.stage || 'queued');
+  return Math.min(90, Math.round(((idx + 1) / stages.length) * 100));
 }
 
 function sourceTitle(sources: CandidateSource[], sourceID: number) {
-  return sources.find((source) => source.id === sourceID)?.title || `Source ${sourceID}`;
+  return sources.find((s) => s.id === sourceID)?.title || `Source ${sourceID}`;
+}
+
+function sourceName(sources: CandidateSource[], sourceID: number) {
+  const s = sources.find((src) => src.id === sourceID);
+  return s ? s.title : 'No source selected';
 }
 
 function contextStageLabel(stage: string) {
-  const labels: Record<string, string> = {
-    queued: 'Queued',
-    source_preprocess: 'Normalizing source',
-    section_detect: 'Detecting sections',
-    fact_extract: 'Extracting evidence',
-    fact_compact: 'Compacting facts',
-    profile_draft: 'Merging profile draft',
-    claim_generate: 'Generating claims',
-    claim_compact: 'Compacting claims',
-    dedupe: 'Deduplicating atoms',
-    done: 'Complete',
-    failed: 'Failed',
-    cancelled: 'Cancelled',
-  };
-  return labels[stage] ?? stage.replaceAll('_', ' ');
+  return stage.replaceAll('_', ' ');
 }
 
-function contextRunProgress(run?: ContextAgentRun, step?: ContextAgentStep) {
-  if (!run) return 0;
-  if (run.status === 'complete') return 100;
-  if (run.status === 'failed') return 100;
-  if (run.status === 'cancelled') return 100;
-
-  const stageProgress: Record<string, number> = {
-    queued: 8,
-    source_preprocess: 16,
-    section_detect: 26,
-    fact_extract: Math.min(64, 34 + run.facts_created * 8),
-    fact_compact: 68,
-    profile_draft: 76,
-    claim_generate: Math.min(88, 78 + run.claims_created * 4),
-    claim_compact: 90,
-    dedupe: 94,
-    done: 100,
-    cancelled: 100,
-  };
-
-  return stageProgress[step?.stage || 'queued'] ?? 20;
+function workItemForAction(name: string) {
+  return {key: name, title: name.replace(/-/g, ' '), detail: 'Running', progress: 50};
 }
 
-function workItemForAction(action: string): WorkItem {
-  const known = actionWorkMap[action] ?? dynamicWorkItem(action);
-  return {key: `action-${action}`, ...known};
+function inferJobDetailsFromText(text: string) {
+  const lines = text.split('\n').filter((l) => l.trim());
+  return {company: lines[0]?.trim()?.slice(0, 60) || '', title: lines[1]?.trim()?.slice(0, 80) || ''};
 }
 
-function jobWorkItem(action: string): WorkItem | null {
-  if (!['parse-job', 'build-match-map', 'generate-fit', 'generate-strategy', 'generate-bullets', 'auto-select-drafts', 'save-job'].includes(action)) {
-    return null;
-  }
-  return workItemForAction(action);
+function defaultSourceTrust(sourceType: string) {
+  if (sourceType === 'current_resume' || sourceType === 'project_notes') return 'verified';
+  if (sourceType === 'extended_resume') return 'trusted_ai_summary';
+  return 'raw_source';
 }
 
-function dynamicWorkItem(action: string) {
-  if (action.startsWith('context-agent-')) {
-    return {title: 'Starting context agent', detail: 'Queueing the background source analysis loop.', progress: 12};
-  }
-  if (action.startsWith('stop-context-agent-')) {
-    return {title: 'Stopping context agent', detail: 'Cancelling the background source analysis loop.', progress: 72};
-  }
-  if (action.startsWith('review-fact-')) {
-    return {title: 'Saving fact review', detail: 'Updating fact status and review metadata.', progress: 72};
-  }
-  if (action.startsWith('update-claim-')) {
-    return {title: 'Saving claim review', detail: 'Updating claim atoms, permissions, and risk flags.', progress: 72};
-  }
-  if (action.startsWith('update-draft-') || action.startsWith('select-draft-')) {
-    return {title: 'Saving draft choice', detail: 'Updating the selected resume bullet state.', progress: 72};
-  }
-  if (action.startsWith('save-rule-')) {
-    return {title: 'Saving prompt rule', detail: 'Versioning the reusable instruction rule.', progress: 70};
-  }
-  return {title: 'Working', detail: action.replaceAll('-', ' '), progress: 45};
+function delay(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
+
+function normalizeSources(v: CandidateSource[] | null | undefined) { return v ?? []; }
+function normalizeFacts(v: EvidenceFact[] | null | undefined) { return v ?? []; }
+function normalizeClaims(v: CandidateClaim[] | null | undefined) { return v ?? []; }
+function normalizeBlockedClaims(v: BlockedClaim[] | null | undefined) { return v ?? []; }
+function normalizeContextRuns(v: ContextAgentRun[] | null | undefined) { return v ?? []; }
+function normalizeContextSteps(v: ContextAgentStep[]) { return v; }
+function normalizeRequirements(v: JobRequirement[] | null | undefined) { return v ?? []; }
+function normalizeMatches(v: JobFactMatch[] | null | undefined) { return v ?? []; }
+function normalizeDrafts(v: TailoredBulletDraft[] | null | undefined) { return v ?? []; }
+function normalizeBulletEvents(v: BulletGenerationEvent[] | null | undefined) { return v ?? []; }
+function normalizeJobAnalysis(v: JobAnalysis | null | undefined) { return v ?? null; }
+function normalizeFitAnalysis(v: JobFitAnalysis | null | undefined) { return v ?? null; }
+function normalizeApplicationStrategy(v: ApplicationStrategy | null | undefined) { return v ?? null; }
+
+function normalizeProfile(p: CandidateProfile) {
+  return {...p, contact: {...p.contact, links: p.contact.links || []}, records: p.records || []};
 }
 
-const actionWorkMap: Record<string, Omit<WorkItem, 'key'>> = {
-  'create-source': {title: 'Saving source', detail: 'Storing raw text before automatic context generation.', progress: 28},
-  'import-file': {title: 'Importing file', detail: 'Reading and normalizing source content.', progress: 36},
-  'detect-sections': {title: 'Detecting sections', detail: 'Splitting source material into editable origin chunks.', progress: 45},
-  'extract-facts': {title: 'Extracting facts', detail: 'Building compact quote-backed evidence atoms.', progress: 62},
-  'generate-claims': {title: 'Generating claim bank', detail: 'Merging approved facts into deduped permission atoms.', progress: 68},
-  'delete-all-facts': {title: 'Clearing fact bank', detail: 'Removing facts and dependent job outputs.', progress: 54},
-  'delete-all-claims': {title: 'Clearing claim bank', detail: 'Removing generated claims.', progress: 50},
-  'save-job': {title: 'Saving JD', detail: 'Storing the job description and refreshing context.', progress: 32},
-  'parse-job': {title: 'Parsing JD', detail: 'Extracting requirements, pain points, and keywords.', progress: 46},
-  'build-match-map': {title: 'Building match map', detail: 'Scoring job requirements against approved evidence.', progress: 58},
-  'generate-fit': {title: 'Generating fit analysis', detail: 'Evaluating strengths, gaps, and recommendation.', progress: 66},
-  'generate-strategy': {title: 'Generating strategy', detail: 'Turning fit analysis into resume positioning.', progress: 72},
-  'generate-bullets': {title: 'Drafting bullets', detail: 'Creating sourced bullets with diagnostics and risk checks.', progress: 74},
-  'auto-select-drafts': {title: 'Selecting bullets', detail: 'Ranking draft bullets for the best resume set.', progress: 78},
-  'test-llm': {title: 'Testing AI connection', detail: 'Sending a small smoke-test request.', progress: 50},
-  'install-tectonic': {title: 'Installing PDF renderer', detail: 'Downloading and preparing the local renderer.', progress: 48},
-  'render-pdf': {title: 'Rendering sample PDF', detail: 'Compiling a local sample document.', progress: 58},
-};
+function newRecord(recordType: string): CandidateProfileRecord {
+  return {id: 0, record_type: recordType, label: '', organization: '', role: '', start_date: '', end_date: '', value: '', verified: false, created_at: '', updated_at: ''};
+}
 
-function clampProgress(value: number) {
-  if (!Number.isFinite(value)) return 0;
-  return Math.max(0, Math.min(100, value));
+function recordTypeLabel(type: string) {
+  const labels: Record<string, string> = {education: 'Education', employment: 'Employment', project: 'Project', allowed_alias: 'Alias', blocked_alias: 'Blocked'};
+  return labels[type] ?? type;
+}
+
+function latestContextStep(steps: ContextAgentStep[], runID: number) {
+  return steps.filter((s) => s.run_id === runID).sort((a, b) => b.id - a.id)[0];
 }
 
 export default App;
