@@ -1380,18 +1380,33 @@ func cleanLatexText(text string) string {
 	text = strings.Join(lines, "\n")
 
 	text = expandLatexCommand(text, "section", func(args []string) string {
+		if len(args) < 1 {
+			return ""
+		}
 		return "\n" + args[0] + "\n"
 	})
 	text = expandLatexCommand(text, "resumeSubheading", func(args []string) string {
+		if len(args) < 4 {
+			return strings.Join(args, " | ")
+		}
 		return fmt.Sprintf("\n%s | %s\n%s | %s\n", args[0], args[1], args[2], args[3])
 	})
 	text = expandLatexCommand(text, "resumeProjectHeading", func(args []string) string {
+		if len(args) < 2 {
+			return strings.Join(args, " | ")
+		}
 		return fmt.Sprintf("\n%s | %s\n", args[0], args[1])
 	})
 	text = expandLatexCommand(text, "resumeItem", func(args []string) string {
+		if len(args) < 1 {
+			return ""
+		}
 		return "- " + args[0] + "\n"
 	})
 	text = expandLatexCommand(text, "href", func(args []string) string {
+		if len(args) < 2 {
+			return strings.Join(args, "")
+		}
 		return args[1]
 	})
 	for _, command := range []string{"textbf", "textit", "emph", "small", "scshape"} {
@@ -1507,6 +1522,9 @@ func readLatexCommandArgs(text string, index int) ([]string, int, bool) {
 
 func cleanLatexTextFragment(text string) string {
 	text = expandLatexCommand(text, "href", func(args []string) string {
+		if len(args) < 2 {
+			return strings.Join(args, "")
+		}
 		return args[1]
 	})
 	for _, command := range []string{"textbf", "textit", "emph", "small"} {
@@ -2277,7 +2295,39 @@ func boolToInt(value bool) int {
 }
 
 func intToBool(value int) bool {
-	return value != 0
+	if value != 0 {
+		return true
+	}
+	return false
+}
+
+func encodeStringListPreserveOrder(values []string) (string, error) {
+	// Encode string list without sorting to preserve order
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func decodeStringListPreserveOrder(value string) []string {
+	// Decode string list without sorting to preserve order
+	var values []string
+	if err := json.Unmarshal([]byte(value), &values); err != nil {
+		return []string{}
+	}
+	// Trim spaces but don't sort
+	cleaned := []string{}
+	seen := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		cleaned = append(cleaned, value)
+	}
+	return cleaned
 }
 
 func (s *Store) getCandidateSource(id int64) (CandidateSource, error) {

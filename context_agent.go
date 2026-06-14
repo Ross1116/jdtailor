@@ -93,6 +93,14 @@ func (s *Store) StartContextAgent(sourceID int64) (ContextAgentRun, error) {
 	if active.ID > 0 {
 		return active, nil
 	}
+
+	globalActive, err := s.anyActiveContextAgentRun()
+	if err != nil {
+		return ContextAgentRun{}, err
+	}
+	if globalActive.ID > 0 {
+		return globalActive, nil
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := s.db.ExecContext(
 		context.Background(),
@@ -589,6 +597,27 @@ func (s *Store) activeContextAgentRun(sourceID int64) (ContextAgentRun, error) {
 	return runs[0], nil
 }
 
+func (s *Store) anyActiveContextAgentRun() (ContextAgentRun, error) {
+	rows, err := s.db.QueryContext(
+		context.Background(),
+		`SELECT id, source_id, status, started_at, finished_at, error, facts_created, claims_created
+		FROM context_agent_runs WHERE status = ? ORDER BY id DESC LIMIT 1`,
+		contextAgentStatusRunning,
+	)
+	if err != nil {
+		return ContextAgentRun{}, err
+	}
+	defer rows.Close()
+	runs, err := scanContextAgentRuns(rows)
+	if err != nil {
+		return ContextAgentRun{}, err
+	}
+	if len(runs) == 0 {
+		return ContextAgentRun{}, nil
+	}
+	return runs[0], nil
+}
+
 func (s *Store) recordContextAgentStep(runID int64, stage, status, message string) error {
 	_, err := s.db.ExecContext(
 		context.Background(),
@@ -680,6 +709,20 @@ func (s *Store) mergeAndSaveCandidateProfile(draft CandidateProfile) error {
 		current.Contact.Verified = draft.Contact.Verified
 	}
 
+	currentRecordsByKey := map[string]bool{}
+	for _, record := range current.Records {
+		key := strings.ToLower(strings.Join([]string{
+			record.RecordType,
+			record.Label,
+			record.Organization,
+			record.Role,
+			record.StartDate,
+			record.EndDate,
+			record.Value,
+		}, "|"))
+		currentRecordsByKey[key] = true
+	}
+
 	seen := map[string]bool{}
 	records := []CandidateProfileRecord{}
 	for _, record := range append(current.Records, draft.Records...) {
@@ -696,7 +739,9 @@ func (s *Store) mergeAndSaveCandidateProfile(draft CandidateProfile) error {
 			continue
 		}
 		seen[key] = true
-		record.Verified = false
+		if ok := currentRecordsByKey[key]; !ok {
+			record.Verified = false
+		}
 		records = append(records, record)
 	}
 	current.Records = records
