@@ -338,13 +338,14 @@ func buildFitAnalysis(jobID int64, requirements []JobRequirement, matches []JobF
 		risk := ""
 		for _, match := range reqMatches {
 			factIDs = append(factIDs, match.FactID)
-			if match.Score > bestScore {
-				bestScore = match.Score
-				bestCoverage = match.CoverageStatus
-			}
 			if match.FactStatus != factStatusApproved {
 				risk = "uses " + match.FactStatus + " evidence"
 				riskyEvidence++
+				continue
+			}
+			if match.Score > bestScore {
+				bestScore = match.Score
+				bestCoverage = match.CoverageStatus
 			}
 		}
 		weighted += bestScore * weight
@@ -455,7 +456,7 @@ func fitRealityCheck(score int, requirementCount int, highPriorityTotal int, hig
 	case score >= 75:
 		return base + " Competitive application if the resume leads with the strongest matching evidence and avoids unsupported extras."
 	case score >= 58:
-		return base + " High-upside stretch: plausible if the resume leads with adjacent cloud/data/product systems evidence and stays honest about senior cloud, streaming, IoT, and hardware gaps."
+		return base + " High-upside stretch: plausible if the resume leads with the strongest adjacent evidence and addresses the identified gaps in experience or qualifications."
 	case score >= 38:
 		return base + " Interview odds are weak unless the role is flexible or the resume can credibly close the critical gaps."
 	default:
@@ -497,12 +498,12 @@ func buildApplicationStrategy(job JobDescription, analysis JobAnalysis, fit JobF
 
 func (s *Store) replaceJobAnalysis(analysis JobAnalysis) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	topPainPointsJSON, _ := encodeStringList(analysis.TopPainPoints)
 	requiredJSON, _ := encodeStringList(analysis.RequiredSkills)
 	preferredJSON, _ := encodeStringList(analysis.PreferredSkills)
 	responsibilitiesJSON, _ := encodeStringList(analysis.Responsibilities)
 	keywordsJSON, _ := encodeStringList(analysis.Keywords)
 	riskFlagsJSON, _ := encodeStringList(analysis.RiskFlags)
+	topPainPointsJSON, _ := encodeStringListPreserveOrder(analysis.TopPainPoints)
 	_, err := s.db.ExecContext(
 		context.Background(),
 		`INSERT INTO job_analyses
@@ -582,7 +583,7 @@ func scanJobAnalysisRow(rows *sql.Rows) (JobAnalysis, error) {
 		&analysis.RoleArchetype, &keywordsJSON, &riskFlagsJSON, &analysis.JobPoster, &analysis.CompanyURL, &analysis.CreatedAt, &analysis.UpdatedAt); err != nil {
 		return JobAnalysis{}, err
 	}
-	analysis.TopPainPoints = decodeStringList(topPainPointsJSON)
+	analysis.TopPainPoints = decodeStringListPreserveOrder(topPainPointsJSON)
 	analysis.RequiredSkills = decodeStringList(requiredJSON)
 	analysis.PreferredSkills = decodeStringList(preferredJSON)
 	analysis.Responsibilities = decodeStringList(responsibilitiesJSON)
@@ -599,7 +600,9 @@ func scanFitAnalysisRow(rows *sql.Rows) (JobFitAnalysis, error) {
 	}
 	fit.Strengths = decodeStringList(strengthsJSON)
 	fit.CriticalGaps = decodeStringList(gapsJSON)
-	_ = json.Unmarshal([]byte(analysisJSON), &fit.Analysis)
+	if err := json.Unmarshal([]byte(analysisJSON), &fit.Analysis); err != nil {
+		return JobFitAnalysis{}, fmt.Errorf("failed to unmarshal fit analysis JSON: %w", err)
+	}
 	return fit, nil
 }
 
@@ -616,7 +619,9 @@ func scanApplicationStrategyRow(rows *sql.Rows) (ApplicationStrategy, error) {
 	strategy.Keywords = decodeStringList(keywordsJSON)
 	strategy.DoNotOverclaim = decodeStringList(overclaimJSON)
 	strategy.ExperienceTitles = map[string]string{}
-	_ = json.Unmarshal([]byte(titlesJSON), &strategy.ExperienceTitles)
+	if err := json.Unmarshal([]byte(titlesJSON), &strategy.ExperienceTitles); err != nil {
+		return ApplicationStrategy{}, fmt.Errorf("failed to unmarshal experience titles JSON: %w", err)
+	}
 	return strategy, nil
 }
 
