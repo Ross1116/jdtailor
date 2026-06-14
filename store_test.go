@@ -480,8 +480,8 @@ func TestCandidateProfileSaveLoad(t *testing.T) {
 
 	saved, err := store.SaveCandidateProfile(CandidateProfile{
 		Contact: CandidateContact{
-			FullName: "Roshan Example",
-			Email:    "roshan@example.com",
+			FullName: "Jane Q. Public",
+			Email:    "jane.doe@example.com",
 			Links:    []string{"https://portfolio.example", "https://portfolio.example"},
 			Verified: true,
 		},
@@ -504,7 +504,7 @@ func TestCandidateProfileSaveLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SaveCandidateProfile() error = %v", err)
 	}
-	if saved.Contact.FullName != "Roshan Example" {
+	if saved.Contact.FullName != "Jane Q. Public" {
 		t.Fatalf("FullName = %q", saved.Contact.FullName)
 	}
 	if len(saved.Contact.Links) != 1 {
@@ -683,8 +683,8 @@ func TestLatexResumeImportCleansReadableContent(t *testing.T) {
 \documentclass{article}
 \begin{document}
 \begin{center}
-\textbf{\Huge \scshape Roshan Ravikumar} \\
-\href{mailto:roshrwork@gmail.com}{roshrwork@gmail.com} $|$ Melbourne, VIC
+\textbf{\Huge \scshape John Doe} \\
+\href{mailto:john.doe@example.com}{john.doe@example.com} $|$ Melbourne, VIC
 \end{center}
 \section{Experience}
 \resumeSubheading{Sitespace $|$ \href{https://sitespace.com.au}{Website}}{Remote}{Fullstack Engineer}{06/2025 -- Present}
@@ -701,7 +701,7 @@ func TestLatexResumeImportCleansReadableContent(t *testing.T) {
 			t.Fatalf("cleaned text contains %q: %s", forbidden, cleaned)
 		}
 	}
-	for _, required := range []string{"Roshan Ravikumar", "roshrwork@gmail.com", "Experience", "Sitespace", "Fullstack Engineer", "Built and shipped the FastAPI/PostgreSQL backend"} {
+	for _, required := range []string{"John Doe", "john.doe@example.com", "Experience", "Sitespace", "Fullstack Engineer", "Built and shipped the FastAPI/PostgreSQL backend"} {
 		if !strings.Contains(cleaned, required) {
 			t.Fatalf("cleaned text missing %q: %s", required, cleaned)
 		}
@@ -711,7 +711,7 @@ func TestLatexResumeImportCleansReadableContent(t *testing.T) {
 func TestDetectSectionsUsesLatexResumeSections(t *testing.T) {
 	raw := `\begin{document}
 \begin{center}
-\textbf{\Huge \scshape Roshan Ravikumar}
+\textbf{\Huge \scshape John Doe}
 \end{center}
 \section{Professional Summary}
 \small{Backend engineer.}
@@ -781,8 +781,8 @@ func TestDraftCandidateProfileFromLatexSourceNeedsVerification(t *testing.T) {
 		Title:      "Resume",
 		RawText: `\begin{document}
 \begin{center}
-\textbf{\Huge \scshape Roshan Ravikumar} \\
-\href{mailto:roshrwork@gmail.com}{roshrwork@gmail.com} $|$ Melbourne, VIC
+\textbf{\Huge \scshape John Doe} \\
+\href{mailto:john.doe@example.com}{john.doe@example.com} $|$ Melbourne, VIC
 \end{center}
 \section{Experience}
 \resumeSubheading{Sitespace}{Remote}{Fullstack Engineer}{06/2025 -- Present}
@@ -797,7 +797,7 @@ func TestDraftCandidateProfileFromLatexSourceNeedsVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DraftCandidateProfileFromSource() error = %v", err)
 	}
-	if profile.Contact.FullName != "Roshan Ravikumar" || profile.Contact.Email != "roshrwork@gmail.com" {
+	if profile.Contact.FullName != "John Doe" || profile.Contact.Email != "john.doe@example.com" {
 		t.Fatalf("draft contact = %+v", profile.Contact)
 	}
 	if profile.Contact.Verified {
@@ -1273,8 +1273,12 @@ FastAPI, PostgreSQL, React`,
 		if err != nil {
 			t.Fatalf("GetContextAgentRun() error = %v", err)
 		}
-		if finished.Status != contextAgentStatusRunning {
+		if finished.Status == contextAgentStatusComplete {
 			break
+		}
+		if finished.Status != contextAgentStatusRunning {
+			steps, _ := store.ListContextAgentSteps(run.ID)
+			t.Fatalf("revived run status = %q, want running or complete; steps = %+v", finished.Status, steps)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -1382,8 +1386,8 @@ func TestContextAgentBuildsCompactResumeContext(t *testing.T) {
 		SourceType: "current_resume",
 		TrustTier:  "verified",
 		Title:      "Resume",
-		RawText: `Roshan Example
-roshan@example.com
+		RawText: `Jane Q. Public
+jane.doe@example.com
 
 PROJECTS
 - Built and shipped FastAPI/PostgreSQL backend APIs for planning workflows.
@@ -1439,7 +1443,7 @@ FastAPI, PostgreSQL, React, TypeScript`,
 	if err != nil {
 		t.Fatalf("GetCandidateProfile() error = %v", err)
 	}
-	if profile.Contact.Email != "roshan@example.com" || profile.Contact.Verified {
+	if profile.Contact.Email != "jane.doe@example.com" || profile.Contact.Verified {
 		t.Fatalf("profile contact = %+v, want draft unverified contact", profile.Contact)
 	}
 
@@ -2544,15 +2548,17 @@ func TestBuildJobMatchMapFallsBackOnEmptyLLMJSON(t *testing.T) {
 		t.Fatalf("BuildJobMatchMap() error = %v", err)
 	}
 	foundApprovedFastAPI := false
+	var matched JobFactMatch
 	for _, match := range matches {
 		if match.RequirementID == requirements[0].ID && match.FactID == facts[0].ID {
 			foundApprovedFastAPI = true
+			matched = match
 		}
 	}
 	if !foundApprovedFastAPI {
 		t.Fatalf("matches = %+v", matches)
 	}
-	if !strings.Contains(matches[0].Rationale, "Local keyword overlap") {
+	if !strings.Contains(matched.Rationale, "Local keyword overlap") {
 		t.Fatalf("match rationale = %q, want local fallback", matches[0].Rationale)
 	}
 }
