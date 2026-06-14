@@ -302,7 +302,14 @@ func (s *Store) UpdateCandidateClaimReview(input UpdateCandidateClaimReviewInput
 	if err != nil {
 		return CandidateClaim{}, err
 	}
-	return s.getCandidateClaim(input.ID)
+	updated, err := s.getCandidateClaim(input.ID)
+	if err != nil {
+		return CandidateClaim{}, err
+	}
+	if err := s.DeleteAllEvidenceFacts(); err != nil {
+		_ = s.LogEvent("error", "failed to invalidate evidence facts after claim update: "+err.Error())
+	}
+	return updated, nil
 }
 
 func (s *Store) DeleteCandidateClaim(input DeleteInput) error {
@@ -310,7 +317,13 @@ func (s *Store) DeleteCandidateClaim(input DeleteInput) error {
 		return errors.New("claim id is required")
 	}
 	_, err := s.db.ExecContext(context.Background(), `DELETE FROM candidate_claims WHERE id = ?`, input.ID)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := s.DeleteAllEvidenceFacts(); err != nil {
+		_ = s.LogEvent("error", "failed to invalidate evidence facts after claim delete: "+err.Error())
+	}
+	return nil
 }
 
 func (s *Store) DeleteAllCandidateClaims() error {
@@ -381,6 +394,8 @@ func (s *Store) UpdateBlockedClaim(input UpdateBlockedClaimInput) (BlockedClaim,
 	if err != nil {
 		return BlockedClaim{}, err
 	}
+	_, _ = s.db.ExecContext(context.Background(), `DELETE FROM candidate_claims`)
+	_ = s.LogEvent("info", "blocked claim updated")
 	return s.getBlockedClaim(input.ID)
 }
 
@@ -389,7 +404,12 @@ func (s *Store) DeleteBlockedClaim(input DeleteInput) error {
 		return errors.New("blocked claim id is required")
 	}
 	_, err := s.db.ExecContext(context.Background(), `DELETE FROM blocked_claims WHERE id = ?`, input.ID)
-	return err
+	if err != nil {
+		return err
+	}
+	_, _ = s.db.ExecContext(context.Background(), `DELETE FROM candidate_claims`)
+	_ = s.LogEvent("info", "blocked claim deleted")
+	return nil
 }
 
 func (s *Store) seedBlockedClaimDefaults(ctx context.Context) error {
