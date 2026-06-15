@@ -913,6 +913,7 @@ export namespace main {
 	    success: boolean;
 	    tex_path: string;
 	    pdf_path: string;
+	    output_dir: string;
 	    error: string;
 	
 	    static createFrom(source: any = {}) {
@@ -924,6 +925,7 @@ export namespace main {
 	        this.success = source["success"];
 	        this.tex_path = source["tex_path"];
 	        this.pdf_path = source["pdf_path"];
+	        this.output_dir = source["output_dir"];
 	        this.error = source["error"];
 	    }
 	}

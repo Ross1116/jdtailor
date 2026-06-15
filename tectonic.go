@@ -44,10 +44,11 @@ type InstallTectonicResult struct {
 }
 
 type RenderPDFResult struct {
-	Success bool   `json:"success"`
-	TexPath string `json:"tex_path"`
-	PDFPath string `json:"pdf_path"`
-	Error   string `json:"error"`
+	Success   bool   `json:"success"`
+	TexPath   string `json:"tex_path"`
+	PDFPath   string `json:"pdf_path"`
+	OutputDir string `json:"output_dir"`
+	Error     string `json:"error"`
 }
 
 func (s *Store) TectonicStatus() TectonicStatus {

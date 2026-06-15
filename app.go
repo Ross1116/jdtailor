@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"runtime"
 	"sync"
 )
 
@@ -621,6 +623,20 @@ func (a *App) RenderResumePDF(resume ResumeJSON) (RenderPDFResult, error) {
 		return RenderPDFResult{}, err
 	}
 	return a.store.RenderResumePDF(a.ctx, resume)
+}
+
+func (a *App) OpenFolder(path string) error {
+	if path == "" {
+		return errors.New("path is required")
+	}
+	switch runtime.GOOS {
+	case "windows":
+		return exec.Command("explorer", path).Start()
+	case "darwin":
+		return exec.Command("open", path).Start()
+	default:
+		return exec.Command("xdg-open", path).Start()
+	}
 }
 
 func (a *App) SaveResumeVersion(version ResumeVersion) (ResumeVersion, error) {

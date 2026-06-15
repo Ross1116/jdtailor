@@ -112,6 +112,8 @@ export function ListTailoredBulletDrafts(arg1:number):Promise<Array<main.Tailore
 
 export function LogCorrection(arg1:main.CorrectionLog):Promise<main.CorrectionLog>;
 
+export function OpenFolder(arg1:string):Promise<void>;
+
 export function ParseJobDescription(arg1:number):Promise<Array<main.JobRequirement>>;
 
 export function RenderResumePDF(arg1:main.ResumeJSON):Promise<main.RenderPDFResult>;

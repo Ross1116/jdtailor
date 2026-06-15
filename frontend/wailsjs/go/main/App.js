@@ -222,6 +222,10 @@ export function LogCorrection(arg1) {
   return window['go']['main']['App']['LogCorrection'](arg1);
 }
 
+export function OpenFolder(arg1) {
+  return window['go']['main']['App']['OpenFolder'](arg1);
+}
+
 export function ParseJobDescription(arg1) {
   return window['go']['main']['App']['ParseJobDescription'](arg1);
 }

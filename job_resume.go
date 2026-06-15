@@ -215,20 +215,25 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 				ClaimIDs:  draft.ClaimIDs,
 				BulletIDs: []int64{draft.ID},
 			}
-			// Parse section metadata to extract company, location, title, dates
-			for _, section := range sections {
-				if strings.EqualFold(section.Heading, draft.OriginHeading) {
-					entry.Company, entry.Location, entry.Title, entry.StartDate, entry.EndDate = parseSectionMetadata(section)
-					entry.URL = extractCompanyURL(section)
-					break
+			originType := strings.TrimSpace(strings.ToLower(draft.OriginType))
+			if strings.HasPrefix(originType, "project") {
+				entry.Title = draft.OriginHeading
+			} else {
+				// Parse section metadata for experience entries
+				for _, section := range sections {
+					if strings.EqualFold(section.Heading, draft.OriginHeading) {
+						entry.Company, entry.Location, entry.Title, entry.StartDate, entry.EndDate = parseSectionMetadata(section)
+						entry.URL = extractCompanyURL(section)
+						break
+					}
 				}
-			}
-			// Fallback: if no section found, use the heading as company/title
-			if entry.Company == "" {
-				entry.Company = draft.OriginHeading
-			}
-			if entry.Title == "" {
-				entry.Title = "Engineer"
+				// Fallback: if no section found, use the heading as company/title
+				if entry.Company == "" {
+					entry.Company = draft.OriginHeading
+				}
+				if entry.Title == "" {
+					entry.Title = "Engineer"
+				}
 			}
 			experienceByKey[originKey] = entry
 		}
@@ -238,12 +243,10 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 	experienceEntries := []ResumeEntry{}
 	projectEntries := []ResumeEntry{}
 	for key, entry := range experienceByKey {
-		// Check if this is a project entry
 		isProject := strings.HasPrefix(key, "project") || strings.Contains(strings.ToLower(entry.Title), "project")
-		// Also check by looking at the draft origins
 		for _, draft := range selectedDrafts {
-			if strings.EqualFold(draft.OriginHeading, entry.Title) {
-				if strings.HasPrefix(strings.ToLower(draft.OriginType), "project") {
+			if strings.HasPrefix(strings.ToLower(draft.OriginType), "project") || strings.HasPrefix(strings.ToLower(draft.OriginHeading), "project") {
+				if strings.EqualFold(draft.OriginHeading, entry.Title) || strings.EqualFold(draft.OriginHeading, key) || strings.EqualFold(draft.OriginHeading, entry.Company) {
 					isProject = true
 				}
 			}
@@ -255,7 +258,9 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 		}
 	}
 	experienceEntries, projectEntries = supplementResumeEntriesFromSections(experienceEntries, projectEntries, sections)
-	limitResumeEntries(experienceEntries, 5)
+	deduplicateResumeEntryBullets(experienceEntries)
+	deduplicateResumeEntryBullets(projectEntries)
+	limitResumeEntries(experienceEntries, 4)
 	limitResumeEntries(projectEntries, 2)
 
 	skillSet := map[string]bool{}
@@ -444,6 +449,22 @@ func limitResumeEntries(entries []ResumeEntry, bulletLimit int) {
 	}
 }
 
+func deduplicateResumeEntryBullets(entries []ResumeEntry) {
+	for i := range entries {
+		deduped := []string{}
+		seen := map[string]bool{}
+		for _, bullet := range entries[i].Bullets {
+			key := strings.ToLower(strings.TrimSpace(bullet))
+			if key == "" || seen[key] || isNearDuplicate(key, seen) {
+				continue
+			}
+			seen[key] = true
+			deduped = append(deduped, bullet)
+		}
+		entries[i].Bullets = deduped
+	}
+}
+
 func mergeResumeEntryBullets(entries []ResumeEntry, key string, bullets []string) {
 	for i := range entries {
 		if resumeEntryKey(entries[i]) != key {
@@ -458,11 +479,49 @@ func mergeResumeEntryBullets(entries []ResumeEntry, key string, bullets []string
 			if bulletKey == "" || seen[bulletKey] {
 				continue
 			}
+			if isNearDuplicate(bulletKey, seen) {
+				continue
+			}
 			seen[bulletKey] = true
 			entries[i].Bullets = append(entries[i].Bullets, bullet)
 		}
 		return
 	}
+}
+
+func isNearDuplicate(text string, existing map[string]bool) bool {
+	words := strings.Fields(text)
+	if len(words) < 6 {
+		return false
+	}
+	textWords := wordSet(words)
+	for prev := range existing {
+		prevWords := wordSet(strings.Fields(prev))
+		if len(prevWords) == 0 {
+			continue
+		}
+		overlap := 0
+		for w := range textWords {
+			if prevWords[w] {
+				overlap++
+			}
+		}
+		if overlap >= len(prevWords)/2 && overlap >= len(textWords)/2 {
+			return true
+		}
+	}
+	return false
+}
+
+func wordSet(words []string) map[string]bool {
+	seen := map[string]bool{}
+	for _, w := range words {
+		w = strings.ToLower(strings.Trim(w, ".,;:()[]{}"))
+		if len(w) > 2 {
+			seen[w] = true
+		}
+	}
+	return seen
 }
 
 func extractSectionBullets(section SourceSection) []string {
@@ -605,19 +664,43 @@ func buildResumeSummary(analysis JobAnalysis, claimIDs map[int64]bool, claimsByI
 }
 
 func humanSummaryRole(roleTitle string, capabilities []string, techs []string) string {
-	role := strings.TrimSpace(roleTitle)
-	lowerRole := strings.ToLower(role)
 	joined := strings.ToLower(strings.Join(append(capabilities, techs...), " "))
-	if role == "" || strings.Contains(lowerRole, "senior") {
-		if strings.Contains(joined, "backend") || strings.Contains(joined, "api") || strings.Contains(joined, "fastapi") || strings.Contains(joined, "postgres") {
+	backendWords := countBackendWords(joined)
+	frontendWords := countFrontendWords(joined)
+	if strings.Contains(joined, "backend") || strings.Contains(joined, "api") || strings.Contains(joined, "fastapi") || strings.Contains(joined, "postgres") || strings.Contains(joined, "microservice") || strings.Contains(joined, "golang") || strings.Contains(joined, "go ") {
+		if backendWords >= frontendWords && (strings.Contains(joined, "platform") || strings.Contains(joined, "infra") || strings.Contains(joined, "systems")) {
 			return "Backend/platform software engineer"
 		}
-		return "Software engineer"
-	}
-	if strings.Contains(lowerRole, "backend") && !strings.Contains(lowerRole, "software engineer") {
 		return "Backend software engineer"
 	}
-	return role
+	if backendWords >= frontendWords && backendWords > 0 {
+		return "Backend software engineer"
+	}
+	if strings.Contains(joined, "full stack") || strings.Contains(joined, "react") || strings.Contains(joined, "frontend") {
+		return "Frontend/full-stack software engineer"
+	}
+	if strings.Contains(joined, "data") || strings.Contains(joined, "ml") || strings.Contains(joined, "machine learning") {
+		return "Data/platform software engineer"
+	}
+	return "Software engineer"
+}
+
+func countBackendWords(joined string) int {
+	return countMatches(joined, "fastapi", "gin", "spring boot", "node.js", "express", "rest", "grpc", "microservice", "api", "postgresql", "mysql", "sqlite", "docker", "go", "golang", "python", "java", "backend", "rbac", "audit", "pipeline", "worker", "job", "sftp", "ftp", "etl", "elastic")
+}
+
+func countFrontendWords(joined string) int {
+	return countMatches(joined, "react", "next.js", "vite", "tailwind", "frontend", "typescript", "javascript", "angular", "vue", "css", "html", "responsive")
+}
+
+func countMatches(text string, terms ...string) int {
+	count := 0
+	for _, term := range terms {
+		if strings.Contains(text, term) {
+			count++
+		}
+	}
+	return count
 }
 
 func humanSummaryFocus(capabilities []string, domains []string, artifacts []string) string {
@@ -928,19 +1011,25 @@ func (s *Store) RenderResumePDF(ctx context.Context, resume ResumeJSON) (RenderP
 	}
 	texContent = hardenResumeTex(texContent)
 
+	firstName := resumeFirstName(resume.Headline)
+	if firstName == "" {
+		firstName = "resume"
+	}
+	pdfName := firstName + "_Resume"
+
 	outputDir := filepath.Join(s.generatedPath, fmt.Sprintf("resume-%d", time.Now().Unix()))
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return RenderPDFResult{}, err
 	}
 
-	texPath := filepath.Join(outputDir, "resume.tex")
+	texPath := filepath.Join(outputDir, pdfName+".tex")
 	if err := os.WriteFile(texPath, []byte(texContent), 0o644); err != nil {
 		return RenderPDFResult{}, err
 	}
 
-	pdfPath := filepath.Join(outputDir, "resume.pdf")
+	pdfPath := filepath.Join(outputDir, pdfName+".pdf")
 	status := s.TectonicStatus()
-	pdfResult := RenderPDFResult{TexPath: texPath, PDFPath: pdfPath}
+	pdfResult := RenderPDFResult{TexPath: texPath, PDFPath: pdfPath, OutputDir: outputDir}
 	if status.Status != "installed" {
 		pdfResult.Error = "Tectonic is " + status.Status
 		_ = s.LogEvent("error", "resume PDF render failed: "+pdfResult.Error)
@@ -966,11 +1055,24 @@ func (s *Store) RenderResumePDF(ctx context.Context, resume ResumeJSON) (RenderP
 	_ = s.LogEvent("info", "resume PDF rendered")
 
 	return RenderPDFResult{
-		Success: pdfResult.Success,
-		TexPath: texPath,
-		PDFPath: pdfPath,
-		Error:   pdfResult.Error,
+		Success:   pdfResult.Success,
+		TexPath:   texPath,
+		PDFPath:   pdfPath,
+		OutputDir: outputDir,
+		Error:     pdfResult.Error,
 	}, nil
+}
+
+func resumeFirstName(headline string) string {
+	headline = strings.TrimSpace(headline)
+	if headline == "" {
+		return ""
+	}
+	idx := strings.IndexAny(headline, " ,")
+	if idx <= 0 {
+		return headline
+	}
+	return strings.TrimSpace(headline[:idx])
 }
 
 func normalizeResumeTexSource(source string) string {
