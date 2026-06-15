@@ -123,6 +123,7 @@ import {
   GenerateResumeJSON,
   ValidateResumeJSON,
   RenderResumePDF,
+  OpenFolder,
   SaveResumeVersion,
   ListResumeVersions,
   SaveApplication,
@@ -201,6 +202,9 @@ type LoadState = 'loading' | 'ready' | 'error';
 type View = 'pipeline' | 'sources' | 'settings';
 type PipelineStep = 'job' | 'bullets' | 'resume' | 'tracker';
 type JobDraft = {company: string; title: string; url: string; raw_text: string};
+type PipelineOptions = {autoSelectBullets: boolean; buildResume: boolean};
+
+const emptyJobDraft: JobDraft = {company: '', title: '', url: '', raw_text: ''};
 
 const emptyProfile: CandidateProfile = {
   contact: {
@@ -272,9 +276,12 @@ function App() {
     url: '',
     raw_text: '',
   });
+  const [newJobDraft, setNewJobDraft] = useState<JobDraft>(emptyJobDraft);
+  const [pipelineOptions, setPipelineOptions] = useState<PipelineOptions>({autoSelectBullets: true, buildResume: true});
   const [apiKey, setAPIKey] = useState('');
   const [llmResult, setLLMResult] = useState<LLMTestResult | null>(null);
   const [pdfResult, setPDFResult] = useState<RenderPDFResult | null>(null);
+  const [pdfSuccess, setPDFSuccess] = useState<{ path: string; jobTitle: string } | null>(null);
   const [busyAction, setBusyAction] = useState('');
   const [applications, setApplications] = useState<Application[]>([]);
   const [resumeVersions, setResumeVersions] = useState<ResumeVersion[]>([]);
@@ -459,20 +466,24 @@ function App() {
   async function generateResume() {
     if (!selectedJobID) return;
     await runAction('generate-resume', async () => {
-      const input: GenerateResumeJSONInput = {
-        job_id: selectedJobID,
-        selected_bullet_ids: bulletDrafts.filter((d) => d.selected_for_resume).map((d) => d.id),
-      };
-      const resume = normalizeResumeJSON((await GenerateResumeJSON(input)) as ResumeJSON | null | undefined);
-      setActiveResume(resume);
-      const validation = normalizeValidationResult((await ValidateResumeJSON(resume, selectedJobID)) as ValidationResult | null | undefined);
-      setActiveValidation(validation);
-      const version = (await SaveResumeVersion({
-        job_id: selectedJobID, resume_json: resume, tex_source: '', pdf_path: '', validation_result: validation,
-      })) as ResumeVersion;
-      setResumeVersions((prev) => [normalizeResumeVersion(version), ...prev]);
-      setPipelineStep('resume');
+      await buildResumeFromBullets(selectedJobID, bulletDrafts);
     });
+  }
+
+  async function buildResumeFromBullets(jobID: number, drafts: TailoredBulletDraft[]) {
+    const input: GenerateResumeJSONInput = {
+      job_id: jobID,
+      selected_bullet_ids: drafts.filter((d) => d.selected_for_resume).map((d) => d.id),
+    };
+    const resume = normalizeResumeJSON((await GenerateResumeJSON(input)) as ResumeJSON | null | undefined);
+    setActiveResume(resume);
+    const validation = normalizeValidationResult((await ValidateResumeJSON(resume, jobID)) as ValidationResult | null | undefined);
+    setActiveValidation(validation);
+    const version = (await SaveResumeVersion({
+      job_id: jobID, resume_json: resume, tex_source: '', pdf_path: '', validation_result: validation,
+    })) as ResumeVersion;
+    setResumeVersions((prev) => [normalizeResumeVersion(version), ...prev]);
+    setPipelineStep('resume');
   }
 
   function startEditingResume() {
@@ -498,69 +509,83 @@ function App() {
   }
 
   function updateEditingField(field: string, value: string) {
-    if (!editingResume) return;
-    setEditingResume({ ...editingResume, [field]: value });
+    setEditingResume((prev) => prev ? { ...prev, [field]: value } : prev);
+  }
+
+  function updateEditingSkillCategory(catIdx: number, category: string) {
+    setEditingResume((prev) => {
+      if (!prev) return prev;
+      const skills = [...prev.skills];
+      skills[catIdx] = { ...skills[catIdx], category };
+      return { ...prev, skills };
+    });
   }
 
   function updateEditingSkill(catIdx: number, itemsStr: string) {
-    if (!editingResume) return;
-    const skills = [...editingResume.skills];
-    skills[catIdx] = { ...skills[catIdx], items: itemsStr.split(',').map(s => s.trim()).filter(Boolean) };
-    setEditingResume({ ...editingResume, skills });
+    setEditingResume((prev) => {
+      if (!prev) return prev;
+      const skills = [...prev.skills];
+      skills[catIdx] = { ...skills[catIdx], items: itemsStr.split(',').map(s => s.trim()).filter(Boolean) };
+      return { ...prev, skills };
+    });
   }
 
   function updateEditingEntry(section: 'experience' | 'projects' | 'education', idx: number, field: string, value: string) {
-    if (!editingResume) return;
-    const entries = [...editingResume[section]];
-    entries[idx] = { ...entries[idx], [field]: value };
-    setEditingResume({ ...editingResume, [section]: entries });
+    setEditingResume((prev) => {
+      if (!prev) return prev;
+      const entries = [...prev[section]];
+      entries[idx] = { ...entries[idx], [field]: value };
+      return { ...prev, [section]: entries };
+    });
   }
 
   function updateEditingBullet(section: 'experience' | 'projects', entryIdx: number, bulletIdx: number, value: string) {
-    if (!editingResume) return;
-    const entries = [...editingResume[section]];
-    const bullets = [...entries[entryIdx].bullets];
-    bullets[bulletIdx] = value;
-    entries[entryIdx] = { ...entries[entryIdx], bullets };
-    setEditingResume({ ...editingResume, [section]: entries });
+    setEditingResume((prev) => {
+      if (!prev) return prev;
+      const entries = [...prev[section]];
+      const bullets = [...entries[entryIdx].bullets];
+      bullets[bulletIdx] = value;
+      entries[entryIdx] = { ...entries[entryIdx], bullets };
+      return { ...prev, [section]: entries };
+    });
   }
 
   function addEditingBullet(section: 'experience' | 'projects', entryIdx: number) {
-    if (!editingResume) return;
-    const entries = [...editingResume[section]];
-    entries[entryIdx] = { ...entries[entryIdx], bullets: [...entries[entryIdx].bullets, ''] };
-    setEditingResume({ ...editingResume, [section]: entries });
+    setEditingResume((prev) => {
+      if (!prev) return prev;
+      const entries = [...prev[section]];
+      entries[entryIdx] = { ...entries[entryIdx], bullets: [...entries[entryIdx].bullets, ''] };
+      return { ...prev, [section]: entries };
+    });
   }
 
   function removeEditingBullet(section: 'experience' | 'projects', entryIdx: number, bulletIdx: number) {
-    if (!editingResume) return;
-    const entries = [...editingResume[section]];
-    const bullets = entries[entryIdx].bullets.filter((_, i) => i !== bulletIdx);
-    entries[entryIdx] = { ...entries[entryIdx], bullets };
-    setEditingResume({ ...editingResume, [section]: entries });
+    setEditingResume((prev) => {
+      if (!prev) return prev;
+      const entries = [...prev[section]];
+      const bullets = entries[entryIdx].bullets.filter((_, i) => i !== bulletIdx);
+      entries[entryIdx] = { ...entries[entryIdx], bullets };
+      return { ...prev, [section]: entries };
+    });
   }
 
   function addEditingSkillCategory() {
-    if (!editingResume) return;
-    setEditingResume({ ...editingResume, skills: [...editingResume.skills, { category: 'New Category', items: [] }] });
+    setEditingResume((prev) => prev ? { ...prev, skills: [...prev.skills, { category: 'New Category', items: [] }] } : prev);
   }
 
   function removeEditingSkillCategory(catIdx: number) {
-    if (!editingResume) return;
-    setEditingResume({ ...editingResume, skills: editingResume.skills.filter((_, i) => i !== catIdx) });
+    setEditingResume((prev) => prev ? { ...prev, skills: prev.skills.filter((_, i) => i !== catIdx) } : prev);
   }
 
   function addEditingEntry(section: 'experience' | 'projects' | 'education') {
-    if (!editingResume) return;
     const newEntry = section === 'education'
       ? { organization: '', degree: '', location: '', end_date: '', start_date: '', bullets: [], claim_ids: [], bullet_ids: [] }
       : { company: '', title: '', location: '', start_date: '', end_date: '', bullets: [''], claim_ids: [], bullet_ids: [], url: '' };
-    setEditingResume({ ...editingResume, [section]: [...editingResume[section], newEntry] });
+    setEditingResume((prev) => prev ? { ...prev, [section]: [...prev[section], newEntry] } : prev);
   }
 
   function removeEditingEntry(section: 'experience' | 'projects' | 'education', idx: number) {
-    if (!editingResume) return;
-    setEditingResume({ ...editingResume, [section]: editingResume[section].filter((_, i) => i !== idx) });
+    setEditingResume((prev) => prev ? { ...prev, [section]: prev[section].filter((_, i) => i !== idx) } : prev);
   }
 
   async function exportResumeJSON() {
@@ -580,7 +605,11 @@ function App() {
     if (!activeResume) return;
     await runAction('render-pdf', async () => {
       const result = (await RenderResumePDF(activeResume)) as RenderPDFResult;
-      if (!result.success && result.error) setError(result.error);
+      if (!result.success && result.error) {
+        setError(result.error);
+      } else if (result.success && result.pdf_path) {
+        setPDFSuccess({ path: result.pdf_path, jobTitle: selectedJob?.title || 'Resume' });
+      }
     });
   }
 
@@ -616,14 +645,13 @@ function App() {
     });
   }
 
-  async function saveJob(event: FormEvent<HTMLFormElement>) {
+  async function saveNewJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    await runAction('save-job', async () => {
-      const saved = selectedJobID
-        ? (await UpdateJobDescription({id: selectedJobID, ...jobDraft})) as JobDescription
-        : (await CreateJobDescription(jobDraft)) as JobDescription;
+    await runAction('save-new-job', async () => {
+      const saved = (await CreateJobDescription(newJobDraft)) as JobDescription;
       setSelectedJobID(saved.id);
       setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
+      setNewJobDraft(emptyJobDraft);
       setJobs((await ListJobDescriptions()) as JobDescription[]);
       await refreshJobContext(saved.id);
       setShowAddJob(false);
@@ -639,11 +667,21 @@ function App() {
   }
 
   function updateJobDraft(nextDraft: JobDraft) {
-    setJobDraft((prev) => {
-      if (nextDraft.raw_text === prev.raw_text) return nextDraft;
-      const inf = inferJobDetailsFromText(nextDraft.raw_text);
-      return {...nextDraft, company: nextDraft.company.trim() ? nextDraft.company : inf.company, title: nextDraft.title.trim() ? nextDraft.title : inf.title};
-    });
+    setJobDraft((prev) => applyJobDraftInference(prev, nextDraft));
+  }
+
+  function updateNewJobDraft(nextDraft: JobDraft) {
+    setNewJobDraft((prev) => applyJobDraftInference(prev, nextDraft));
+  }
+
+  function cancelNewJob() {
+    setNewJobDraft(emptyJobDraft);
+    setShowAddJob(false);
+  }
+
+  function toggleNewJobForm() {
+    setNewJobDraft(emptyJobDraft);
+    setShowAddJob((prev) => !prev);
   }
 
   async function refreshJobContext(jobID = selectedJobID) {
@@ -726,6 +764,52 @@ function App() {
     void runAction('strategy', async () => {
       const s = (await GenerateApplicationStrategy(selectedJobID)) as ApplicationStrategy;
       setApplicationStrategy(normalizeApplicationStrategy(s));
+    });
+  }
+
+  function runAgenticPipeline() {
+    void runAction('agentic-pipeline', async () => {
+      const saved = selectedJobID
+        ? (await UpdateJobDescription({id: selectedJobID, ...jobDraft})) as JobDescription
+        : (await CreateJobDescription(jobDraft)) as JobDescription;
+      const jobID = saved.id;
+      setSelectedJobID(jobID);
+      setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
+      setJobs((await ListJobDescriptions()) as JobDescription[]);
+      setActiveResume(null);
+      setActiveValidation(null);
+
+      const reqs = normalizeRequirements((await ParseJobDescription(jobID)) as JobRequirement[] | null | undefined);
+      setJobRequirements(reqs);
+      const analysis = normalizeJobAnalysis((await AnalyzeJobDescription(jobID)) as JobAnalysis | null | undefined);
+      setJobAnalysis(analysis);
+
+      const matches = normalizeMatches((await BuildJobMatchMap(jobID)) as JobFactMatch[] | null | undefined);
+      setJobMatches(matches);
+      const fit = normalizeFitAnalysis((await GenerateFitAnalysis(jobID)) as JobFitAnalysis | null | undefined);
+      setFitAnalysis(fit);
+      const strategy = normalizeApplicationStrategy((await GenerateApplicationStrategy(jobID)) as ApplicationStrategy | null | undefined);
+      setApplicationStrategy(strategy);
+
+      let drafts = normalizeDrafts((await GenerateTailoredBulletDrafts(jobID)) as TailoredBulletDraft[] | null | undefined);
+      setBulletDrafts(drafts);
+      const events = normalizeBulletEvents((await ListBulletGenerationEvents(jobID)) as BulletGenerationEvent[] | null | undefined);
+      setBulletEvents(events);
+
+      if (pipelineOptions.autoSelectBullets) {
+        drafts = normalizeDrafts((await AutoSelectResumeBullets(jobID)) as TailoredBulletDraft[] | null | undefined);
+        setBulletDrafts(drafts);
+      }
+
+      if (pipelineOptions.buildResume) {
+        if (!drafts.some((draft) => draft.selected_for_resume)) {
+          setPipelineStep('bullets');
+          throw new Error('No bullets are selected. Enable auto-select or choose bullets before building the resume.');
+        }
+        await buildResumeFromBullets(jobID, drafts);
+      } else {
+        setPipelineStep('bullets');
+      }
     });
   }
 
@@ -874,20 +958,20 @@ function App() {
         <div className="flex-1 overflow-y-auto px-3 py-3">
           <div className="mb-3 flex items-center justify-between px-1">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Jobs</span>
-            <button className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600" onClick={() => setShowAddJob(!showAddJob)}>
+            <button className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600" onClick={toggleNewJobForm}>
               <Plus size={14} />
             </button>
           </div>
 
           {showAddJob && (
             <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-              <form onSubmit={saveJob} className="space-y-2">
-                <TextInput label="Company" value={jobDraft.company} onChange={(v) => updateJobDraft({...jobDraft, company: v})} />
-                <TextInput label="Role" value={jobDraft.title} onChange={(v) => updateJobDraft({...jobDraft, title: v})} />
-                <TextArea label="Job description" rows={6} value={jobDraft.raw_text} onChange={(v) => updateJobDraft({...jobDraft, raw_text: v})} />
+              <form onSubmit={saveNewJob} className="space-y-2">
+                <TextInput label="Company" value={newJobDraft.company} onChange={(v) => updateNewJobDraft({...newJobDraft, company: v})} />
+                <TextInput label="Role" value={newJobDraft.title} onChange={(v) => updateNewJobDraft({...newJobDraft, title: v})} />
+                <TextArea label="Job description" rows={6} value={newJobDraft.raw_text} onChange={(v) => updateNewJobDraft({...newJobDraft, raw_text: v})} />
                 <div className="flex gap-2">
                   <button type="submit" className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800">Save</button>
-                  <button type="button" className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100" onClick={() => setShowAddJob(false)}>Cancel</button>
+                  <button type="button" className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100" onClick={cancelNewJob}>Cancel</button>
                 </div>
               </form>
             </div>
@@ -963,6 +1047,23 @@ function App() {
           </div>
         )}
 
+        {pdfSuccess && (
+          <div className="mx-6 mt-4 flex items-center gap-3 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900">
+            <FileText className="mt-0.5 shrink-0" size={16} />
+            <div className="flex-1 min-w-0">
+              <p className="font-medium">PDF generated: {pdfSuccess.jobTitle}</p>
+              <p className="mt-1 text-xs text-green-700 truncate">{pdfSuccess.path}</p>
+            </div>
+            <button
+              onClick={async () => { await OpenFolder(pdfSuccess.path); setPDFSuccess(null); }}
+              className="shrink-0 rounded-md border border-green-300 bg-white px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-50"
+            >
+              <Folder className="inline mr-1" size={12} /> Open Folder
+            </button>
+            <button onClick={() => setPDFSuccess(null)} className="shrink-0 text-green-600 hover:text-green-800"><X size={14} /></button>
+          </div>
+        )}
+
         {activeWorkItems.length > 0 && (
           <WorkBanner busyAction={busyAction} items={activeWorkItems} onStopAgent={() => {}} />
         )}
@@ -1013,13 +1114,26 @@ function App() {
                     </form>
                   </Panel>
 
-                  <div className="flex flex-wrap gap-2">
-                    <PipelineButton label="Extract" onClick={handleParseJD} tone="primary" />
-                    <PipelineButton label="Match" onClick={handleMatch} />
-                    <PipelineButton label="Fit" onClick={handleFit} />
-                    <PipelineButton label="Strategy" onClick={handleStrategy} />
-                    <PipelineButton label="Bullets" onClick={handleBullets} />
-                  </div>
+                  <Panel icon={<Bot size={16} />} title="Agentic JD Pipeline" compact summary="Save, analyze, match evidence, score fit, draft strategy, generate bullets, and optionally assemble the resume in one run.">
+                    <div className="space-y-3">
+                      <div className="grid gap-2 md:grid-cols-2">
+                        <CheckInput
+                          checked={pipelineOptions.autoSelectBullets}
+                          label="Auto-select resume bullets"
+                          onChange={(v) => setPipelineOptions((prev) => ({...prev, autoSelectBullets: v}))}
+                        />
+                        <CheckInput
+                          checked={pipelineOptions.buildResume}
+                          label="Build resume after bullets"
+                          onChange={(v) => setPipelineOptions((prev) => ({...prev, buildResume: v}))}
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <PipelineButton label="Run Pipeline" onClick={runAgenticPipeline} tone="primary" />
+                        <span className="text-xs text-slate-400">Stops at bullet review if resume build is off or no bullets are selected.</span>
+                      </div>
+                    </div>
+                  </Panel>
 
                   {jobAnalysis && (
                     <CollapsibleSection label={`Analysis — ${jobAnalysis.role_archetype}`}>
@@ -1207,7 +1321,7 @@ function App() {
                                 </div>
                                 {editingResume.skills.map((s, i) => (
                                   <div key={i} className="mt-1 flex items-center gap-1">
-                                    <input className="w-24 rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold" value={s.category} onChange={e => updateEditingSkill(i, e.target.value.split(',').map(v => v.trim()).join(', '))} placeholder="Category" />
+                                    <input className="w-24 rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold" value={s.category} onChange={e => updateEditingSkillCategory(i, e.target.value)} placeholder="Category" />
                                     <input className="flex-1 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={s.items.join(', ')} onChange={e => updateEditingSkill(i, e.target.value)} placeholder="item1, item2, ..." />
                                     <button className="text-[10px] text-red-400 hover:text-red-600" onClick={() => removeEditingSkillCategory(i)}>✕</button>
                                   </div>
@@ -1555,7 +1669,7 @@ function App() {
               <Panel icon={<Wrench size={14} />} title="Tools" compact>
                 <div className="mt-2 flex flex-wrap gap-2">
                   <SecondaryButton label="Install Tectonic" onClick={async () => { await InstallTectonic(); await load(); }} />
-                  <SecondaryButton label="Render test PDF" onClick={async () => { const r = (await RenderSamplePDF()) as RenderPDFResult; setPDFResult(r); }} />
+                  <SecondaryButton label="Render test PDF" onClick={async () => { const r = (await RenderSamplePDF()) as RenderPDFResult; setPDFResult(r); if (r.success && r.pdf_path) setPDFSuccess({ path: r.pdf_path, jobTitle: 'Sample PDF' }); }} />
                 </div>
                 {pdfResult && <p className={`mt-1 text-xs ${pdfResult.success ? 'text-green-600' : 'text-red-600'}`}>{pdfResult.success ? 'PDF rendered' : pdfResult.error}</p>}
               </Panel>
@@ -1826,36 +1940,94 @@ function workItemForAction(name: string) {
   return {key: name, title: name.replace(/-/g, ' '), detail: 'Running', progress: 50};
 }
 
+function applyJobDraftInference(prev: JobDraft, nextDraft: JobDraft) {
+  if (nextDraft.raw_text === prev.raw_text) return nextDraft;
+  const inf = inferJobDetailsFromText(nextDraft.raw_text);
+  return {...nextDraft, company: nextDraft.company.trim() ? nextDraft.company : inf.company, title: nextDraft.title.trim() ? nextDraft.title : inf.title};
+}
+
 function inferJobDetailsFromText(text: string) {
   const lines = text.split('\n').map(cleanJobHeaderLine).filter((line) => line && !isJobHeaderNoise(line));
-  const aboutIndex = lines.findIndex((line) => line.toLowerCase() === 'about the job');
-  const bodyTitle = aboutIndex >= 0 ? lines.slice(aboutIndex + 1).find(isLikelyJobTitle) : '';
-  const company = lines.find((line) => !isLikelyJobTitle(line) && !isLocationOrMetaLine(line)) || '';
-  const title = bodyTitle || lines.find((line) => isLikelyJobTitle(line)) || '';
-  return {company: company.slice(0, 60), title: title.slice(0, 80)};
+  const explicitTitle = firstRegexGroup(text, /(?:job\s*title|role|position)\s*[:\-]\s*([^\n]+)/i);
+  const explicitCompany = firstRegexGroup(text, /(?:company|employer|organisation|organization)\s*[:\-]\s*([^\n]+)/i);
+  const headerPair = inferHeaderPair(lines);
+  const title = cleanInferredValue(explicitTitle || headerPair.title || bestJobTitleLine(lines), 80);
+  const company = cleanInferredValue(explicitCompany || headerPair.company || bestCompanyLine(lines, title), 60);
+  return {company, title};
 }
 
 function cleanJobHeaderLine(line: string) {
-  return line.replace(/\s+/g, ' ').replace(/\blogo\b/gi, '').trim();
+  return line.replace(/\s+/g, ' ').replace(/\blogo\b/gi, '').replace(/^[•\-*\s]+/, '').trim();
 }
 
 function isJobHeaderNoise(line: string) {
   const lower = line.toLowerCase();
   return !line || lower === 'logo' || lower.includes('premium') || lower.includes('meet the hiring team') ||
     lower.includes('job poster') || lower.includes('promoted by') || lower.includes('actively reviewing') ||
-    lower.includes('how your profile') || /^\d+(st|nd|rd|th)$/i.test(line);
+    lower.includes('how your profile') || lower === 'about the job' || lower === 'job description' ||
+    lower === 'about us' || lower === 'overview' || /^\d+(st|nd|rd|th)$/i.test(line);
 }
 
 function isLocationOrMetaLine(line: string) {
   const lower = line.toLowerCase();
-  return lower.includes('applicant') || lower.includes('ago') || lower.includes('hybrid') || lower.includes('remote') ||
-    lower.includes('australia') || lower.includes('victoria') || lower.includes('melbourne') || line.includes('·');
+  return lower.includes('applicant') || lower.includes('ago') || lower.includes('reposted') || lower.includes('promoted') ||
+    lower.includes('full-time') || lower.includes('part-time') || lower.includes('contract') || lower.includes('internship') ||
+    lower.includes('hybrid') || lower.includes('remote') || lower.includes('onsite') || lower.includes('on-site') ||
+    lower.includes('australia') || lower.includes('victoria') || lower.includes('melbourne') || lower.includes('sydney') ||
+    lower.includes('brisbane') || lower.includes('perth') || lower.includes('canberra') || lower.includes('new south wales') ||
+    lower.includes('linkedin') || lower.includes('easy apply') || /^\d+\s+applicants?/i.test(line);
 }
 
 function isLikelyJobTitle(line: string) {
   const lower = line.toLowerCase();
   if (isJobHeaderNoise(line) || isLocationOrMetaLine(line)) return false;
-  return ['engineer', 'developer', 'manager', 'designer', 'analyst', 'consultant', 'architect', 'lead', 'specialist'].some((word) => lower.includes(word));
+  return ['engineer', 'developer', 'manager', 'designer', 'analyst', 'consultant', 'architect', 'lead', 'specialist', 'coordinator', 'administrator', 'officer', 'associate', 'director', 'intern', 'graduate', 'product', 'data', 'software', 'frontend', 'backend', 'full stack', 'devops', 'security', 'qa'].some((word) => lower.includes(word));
+}
+
+function firstRegexGroup(text: string, pattern: RegExp) {
+  return cleanJobHeaderLine(text.match(pattern)?.[1] ?? '');
+}
+
+function inferHeaderPair(lines: string[]) {
+  for (const line of lines.slice(0, 12)) {
+    const parts = line.split(/[·|]/).map(cleanJobHeaderLine).filter(Boolean);
+    if (parts.length < 2) continue;
+    const titlePart = parts.find(isLikelyJobTitle) || '';
+    const companyPart = parts.find((part) => part !== titlePart && isLikelyCompanyLine(part)) || '';
+    if (titlePart || companyPart) return {title: titlePart, company: companyPart};
+  }
+  return {title: '', company: ''};
+}
+
+function bestJobTitleLine(lines: string[]) {
+  return lines
+    .map((line, index) => ({line, score: jobTitleScore(line, index)}))
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score)[0]?.line || '';
+}
+
+function jobTitleScore(line: string, index: number) {
+  if (!isLikelyJobTitle(line)) return 0;
+  const words = line.split(/\s+/).length;
+  let score = Math.max(0, 30 - index * 2);
+  if (words >= 2 && words <= 8) score += 20;
+  if (/\b(senior|junior|lead|principal|staff|graduate|intern)\b/i.test(line)) score += 8;
+  if (line.includes(':') || line.length > 90) score -= 15;
+  return score;
+}
+
+function bestCompanyLine(lines: string[], title: string) {
+  return lines.slice(0, 12).find((line) => line !== title && isLikelyCompanyLine(line)) || '';
+}
+
+function isLikelyCompanyLine(line: string) {
+  if (!line || isJobHeaderNoise(line) || isLocationOrMetaLine(line) || isLikelyJobTitle(line)) return false;
+  const words = line.split(/\s+/).length;
+  return words <= 6 && !/[.!?]$/.test(line) && !/^\d/.test(line);
+}
+
+function cleanInferredValue(value: string, maxLength: number) {
+  return cleanJobHeaderLine(value).replace(/\s+[·|].*$/, '').slice(0, maxLength);
 }
 
 function defaultSourceTrust(sourceType: string) {

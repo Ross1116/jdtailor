@@ -47,6 +47,7 @@ import {
   ListEvidenceFacts as WailsListEvidenceFacts,
   ListSourceSections as WailsListSourceSections,
   ListTailoredBulletDrafts as WailsListTailoredBulletDrafts,
+  OpenFolder as WailsOpenFolder,
   ParseJobDescription as WailsParseJobDescription,
   RenderSamplePDF as WailsRenderSamplePDF,
   SaveAPIKey as WailsSaveAPIKey,
@@ -682,6 +683,13 @@ export async function RenderSamplePDF() {
     pdf_path: 'mock://generated/sample-pdf/sample.pdf',
     error: '',
   };
+}
+
+export async function OpenFolder(path: string) {
+  if (hasWailsBackend()) {
+    return WailsOpenFolder(path);
+  }
+  mockEvents.unshift(mockEvent('info', `mock open folder: ${path}`));
 }
 
 export async function GetRecentEvents() {
