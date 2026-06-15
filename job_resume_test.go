@@ -12,6 +12,7 @@ func TestLatexResumeTemplateParsesWithLiteralLatexBraces(t *testing.T) {
 		"join": func(items []string, sep string) string {
 			return strings.Join(items, sep)
 		},
+		"tex": sanitizeLaTeX,
 	}
 	tmpl, err := template.New("resume").Delims("[[", "]]").Funcs(funcs).Parse(latexResumeTemplate())
 	if err != nil {

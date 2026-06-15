@@ -111,7 +111,7 @@ func NewStore(root string) (*Store, error) {
 
 func sqliteDSN(path string) string {
 	query := url.Values{}
-	query.Add("_pragma", "busy_timeout=10000")
+	query.Add("_pragma", "busy_timeout(10000)")
 	query.Add("_pragma", "journal_mode(WAL)")
 	query.Add("_pragma", "foreign_keys(ON)")
 	return path + "?" + query.Encode()
@@ -219,7 +219,16 @@ func (s *Store) logEventWith(exec sqlExecutor, level string, message string) err
 		message = "event"
 	}
 
-	s.Logger().Info(message, "level", level)
+	switch level {
+	case "debug":
+		s.Logger().Debug(message)
+	case "warning", "warn":
+		s.Logger().Warn(message)
+	case "error":
+		s.Logger().Error(message)
+	default:
+		s.Logger().Info(message)
+	}
 	_, err := exec.ExecContext(
 		context.Background(),
 		`INSERT INTO app_events (level, message, created_at) VALUES (?, ?, ?)`,

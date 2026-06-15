@@ -10,6 +10,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 const (
@@ -700,7 +703,7 @@ func claimTextFromFact(fact factPromptContext) string {
 	outcome := parts["outcome"]
 	segments := []string{}
 	if action != "" && artifact != "" {
-		segments = append(segments, strings.Title(strings.Split(action, ",")[0])+" "+artifact)
+		segments = append(segments, cases.Title(language.Und).String(strings.Split(action, ",")[0])+" "+artifact)
 	} else if artifact != "" {
 		segments = append(segments, artifact)
 	} else {
@@ -1126,7 +1129,7 @@ func claimContextsFromFact(fact factPromptContext) []string {
 func defaultBlockedContexts(values []string, claimText string) []string {
 	contexts := append([]string{}, values...)
 	lower := strings.ToLower(claimText)
-	for _, pair := range map[string]string{
+	for key, value := range map[string]string{
 		"machine learning":     "ML engineering unless evidenced",
 		"model training":       "model training unless evidenced",
 		"kubernetes":           "Kubernetes ownership unless evidenced",
@@ -1139,8 +1142,8 @@ func defaultBlockedContexts(values []string, claimText string) []string {
 		"production at scale":  "large-scale production scope unless evidenced",
 		"millions":             "large-scale metric unless evidenced",
 	} {
-		if strings.Contains(lower, pair) {
-			contexts = append(contexts, pair)
+		if strings.Contains(lower, key) {
+			contexts = append(contexts, value)
 		}
 	}
 	return normalizeStringList(contexts)

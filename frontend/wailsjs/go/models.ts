@@ -1084,6 +1084,7 @@ export namespace main {
 	}
 	export class ResumeEntry {
 	    company: string;
+	    url?: string;
 	    title: string;
 	    location: string;
 	    start_date: string;
@@ -1099,6 +1100,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.company = source["company"];
+	        this.url = source["url"];
 	        this.title = source["title"];
 	        this.location = source["location"];
 	        this.start_date = source["start_date"];

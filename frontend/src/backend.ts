@@ -457,10 +457,13 @@ export type ResumeJSON = {
   contact: ResumeContact;
   headline: string;
   summary: string;
+  contact_line: string;
+  skills_line: string;
   skills: ResumeSkill[];
   experience: ResumeEntry[];
   projects: ResumeEntry[];
   education: ResumeEducation[];
+  tex_source: string;
   generated_at: string;
 };
 
@@ -2974,10 +2977,13 @@ export async function GenerateResumeJSON(input: GenerateResumeJSONInput) {
     contact: { full_name: 'Roshan Ravikumar', email: '', phone: '', location: 'Melbourne, VIC', linkedin: '', github: '' },
     headline: title,
     summary: 'Candidate — tailored for ' + title + '.',
+    contact_line: '',
+    skills_line: '',
     skills: [],
     experience: [],
     projects: [],
     education: [],
+    tex_source: '',
     generated_at: now(),
   };
   return resume;

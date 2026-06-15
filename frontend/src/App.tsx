@@ -1209,12 +1209,13 @@ function App() {
                                 </div>
                                 {editingResume.experience.map((e, i) => (
                                   <div key={i} className="mt-2 rounded border border-slate-100 p-2 space-y-1">
-                                    <div className="flex items-center gap-1">
-                                      <input className="flex-1 rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold" value={e.title} onChange={ev => updateEditingEntry('experience', i, 'title', ev.target.value)} placeholder="Title" />
-                                      <input className="w-24 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.company} onChange={ev => updateEditingEntry('experience', i, 'company', ev.target.value)} placeholder="Company" />
-                                      <button className="text-[10px] text-red-400 hover:text-red-600" onClick={() => removeEditingEntry('experience', i)}>✕</button>
-                                    </div>
-                                    <input className="w-full rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.location} onChange={ev => updateEditingEntry('experience', i, 'location', ev.target.value)} placeholder="Location" />
+<div className="flex items-center gap-1">
+                                       <input className="flex-1 rounded border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold" value={e.title} onChange={ev => updateEditingEntry('experience', i, 'title', ev.target.value)} placeholder="Title" />
+                                       <input className="w-24 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.company} onChange={ev => updateEditingEntry('experience', i, 'company', ev.target.value)} placeholder="Company" />
+                                       <input className="w-20 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.url} onChange={ev => updateEditingEntry('experience', i, 'url', ev.target.value)} placeholder="Company URL" />
+                                       <button className="text-[10px] text-red-400 hover:text-red-600" onClick={() => removeEditingEntry('experience', i)}>✕</button>
+                                     </div>
+                                     <input className="w-full rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.location} onChange={ev => updateEditingEntry('experience', i, 'location', ev.target.value)} placeholder="Location" />
                                     <div className="flex gap-1">
                                       <input className="w-20 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.start_date} onChange={ev => updateEditingEntry('experience', i, 'start_date', ev.target.value)} placeholder="Start" />
                                       <input className="w-20 rounded border border-slate-200 px-1.5 py-0.5 text-[10px]" value={e.end_date} onChange={ev => updateEditingEntry('experience', i, 'end_date', ev.target.value)} placeholder="End" />
@@ -1853,10 +1854,13 @@ function normalizeResumeJSON(v: ResumeJSON | null | undefined): ResumeJSON {
     },
     headline: v?.headline ?? '',
     summary: v?.summary ?? '',
+    contact_line: v?.contact_line ?? '',
+    skills_line: v?.skills_line ?? '',
     skills: (v?.skills ?? []).map((s) => ({...s, items: s.items ?? []})),
     experience: (v?.experience ?? []).map((e) => ({...e, url: e.url ?? '', bullets: e.bullets ?? [], claim_ids: e.claim_ids ?? [], bullet_ids: e.bullet_ids ?? []})),
     projects: (v?.projects ?? []).map((e) => ({...e, url: e.url ?? '', bullets: e.bullets ?? [], claim_ids: e.claim_ids ?? [], bullet_ids: e.bullet_ids ?? []})),
     education: v?.education ?? [],
+    tex_source: v?.tex_source ?? '',
     generated_at: v?.generated_at ?? '',
   };
 }

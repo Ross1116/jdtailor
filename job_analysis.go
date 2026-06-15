@@ -104,6 +104,9 @@ func (s *Store) GetJobAnalysis(jobID int64) (JobAnalysis, error) {
 	}
 	defer rows.Close()
 	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return JobAnalysis{}, err
+		}
 		return JobAnalysis{}, sql.ErrNoRows
 	}
 	return scanJobAnalysisRow(rows)
@@ -140,6 +143,9 @@ func (s *Store) GetFitAnalysis(jobID int64) (JobFitAnalysis, error) {
 	}
 	defer rows.Close()
 	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return JobFitAnalysis{}, err
+		}
 		return JobFitAnalysis{}, sql.ErrNoRows
 	}
 	return scanFitAnalysisRow(rows)
@@ -188,6 +194,9 @@ func (s *Store) GetApplicationStrategy(jobID int64) (ApplicationStrategy, error)
 	}
 	defer rows.Close()
 	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return ApplicationStrategy{}, err
+		}
 		return ApplicationStrategy{}, sql.ErrNoRows
 	}
 	return scanApplicationStrategyRow(rows)
