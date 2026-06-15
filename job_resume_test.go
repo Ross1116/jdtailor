@@ -45,12 +45,17 @@ func TestLatexResumeTemplateParsesWithLiteralLatexBraces(t *testing.T) {
 }
 
 func TestValidateResumeJSONDetectsMissingHeadline(t *testing.T) {
-	// Test title issues check logic directly
-	result := ValidationResult{Passed: true}
-	if strings.TrimSpace("") == "" {
-		result.TitleIssues = append(result.TitleIssues, "headline is empty")
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
 	}
-	if len(result.TitleIssues) == 0 || !strings.Contains(result.TitleIssues[0], "headline is empty") {
+	defer store.Close()
+
+	result, err := store.ValidateResumeJSON(ResumeJSON{Headline: ""}, 1)
+	if err != nil {
+		t.Fatalf("ValidateResumeJSON() error = %v", err)
+	}
+	if !listContains(result.TitleIssues, "headline is empty") {
 		t.Fatalf("expected headline empty error, got: %+v", result.TitleIssues)
 	}
 }

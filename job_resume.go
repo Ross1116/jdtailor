@@ -138,12 +138,12 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 
 	sections, err := s.ListSourceSections(0)
 	if err != nil {
-		sections = nil
+		return ResumeJSON{}, fmt.Errorf("list source sections: %w", err)
 	}
 
 	approvedFacts, err := s.ListEvidenceFacts("approved")
 	if err != nil {
-		approvedFacts = nil
+		return ResumeJSON{}, fmt.Errorf("list approved evidence facts: %w", err)
 	}
 
 	var selectedDrafts []TailoredBulletDraft
@@ -1274,19 +1274,19 @@ func normalizeAppStatus(status string) string {
 func buildContactLine(contact CandidateContact) string {
 	parts := []string{}
 	if contact.Phone != "" {
-		parts = append(parts, "\\href{tel:"+contact.Phone+"}{"+contact.Phone+"}")
+		parts = append(parts, "\\href{tel:"+contact.Phone+"}{"+sanitizeLaTeX(contact.Phone)+"}")
 	}
 	if contact.Email != "" {
-		parts = append(parts, "\\href{mailto:"+contact.Email+"}{"+contact.Email+"}")
+		parts = append(parts, "\\href{mailto:"+contact.Email+"}{"+sanitizeLaTeX(contact.Email)+"}")
 	}
 	if contact.LinkedIn != "" {
-		parts = append(parts, "\\href{https://"+strings.TrimPrefix(contact.LinkedIn, "https://")+"}{"+contact.LinkedIn+"}")
+		parts = append(parts, "\\href{https://"+strings.TrimPrefix(contact.LinkedIn, "https://")+"}{"+sanitizeLaTeX(contact.LinkedIn)+"}")
 	}
 	if contact.GitHub != "" {
-		parts = append(parts, "\\href{https://"+strings.TrimPrefix(contact.GitHub, "https://")+"}{"+contact.GitHub+"}")
+		parts = append(parts, "\\href{https://"+strings.TrimPrefix(contact.GitHub, "https://")+"}{"+sanitizeLaTeX(contact.GitHub)+"}")
 	}
 	if contact.Location != "" {
-		parts = append(parts, contact.Location)
+		parts = append(parts, sanitizeLaTeX(contact.Location))
 	}
 	return strings.Join(parts, " $|$ ")
 }

@@ -902,24 +902,35 @@ function App() {
                 const prog = getJobProgress(job.id);
                 const isSelected = job.id === selectedJobID;
                 return (
-                  <button
+                  <div
                     key={job.id}
                     className={`w-full rounded-lg p-2.5 text-left transition-colors ${isSelected ? 'bg-slate-100 ring-1 ring-slate-300' : 'hover:bg-slate-50'}`}
-                    onClick={() => selectJob(job)}
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <p className="truncate text-xs font-semibold text-slate-950">{job.title || 'Untitled'}</p>
-                        <p className="truncate text-xs text-slate-500">{job.company || 'No company'}</p>
-                      </div>
-                      <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${app ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
-                        {app ? APP_STATUS_LABELS[app.status] || app.status : `${prog.pct}%`}
-                      </span>
+                    <div className="flex items-start gap-2">
+                      <button type="button" className="min-w-0 flex-1 text-left" onClick={() => selectJob(job)}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-semibold text-slate-950">{job.title || 'Untitled'}</p>
+                            <p className="truncate text-xs text-slate-500">{job.company || 'No company'}</p>
+                          </div>
+                          <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${app ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
+                            {app ? APP_STATUS_LABELS[app.status] || app.status : `${prog.pct}%`}
+                          </span>
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        className="shrink-0 rounded-md p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
+                        title="Delete job"
+                        onClick={(event) => { event.stopPropagation(); deleteJob(job.id); }}
+                      >
+                        <Trash2 size={13} />
+                      </button>
                     </div>
                     <div className="mt-2 h-1.5 w-full rounded-full bg-slate-200">
                       <div className="h-1.5 rounded-full bg-slate-600 transition-all" style={{width: `${prog.pct}%`}} />
                     </div>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -1816,8 +1827,35 @@ function workItemForAction(name: string) {
 }
 
 function inferJobDetailsFromText(text: string) {
-  const lines = text.split('\n').filter((l) => l.trim());
-  return {company: lines[0]?.trim()?.slice(0, 60) || '', title: lines[1]?.trim()?.slice(0, 80) || ''};
+  const lines = text.split('\n').map(cleanJobHeaderLine).filter((line) => line && !isJobHeaderNoise(line));
+  const aboutIndex = lines.findIndex((line) => line.toLowerCase() === 'about the job');
+  const bodyTitle = aboutIndex >= 0 ? lines.slice(aboutIndex + 1).find(isLikelyJobTitle) : '';
+  const company = lines.find((line) => !isLikelyJobTitle(line) && !isLocationOrMetaLine(line)) || '';
+  const title = bodyTitle || lines.find((line) => isLikelyJobTitle(line)) || '';
+  return {company: company.slice(0, 60), title: title.slice(0, 80)};
+}
+
+function cleanJobHeaderLine(line: string) {
+  return line.replace(/\s+/g, ' ').replace(/\blogo\b/gi, '').trim();
+}
+
+function isJobHeaderNoise(line: string) {
+  const lower = line.toLowerCase();
+  return !line || lower === 'logo' || lower.includes('premium') || lower.includes('meet the hiring team') ||
+    lower.includes('job poster') || lower.includes('promoted by') || lower.includes('actively reviewing') ||
+    lower.includes('how your profile') || /^\d+(st|nd|rd|th)$/i.test(line);
+}
+
+function isLocationOrMetaLine(line: string) {
+  const lower = line.toLowerCase();
+  return lower.includes('applicant') || lower.includes('ago') || lower.includes('hybrid') || lower.includes('remote') ||
+    lower.includes('australia') || lower.includes('victoria') || lower.includes('melbourne') || line.includes('·');
+}
+
+function isLikelyJobTitle(line: string) {
+  const lower = line.toLowerCase();
+  if (isJobHeaderNoise(line) || isLocationOrMetaLine(line)) return false;
+  return ['engineer', 'developer', 'manager', 'designer', 'analyst', 'consultant', 'architect', 'lead', 'specialist'].some((word) => lower.includes(word));
 }
 
 function defaultSourceTrust(sourceType: string) {

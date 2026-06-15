@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -3172,7 +3173,7 @@ type inferredJobDetails struct {
 }
 
 func inferJobDetails(raw string) inferredJobDetails {
-	lines := meaningfulJobLines(raw, 12)
+	lines := meaningfulJobLines(raw, 30)
 	details := inferredJobDetails{}
 	for _, line := range lines {
 		cleaned := cleanJobDetailLine(line)
@@ -3189,6 +3190,11 @@ func inferJobDetails(raw string) inferredJobDetails {
 		}
 	}
 	if details.Title == "" {
+		if title := titleAfterAboutJob(lines); title != "" {
+			details.Title = title
+		}
+	}
+	if details.Title == "" {
 		for _, line := range lines {
 			cleaned := cleanJobDetailLine(line)
 			if looksLikeRoleTitle(cleaned) {
@@ -3201,7 +3207,7 @@ func inferJobDetails(raw string) inferredJobDetails {
 		for _, line := range lines {
 			cleaned := cleanJobDetailLine(line)
 			lower := strings.ToLower(cleaned)
-			if cleaned == "" || cleaned == details.Title || looksLikeRoleTitle(cleaned) || strings.Contains(lower, "responsibilities") || strings.Contains(lower, "requirements") || strings.Contains(lower, "about the role") {
+			if cleaned == "" || cleaned == details.Title || looksLikeRoleTitle(cleaned) || isJobDetailNoise(cleaned) || strings.Contains(lower, "responsibilities") || strings.Contains(lower, "requirements") || strings.Contains(lower, "about the role") {
 				continue
 			}
 			if len(strings.Fields(cleaned)) <= 5 {
@@ -3224,7 +3230,7 @@ func meaningfulJobLines(raw string, limit int) []string {
 	lines := []string{}
 	for _, line := range strings.Split(raw, "\n") {
 		cleaned := cleanJobDetailLine(line)
-		if cleaned == "" || strings.HasPrefix(strings.ToLower(cleaned), "http") {
+		if cleaned == "" || strings.HasPrefix(strings.ToLower(cleaned), "http") || isDiscardableJobLine(cleaned) {
 			continue
 		}
 		lines = append(lines, cleaned)
@@ -3241,7 +3247,53 @@ func cleanJobDetailLine(line string) string {
 	line = strings.TrimPrefix(line, "\u2022")
 	line = strings.TrimPrefix(line, "•")
 	line = strings.TrimSpace(strings.Trim(line, "#*_`"))
+	line = regexp.MustCompile(`(?i)\blogo\b`).ReplaceAllString(line, "")
 	return strings.Join(strings.Fields(line), " ")
+}
+
+func titleAfterAboutJob(lines []string) string {
+	for i, line := range lines {
+		if !strings.EqualFold(line, "About the job") {
+			continue
+		}
+		for _, candidate := range lines[i+1:] {
+			if looksLikeRoleTitle(candidate) {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func isJobDetailNoise(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if isDiscardableJobLine(line) {
+		return true
+	}
+	noiseFragments := []string{
+		"premium", "retry premium", "meet the hiring team", "job poster", "promoted by",
+		"actively reviewing", "how your profile", "over 100 applicants", "applicants",
+		"days ago", "hours ago", "reposted", "visa sponsorship", "unfortunately",
+	}
+	for _, fragment := range noiseFragments {
+		if strings.Contains(lower, fragment) {
+			return true
+		}
+	}
+	return regexp.MustCompile(`(?i)^\d+(st|nd|rd|th)$`).MatchString(line)
+}
+
+func isDiscardableJobLine(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" || lower == "logo" {
+		return true
+	}
+	for _, fragment := range []string{"premium", "retry premium", "meet the hiring team", "job poster", "promoted by", "actively reviewing", "how your profile", "visa sponsorship", "unfortunately"} {
+		if strings.Contains(lower, fragment) {
+			return true
+		}
+	}
+	return regexp.MustCompile(`(?i)^\d+(st|nd|rd|th)$`).MatchString(line)
 }
 
 func looksLikeRoleTitle(line string) bool {

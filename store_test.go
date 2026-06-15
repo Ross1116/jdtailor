@@ -2326,6 +2326,44 @@ func TestCreateJobDescriptionRepairsPastedLinkedInMojibake(t *testing.T) {
 	}
 }
 
+func TestCreateJobDescriptionIgnoresLinkedInLogoNoise(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{RawText: `TechShack logo
+TechShack
+Software Engineer
+Melbourne, Victoria, Australia · 2 days ago · Over 100 applicants
+
+Promoted by hirer · Actively reviewing applicants
+How your profile and resume fit this job
+
+Meet the hiring team
+Holly Timings-Thompson
+3rd
+Recruitment Consultant
+Job poster
+About the job
+
+Golang Engineer - Cybersecurity Platform
+
+Melbourne, Australia (Hybrid)
+
+We're hiring a Mid to Senior Golang Engineer to join a growing cybersecurity company building high-scale intelligence and monitoring platforms.`})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	if job.Company != "TechShack" || job.Title != "Golang Engineer - Cybersecurity Platform" {
+		t.Fatalf("job details = %q/%q, want TechShack/Golang Engineer - Cybersecurity Platform", job.Company, job.Title)
+	}
+	if strings.Contains(strings.ToLower(job.Company), "logo") || strings.Contains(strings.ToLower(job.Title), "logo") {
+		t.Fatalf("job details contain logo noise: %q/%q", job.Company, job.Title)
+	}
+}
+
 func TestParseJobDescriptionBackfillsExplicitRequirements(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "sk-test")
 	store, err := NewStore(t.TempDir())
