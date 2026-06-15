@@ -1,0 +1,2020 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"text/template"
+	"time"
+)
+
+type ResumeJSON struct {
+	Headline    string            `json:"headline"`
+	Summary     string            `json:"summary"`
+	ContactLine string            `json:"contact_line"`
+	SkillsLine  string            `json:"skills_line"`
+	Skills      []ResumeSkill     `json:"skills"`
+	Experience  []ResumeEntry     `json:"experience"`
+	Projects    []ResumeEntry     `json:"projects"`
+	Education   []ResumeEducation `json:"education"`
+	TexSource   string            `json:"tex_source"`
+	GeneratedAt string            `json:"generated_at"`
+}
+
+type ResumeSkill struct {
+	Category string   `json:"category"`
+	Items    []string `json:"items"`
+}
+
+type ResumeEntry struct {
+	Company   string   `json:"company"`
+	URL       string   `json:"url,omitempty"`
+	Title     string   `json:"title"`
+	Location  string   `json:"location"`
+	StartDate string   `json:"start_date"`
+	EndDate   string   `json:"end_date"`
+	Bullets   []string `json:"bullets"`
+	ClaimIDs  []int64  `json:"claim_ids"`
+	BulletIDs []int64  `json:"bullet_ids"`
+}
+
+type ResumeEducation struct {
+	Organization string `json:"organization"`
+	Degree       string `json:"degree"`
+	Location     string `json:"location"`
+	EndDate      string `json:"end_date"`
+}
+
+type ValidationResult struct {
+	Passed           bool              `json:"passed"`
+	Errors           []string          `json:"errors"`
+	Warnings         []string          `json:"warnings"`
+	FactualityChecks []FactualityCheck `json:"factuality_checks"`
+	StyleIssues      []string          `json:"style_issues"`
+	ImmutableIssues  []string          `json:"immutable_issues"`
+	TitleIssues      []string          `json:"title_issues"`
+}
+
+type FactualityCheck struct {
+	BulletIndex int      `json:"bullet_index"`
+	Bullet      string   `json:"bullet"`
+	HasClaims   bool     `json:"has_claims"`
+	AllApproved bool     `json:"all_approved"`
+	Issues      []string `json:"issues,omitempty"`
+}
+
+type ResumeVersion struct {
+	ID               int64            `json:"id"`
+	JobID            int64            `json:"job_id"`
+	ResumeJSON       ResumeJSON       `json:"resume_json"`
+	TexSource        string           `json:"tex_source"`
+	PDFPath          string           `json:"pdf_path"`
+	ValidationResult ValidationResult `json:"validation_result"`
+	CreatedAt        string           `json:"created_at"`
+}
+
+type Application struct {
+	ID                   int64  `json:"id"`
+	JobID                int64  `json:"job_id"`
+	Status               string `json:"status"`
+	FitScore             int    `json:"fit_score"`
+	ResumeVersionID      int64  `json:"resume_version_id"`
+	CoverLetterVersionID int64  `json:"cover_letter_version_id"`
+	Notes                string `json:"notes"`
+	CreatedAt            string `json:"created_at"`
+	UpdatedAt            string `json:"updated_at"`
+}
+
+type CorrectionLog struct {
+	ID                  int64   `json:"id"`
+	ApplicationID       int64   `json:"application_id"`
+	ResumeVersionID     int64   `json:"resume_version_id"`
+	OriginalBulletText  string  `json:"original_bullet_text"`
+	CorrectedBulletText string  `json:"corrected_bullet_text"`
+	ClaimIDs            []int64 `json:"claim_ids"`
+	Reason              string  `json:"reason"`
+	CreatedAt           string  `json:"created_at"`
+}
+
+type GenerateResumeJSONInput struct {
+	JobID             int64   `json:"job_id"`
+	SelectedBulletIDs []int64 `json:"selected_bullet_ids"`
+}
+
+func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSONInput) (ResumeJSON, error) {
+	_, err := s.getJobDescription(input.JobID)
+	if err != nil {
+		return ResumeJSON{}, err
+	}
+
+	analysis, err := s.GetJobAnalysis(input.JobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		analysis, err = s.AnalyzeJobDescription(input.JobID)
+	}
+	if err != nil {
+		return ResumeJSON{}, err
+	}
+
+	strategy, err := s.GetApplicationStrategy(input.JobID)
+	if errors.Is(err, sql.ErrNoRows) {
+		strategy, err = s.GenerateApplicationStrategy(input.JobID)
+	}
+	if err != nil {
+		return ResumeJSON{}, err
+	}
+
+	profile, err := s.GetCandidateProfile()
+	if err != nil {
+		return ResumeJSON{}, err
+	}
+
+	sections, err := s.ListSourceSections(0)
+	if err != nil {
+		return ResumeJSON{}, fmt.Errorf("list source sections: %w", err)
+	}
+
+	approvedFacts, err := s.ListEvidenceFacts("approved")
+	if err != nil {
+		return ResumeJSON{}, fmt.Errorf("list approved evidence facts: %w", err)
+	}
+
+	var selectedDrafts []TailoredBulletDraft
+	if len(input.SelectedBulletIDs) > 0 {
+		allDrafts, err := s.ListTailoredBulletDrafts(input.JobID)
+		if err != nil {
+			return ResumeJSON{}, err
+		}
+		idSet := map[int64]bool{}
+		for _, id := range input.SelectedBulletIDs {
+			idSet[id] = true
+		}
+		for _, draft := range allDrafts {
+			if idSet[draft.ID] {
+				selectedDrafts = append(selectedDrafts, draft)
+			}
+		}
+	} else {
+		drafts, listErr := s.ListTailoredBulletDrafts(input.JobID)
+		if listErr != nil {
+			return ResumeJSON{}, listErr
+		}
+		for _, draft := range drafts {
+			if draft.SelectedForResume {
+				selectedDrafts = append(selectedDrafts, draft)
+			}
+		}
+	}
+
+	if len(selectedDrafts) == 0 {
+		return ResumeJSON{}, errors.New("no selected bullet drafts for resume generation")
+	}
+
+	claimIDs := map[int64]bool{}
+	for _, draft := range selectedDrafts {
+		for _, cid := range draft.ClaimIDs {
+			claimIDs[cid] = true
+		}
+	}
+
+	claims, err := s.ListCandidateClaims("all")
+	if err != nil {
+		return ResumeJSON{}, err
+	}
+	claimsByID := map[int64]CandidateClaim{}
+	for _, claim := range claims {
+		claimsByID[claim.ID] = claim
+	}
+
+	// Group experience entries by origin_heading to avoid duplicates
+	experienceByKey := map[string]*ResumeEntry{} // origin_heading -> entry pointer
+	seenBullets := map[string]bool{}
+
+	for _, draft := range selectedDrafts {
+		if seenBullets[draft.DraftText] {
+			continue
+		}
+		seenBullets[draft.DraftText] = true
+
+		originKey := strings.TrimSpace(draft.OriginHeading)
+
+		if entry, exists := experienceByKey[originKey]; exists {
+			entry.Bullets = append(entry.Bullets, draft.DraftText)
+			entry.ClaimIDs = append(entry.ClaimIDs, draft.ClaimIDs...)
+			entry.BulletIDs = append(entry.BulletIDs, draft.ID)
+		} else {
+			entry := &ResumeEntry{
+				Bullets:   []string{draft.DraftText},
+				ClaimIDs:  draft.ClaimIDs,
+				BulletIDs: []int64{draft.ID},
+			}
+			originType := strings.TrimSpace(strings.ToLower(draft.OriginType))
+			if strings.HasPrefix(originType, "project") {
+				entry.Title = draft.OriginHeading
+			} else {
+				// Parse section metadata for experience entries
+				for _, section := range sections {
+					if strings.EqualFold(section.Heading, draft.OriginHeading) {
+						entry.Company, entry.Location, entry.Title, entry.StartDate, entry.EndDate = parseSectionMetadata(section)
+						entry.URL = extractCompanyURL(section)
+						break
+					}
+				}
+				// Fallback: if no section found, use the heading as company/title
+				if entry.Company == "" {
+					entry.Company = draft.OriginHeading
+				}
+				if entry.Title == "" {
+					entry.Title = "Engineer"
+				}
+			}
+			experienceByKey[originKey] = entry
+		}
+	}
+
+	// Split into experience and projects
+	experienceEntries := []ResumeEntry{}
+	projectEntries := []ResumeEntry{}
+	for key, entry := range experienceByKey {
+		isProject := strings.HasPrefix(key, "project") || strings.Contains(strings.ToLower(entry.Title), "project")
+		for _, draft := range selectedDrafts {
+			if strings.HasPrefix(strings.ToLower(draft.OriginType), "project") || strings.HasPrefix(strings.ToLower(draft.OriginHeading), "project") {
+				if strings.EqualFold(draft.OriginHeading, entry.Title) || strings.EqualFold(draft.OriginHeading, key) || strings.EqualFold(draft.OriginHeading, entry.Company) {
+					isProject = true
+				}
+			}
+		}
+		if isProject {
+			projectEntries = append(projectEntries, *entry)
+		} else {
+			experienceEntries = append(experienceEntries, *entry)
+		}
+	}
+	experienceEntries, projectEntries = supplementResumeEntriesFromSections(experienceEntries, projectEntries, sections)
+	deduplicateResumeEntryBullets(experienceEntries)
+	deduplicateResumeEntryBullets(projectEntries)
+	limitResumeEntries(experienceEntries, 4)
+	limitResumeEntries(projectEntries, 2)
+
+	skillSet := map[string]bool{}
+	for _, claim := range claims {
+		if !claimIDs[claim.ID] && claim.Status != claimStatusApproved && claim.Status != claimStatusApprovedRestricted {
+			continue
+		}
+		for _, tech := range claim.Technologies {
+			skillSet[tech] = true
+		}
+	}
+	for _, fact := range approvedFacts {
+		for _, tech := range fact.Technologies {
+			skillSet[tech] = true
+		}
+	}
+
+	langSkills := []string{}
+	backendSkills := []string{}
+	frontendSkills := []string{}
+	dbInfraSkills := []string{}
+	aiSkills := []string{}
+	toolSkills := []string{}
+	langSet := map[string]bool{"Go": true, "Python": true, "Java": true, "TypeScript": true, "JavaScript": true, "Rust": true, "C#": true, "C++": true}
+	backendSet := map[string]bool{"FastAPI": true, "Gin": true, "Spring Boot": true, "Node.js": true, "Express": true, "REST": true, "gRPC": true, "Microservices": true, "API": true}
+	frontendSet := map[string]bool{"React": true, "Next.js": true, "Vite": true, "Tailwind": true}
+	dbInfraSet := map[string]bool{"PostgreSQL": true, "MySQL": true, "SQLite": true, "ElasticSearch": true, "Elasticsearch": true, "Redis": true, "MongoDB": true, "Docker": true, "Linux": true, "GitHub Actions": true}
+	aiSet := map[string]bool{"LLM": true, "LLM API": true, "OpenAI": true, "Embeddings": true, "Vector Databases": true, "RAG": true}
+	for skill := range skillSet {
+		if !resumeSkillAllowed(skill) {
+			continue
+		}
+		switch {
+		case langSet[skill]:
+			langSkills = append(langSkills, skill)
+		case backendSet[skill]:
+			backendSkills = append(backendSkills, skill)
+		case frontendSet[skill]:
+			frontendSkills = append(frontendSkills, skill)
+		case dbInfraSet[skill]:
+			dbInfraSkills = append(dbInfraSkills, skill)
+		case aiSet[skill]:
+			aiSkills = append(aiSkills, skill)
+		default:
+			if resumeToolSkillAllowed(skill) {
+				toolSkills = append(toolSkills, skill)
+			}
+		}
+	}
+
+	skills := []ResumeSkill{}
+	if len(langSkills) > 0 {
+		skills = append(skills, ResumeSkill{Category: "Languages", Items: normalizeStringList(langSkills)})
+	}
+	if len(backendSkills) > 0 {
+		skills = append(skills, ResumeSkill{Category: "Backend", Items: normalizeStringList(backendSkills)})
+	}
+	if len(frontendSkills) > 0 {
+		skills = append(skills, ResumeSkill{Category: "Frontend", Items: normalizeStringList(frontendSkills)})
+	}
+	if len(dbInfraSkills) > 0 {
+		skills = append(skills, ResumeSkill{Category: "Databases/Infra", Items: normalizeStringList(dbInfraSkills)})
+	}
+	if len(aiSkills) > 0 {
+		skills = append(skills, ResumeSkill{Category: "AI", Items: normalizeStringList(aiSkills)})
+	}
+	if len(toolSkills) > 0 {
+		skills = append(skills, ResumeSkill{Category: "Tools", Items: normalizeStringList(toolSkills)})
+	}
+
+	headline := strings.TrimSpace(profile.Contact.FullName)
+	if headline == "" {
+		headline = strings.TrimSpace(strategy.ResumeHeadline)
+	}
+	if headline == "" {
+		headline = analysis.RoleTitle
+	}
+
+	contactLine := buildContactLine(profile.Contact)
+	skillsLine := buildSkillsLine(skills)
+	education := buildEducationFromSections(sections)
+	summary := buildResumeSummary(analysis, claimIDs, claimsByID, approvedFacts, profile, sections)
+	resume := ResumeJSON{
+		Headline:    headline,
+		Summary:     summary,
+		ContactLine: contactLine,
+		SkillsLine:  skillsLine,
+		Skills:      skills,
+		Experience:  experienceEntries,
+		Projects:    projectEntries,
+		Education:   education,
+		TexSource:   "",
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	return resume, nil
+}
+
+func supplementResumeEntriesFromSections(experienceEntries []ResumeEntry, projectEntries []ResumeEntry, sections []SourceSection) ([]ResumeEntry, []ResumeEntry) {
+	seenExperience := resumeEntryKeySet(experienceEntries)
+	seenProjects := resumeEntryKeySet(projectEntries)
+	ordered := append([]SourceSection{}, sections...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].SortOrder < ordered[j].SortOrder })
+	for _, section := range ordered {
+		sectionType := strings.ToLower(strings.TrimSpace(section.SectionType))
+		switch sectionType {
+		case "experience":
+			entry := resumeEntryFromExperienceSection(section)
+			key := resumeEntryKey(entry)
+			if key == "" || len(entry.Bullets) == 0 {
+				continue
+			}
+			if seenExperience[key] {
+				mergeResumeEntryBullets(experienceEntries, key, entry.Bullets)
+				continue
+			}
+			seenExperience[key] = true
+			experienceEntries = append(experienceEntries, entry)
+		case "project":
+			entry := resumeEntryFromProjectSection(section)
+			key := resumeEntryKey(entry)
+			if key == "" || len(entry.Bullets) == 0 {
+				continue
+			}
+			if seenProjects[key] {
+				mergeResumeEntryBullets(projectEntries, key, entry.Bullets)
+				continue
+			}
+			seenProjects[key] = true
+			projectEntries = append(projectEntries, entry)
+		}
+	}
+	return experienceEntries, projectEntries
+}
+
+func resumeEntryFromExperienceSection(section SourceSection) ResumeEntry {
+	company, location, title, startDate, endDate := parseSectionMetadata(section)
+	if company == "" {
+		company = section.Heading
+	}
+	if title == "" {
+		title = titleFromHeading(section.Heading)
+	}
+	return ResumeEntry{
+		Company:   company,
+		URL:       extractCompanyURL(section),
+		Title:     title,
+		Location:  location,
+		StartDate: startDate,
+		EndDate:   endDate,
+		Bullets:   limitStrings(extractSectionBullets(section), 3),
+	}
+}
+
+func resumeEntryFromProjectSection(section SourceSection) ResumeEntry {
+	title, detail, startDate, endDate := parseProjectMetadata(section)
+	if title == "" {
+		title = section.Heading
+	}
+	return ResumeEntry{
+		Title:     title,
+		URL:       detail,
+		StartDate: startDate,
+		EndDate:   endDate,
+		Bullets:   limitStrings(extractSectionBullets(section), 2),
+	}
+}
+
+func resumeEntryKeySet(entries []ResumeEntry) map[string]bool {
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		if key := resumeEntryKey(entry); key != "" {
+			seen[key] = true
+		}
+	}
+	return seen
+}
+
+func resumeEntryKey(entry ResumeEntry) string {
+	return strings.ToLower(strings.TrimSpace(firstNonEmpty(entry.Company, entry.Title)))
+}
+
+func limitResumeEntries(entries []ResumeEntry, bulletLimit int) {
+	for i := range entries {
+		entries[i].Bullets = limitStrings(entries[i].Bullets, bulletLimit)
+	}
+}
+
+func deduplicateResumeEntryBullets(entries []ResumeEntry) {
+	for i := range entries {
+		deduped := []string{}
+		seen := map[string]bool{}
+		for _, bullet := range entries[i].Bullets {
+			key := strings.ToLower(strings.TrimSpace(bullet))
+			if key == "" || seen[key] || isNearDuplicate(key, seen) {
+				continue
+			}
+			seen[key] = true
+			deduped = append(deduped, bullet)
+		}
+		entries[i].Bullets = deduped
+	}
+}
+
+func mergeResumeEntryBullets(entries []ResumeEntry, key string, bullets []string) {
+	for i := range entries {
+		if resumeEntryKey(entries[i]) != key {
+			continue
+		}
+		seen := map[string]bool{}
+		for _, bullet := range entries[i].Bullets {
+			seen[strings.ToLower(strings.TrimSpace(bullet))] = true
+		}
+		for _, bullet := range bullets {
+			bulletKey := strings.ToLower(strings.TrimSpace(bullet))
+			if bulletKey == "" || seen[bulletKey] {
+				continue
+			}
+			if isNearDuplicate(bulletKey, seen) {
+				continue
+			}
+			seen[bulletKey] = true
+			entries[i].Bullets = append(entries[i].Bullets, bullet)
+		}
+		return
+	}
+}
+
+func isNearDuplicate(text string, existing map[string]bool) bool {
+	words := strings.Fields(text)
+	if len(words) < 6 {
+		return false
+	}
+	textWords := wordSet(words)
+	for prev := range existing {
+		prevWords := wordSet(strings.Fields(prev))
+		if len(prevWords) == 0 {
+			continue
+		}
+		overlap := 0
+		for w := range textWords {
+			if prevWords[w] {
+				overlap++
+			}
+		}
+		if overlap >= len(prevWords)/2 && overlap >= len(textWords)/2 {
+			return true
+		}
+	}
+	return false
+}
+
+func wordSet(words []string) map[string]bool {
+	seen := map[string]bool{}
+	for _, w := range words {
+		w = strings.ToLower(strings.Trim(w, ".,;:()[]{}"))
+		if len(w) > 2 {
+			seen[w] = true
+		}
+	}
+	return seen
+}
+
+func extractSectionBullets(section SourceSection) []string {
+	bullets := []string{}
+	for _, line := range nonEmptyLines(section.Content) {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "-"))
+		line = strings.TrimSpace(strings.TrimPrefix(line, `\item`))
+		if line == "" || strings.Contains(line, "|") {
+			continue
+		}
+		bullets = append(bullets, strings.Trim(line, "{}"))
+	}
+	return bullets
+}
+
+func parseProjectMetadata(section SourceSection) (title, detail, startDate, endDate string) {
+	lines := nonEmptyLines(section.Content)
+	if len(lines) == 0 {
+		return section.Heading, "", "", ""
+	}
+	parts := strings.Split(lines[0], "|")
+	if len(parts) > 0 {
+		title = strings.TrimSpace(parts[0])
+	}
+	detailParts := []string{}
+	seenURLs := map[string]bool{}
+	for _, raw := range parts[1:] {
+		part := strings.TrimSpace(raw)
+		if part == "" {
+			continue
+		}
+		rangeStart, rangeEnd := splitDateRange(part)
+		if rangeStart != "" || rangeEnd != "" {
+			startDate, endDate = rangeStart, rangeEnd
+			continue
+		}
+		if url := firstURLInText(part); url != "" {
+			label := linkLabelNearURL(part, url)
+			detailParts = append(detailParts, `\href{`+url+`}{`+sanitizeLaTeX(label)+`}`)
+			seenURLs[url] = true
+			continue
+		}
+		detailParts = append(detailParts, `\emph{`+sanitizeLaTeX(part)+`}`)
+	}
+	if sectionURL := firstURLInText(section.Heading + "\n" + section.Content); sectionURL != "" && !seenURLs[sectionURL] {
+		label := linkLabelNearURL(section.Heading+"\n"+section.Content, sectionURL)
+		detailParts = append(detailParts, `\href{`+sectionURL+`}{`+sanitizeLaTeX(label)+`}`)
+	}
+	if len(detailParts) > 0 {
+		detail = ` $|$ ` + strings.Join(detailParts, ` $|$ `)
+	}
+	return title, detail, startDate, endDate
+}
+
+func titleFromHeading(heading string) string {
+	for _, sep := range []string{" - ", " | "} {
+		parts := strings.Split(heading, sep)
+		if len(parts) > 1 {
+			return strings.TrimSpace(parts[len(parts)-1])
+		}
+	}
+	return ""
+}
+
+func resumeSkillAllowed(skill string) bool {
+	skill = strings.TrimSpace(skill)
+	if skill == "" {
+		return false
+	}
+	lower := strings.ToLower(skill)
+	blocked := map[string]bool{
+		"sentry":     true,
+		"goroutines": true,
+		"goroutine":  true,
+		"mutexes":    true,
+		"mutex":      true,
+		"jwt":        true,
+		"oauth":      true,
+		"rbac":       true,
+		"ftp":        true,
+		"sftp":       true,
+		"node":       true,
+	}
+	return !blocked[lower]
+}
+
+func resumeToolSkillAllowed(skill string) bool {
+	lower := strings.ToLower(strings.TrimSpace(skill))
+	allowed := map[string]bool{
+		"aws":           true,
+		"bash":          true,
+		"elastic stack": true,
+		"sql":           true,
+	}
+	return allowed[lower]
+}
+
+func buildResumeSummary(analysis JobAnalysis, claimIDs map[int64]bool, claimsByID map[int64]CandidateClaim, facts []EvidenceFact, profile CandidateProfile, sections []SourceSection) string {
+	techs := []string{}
+	capabilities := []string{}
+	artifacts := []string{}
+	domains := []string{}
+	for cid := range claimIDs {
+		if claim, ok := claimsByID[cid]; ok {
+			techs = append(techs, claim.Technologies...)
+			capabilities = append(capabilities, claim.Capabilities...)
+			artifacts = append(artifacts, claim.Artifacts...)
+			domains = append(domains, claim.Domains...)
+		}
+	}
+	for _, fact := range facts {
+		techs = append(techs, fact.Technologies...)
+	}
+	techs = normalizeStringList(techs)
+	capabilities = normalizeStringList(capabilities)
+	artifacts = normalizeStringList(artifacts)
+	domains = normalizeStringList(domains)
+
+	role := humanSummaryRole(analysis.RoleTitle, capabilities, techs)
+	focus := humanSummaryFocus(capabilities, domains, artifacts)
+	techStr := strings.Join(limitStrings(techs, 6), ", ")
+	recentWork := humanSummaryRecentWork(capabilities, artifacts)
+	duration := humanExperienceDuration(profile, sections)
+
+	contexts := make(map[string]bool)
+	for cid := range claimIDs {
+		if claim, ok := claimsByID[cid]; ok && claim.OriginHeading != "" {
+			contexts[claim.OriginHeading] = true
+		}
+	}
+	contextPhrase := ""
+	if len(contexts) > 1 {
+		contextPhrase = fmt.Sprintf(" across %d professional contexts", len(contexts))
+	}
+
+	if techStr == "" {
+		return role + duration + " focused on " + focus + contextPhrase + ". " + recentWork + "."
+	}
+	return role + duration + " focused on " + focus + " using " + techStr + contextPhrase + ". " + recentWork + "."
+}
+
+func humanSummaryRole(roleTitle string, capabilities []string, techs []string) string {
+	joined := strings.ToLower(strings.Join(append(capabilities, techs...), " "))
+	backendWords := countBackendWords(joined)
+	frontendWords := countFrontendWords(joined)
+	if strings.Contains(joined, "backend") || strings.Contains(joined, "api") || strings.Contains(joined, "fastapi") || strings.Contains(joined, "postgres") || strings.Contains(joined, "microservice") || strings.Contains(joined, "golang") || strings.Contains(joined, "go ") {
+		if backendWords >= frontendWords && (strings.Contains(joined, "platform") || strings.Contains(joined, "infra") || strings.Contains(joined, "systems")) {
+			return "Backend/platform software engineer"
+		}
+		return "Backend software engineer"
+	}
+	if backendWords >= frontendWords && backendWords > 0 {
+		return "Backend software engineer"
+	}
+	if strings.Contains(joined, "full stack") || strings.Contains(joined, "react") || strings.Contains(joined, "frontend") {
+		return "Frontend/full-stack software engineer"
+	}
+	if strings.Contains(joined, "data") || strings.Contains(joined, "ml") || strings.Contains(joined, "machine learning") {
+		return "Data/platform software engineer"
+	}
+	return "Software engineer"
+}
+
+func countBackendWords(joined string) int {
+	return countMatches(joined, "fastapi", "gin", "spring boot", "node.js", "express", "rest", "grpc", "microservice", "api", "postgresql", "mysql", "sqlite", "docker", "go", "golang", "python", "java", "backend", "rbac", "audit", "pipeline", "worker", "job", "sftp", "ftp", "etl", "elastic")
+}
+
+func countFrontendWords(joined string) int {
+	return countMatches(joined, "react", "next.js", "vite", "tailwind", "frontend", "typescript", "javascript", "angular", "vue", "css", "html", "responsive")
+}
+
+func countMatches(text string, terms ...string) int {
+	count := 0
+	for _, term := range terms {
+		if strings.Contains(text, term) {
+			count++
+		}
+	}
+	return count
+}
+
+func humanSummaryFocus(capabilities []string, domains []string, artifacts []string) string {
+	parts := []string{}
+	lower := strings.ToLower(strings.Join(append(append([]string{}, capabilities...), artifacts...), " "))
+	if strings.Contains(lower, "api") || strings.Contains(lower, "backend") {
+		parts = append(parts, "backend APIs")
+	}
+	if strings.Contains(lower, "data") || strings.Contains(lower, "postgres") || strings.Contains(lower, "model") {
+		parts = append(parts, "data-heavy product systems")
+	}
+	if strings.Contains(lower, "workflow") || strings.Contains(lower, "worker") || strings.Contains(lower, "automation") {
+		parts = append(parts, "workflow automation")
+	}
+	if len(parts) == 0 {
+		parts = append(parts, limitStrings(append(capabilities, domains...), 2)...)
+	}
+	if len(parts) == 0 {
+		return "practical product engineering"
+	}
+	return joinHumanList(normalizeStringList(parts))
+}
+
+func humanSummaryRecentWork(capabilities []string, artifacts []string) string {
+	combined := strings.ToLower(strings.Join(append(append([]string{}, capabilities...), artifacts...), " "))
+	work := []string{}
+	if strings.Contains(combined, "api") || strings.Contains(combined, "backend") {
+		work = append(work, "API design")
+	}
+	if strings.Contains(combined, "background") || strings.Contains(combined, "worker") || strings.Contains(combined, "job") {
+		work = append(work, "background jobs")
+	}
+	if strings.Contains(combined, "rbac") || strings.Contains(combined, "audit") || strings.Contains(combined, "access") {
+		work = append(work, "access control and auditability")
+	}
+	if strings.Contains(combined, "llm") || strings.Contains(combined, "ai") || strings.Contains(combined, "ingestion") {
+		work = append(work, "LLM-assisted ingestion")
+	}
+	if len(work) == 0 {
+		work = append(work, limitStrings(artifacts, 3)...)
+	}
+	if len(work) == 0 {
+		return "Recent work has centred on shipping reliable features end to end"
+	}
+	return "Recent work has centred on " + joinHumanList(normalizeStringList(work))
+}
+
+func joinHumanList(items []string) string {
+	items = normalizeStringList(items)
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " and " + items[1]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + ", and " + items[len(items)-1]
+	}
+}
+
+func humanExperienceDuration(profile CandidateProfile, sections []SourceSection) string {
+	totalMonths := 0
+	recordMonths := 0
+	for _, record := range profile.Records {
+		if !strings.EqualFold(record.RecordType, "experience") {
+			continue
+		}
+		months := dateRangeMonths(record.StartDate, record.EndDate)
+		if strings.Contains(strings.ToLower(record.Role+" "+record.Label), "part-time") {
+			months /= 2
+		}
+		recordMonths += months
+	}
+	if recordMonths > 0 {
+		totalMonths = recordMonths
+	}
+	for _, section := range sections {
+		if recordMonths > 0 {
+			break
+		}
+		if !strings.EqualFold(section.SectionType, "experience") {
+			continue
+		}
+		_, _, title, startDate, endDate := parseSectionMetadata(section)
+		months := dateRangeMonths(startDate, endDate)
+		if strings.Contains(strings.ToLower(title+" "+section.Heading+" "+section.Content), "part-time") {
+			months /= 2
+		}
+		totalMonths += months
+	}
+	if totalMonths < 12 {
+		return ""
+	}
+	years := totalMonths / 12
+	if years <= 1 {
+		return " with 1 year of experience"
+	}
+	return fmt.Sprintf(" with %d+ years of experience", years)
+}
+
+func dateRangeMonths(startValue string, endValue string) int {
+	startYear := firstYear(startValue)
+	if startYear == 0 {
+		return 0
+	}
+	startMonth := firstMonth(startValue)
+	if startMonth == 0 {
+		startMonth = 1
+	}
+	endYear := firstYear(endValue)
+	endMonth := firstMonth(endValue)
+	if endYear == 0 || strings.Contains(strings.ToLower(endValue), "present") || strings.Contains(strings.ToLower(endValue), "current") {
+		now := time.Now()
+		endYear = now.Year()
+		endMonth = int(now.Month())
+	}
+	if endMonth == 0 {
+		endMonth = 12
+	}
+	months := (endYear-startYear)*12 + endMonth - startMonth + 1
+	if months < 0 {
+		return 0
+	}
+	return months
+}
+
+func firstYear(value string) int {
+	for _, field := range strings.FieldsFunc(value, func(r rune) bool { return r < '0' || r > '9' }) {
+		if len(field) != 4 {
+			continue
+		}
+		year, err := strconv.Atoi(field)
+		if err == nil && year >= 1970 && year <= time.Now().Year() {
+			return year
+		}
+	}
+	return 0
+}
+
+func firstMonth(value string) int {
+	for _, field := range strings.FieldsFunc(value, func(r rune) bool { return r < '0' || r > '9' }) {
+		month, err := strconv.Atoi(field)
+		if err == nil && month >= 1 && month <= 12 {
+			return month
+		}
+	}
+	return 0
+}
+
+func (s *Store) ValidateResumeJSON(resume ResumeJSON, jobID int64) (ValidationResult, error) {
+	result := ValidationResult{Passed: true}
+
+	claims, err := s.ListCandidateClaims("all")
+	if err != nil {
+		return result, err
+	}
+	claimsByID := map[int64]CandidateClaim{}
+	for _, claim := range claims {
+		claimsByID[claim.ID] = claim
+	}
+
+	profile, err := s.GetCandidateProfile()
+	if err != nil {
+		return result, err
+	}
+
+	var allChecks []FactualityCheck
+	type resumeBulletValidation struct {
+		text     string
+		claimIDs []int64
+	}
+	allBullets := []string{}
+	bulletValidations := []resumeBulletValidation{}
+	for _, entry := range resume.Experience {
+		allBullets = append(allBullets, entry.Bullets...)
+		for _, bullet := range entry.Bullets {
+			bulletValidations = append(bulletValidations, resumeBulletValidation{text: bullet, claimIDs: entry.ClaimIDs})
+		}
+	}
+	for _, entry := range resume.Projects {
+		allBullets = append(allBullets, entry.Bullets...)
+		for _, bullet := range entry.Bullets {
+			bulletValidations = append(bulletValidations, resumeBulletValidation{text: bullet, claimIDs: entry.ClaimIDs})
+		}
+	}
+
+	for i, bulletValidation := range bulletValidations {
+		bullet := bulletValidation.text
+		check := FactualityCheck{
+			BulletIndex: i,
+			Bullet:      bullet,
+			HasClaims:   len(bulletValidation.claimIDs) > 0,
+			AllApproved: true,
+		}
+
+		lower := strings.ToLower(bullet)
+		evidence := strings.ToLower(supportedBulletEvidence(bullet, claimsByID))
+		for _, term := range []string{"aws", "serverless", "container", "containers", "kubernetes", "health-tech", "healthcare", "medical", "compliance", "enterprise", "scalable"} {
+			if strings.Contains(lower, term) && !strings.Contains(evidence, term) {
+				check.Issues = append(check.Issues, "unsupported term: "+term)
+				check.AllApproved = false
+			}
+		}
+
+		if check.AllApproved && !check.HasClaims {
+			check.Issues = append(check.Issues, "no linked claims; verify content is evidence-backed")
+		}
+
+		allChecks = append(allChecks, check)
+	}
+	result.FactualityChecks = allChecks
+
+	styleIssues := []string{}
+	lowerBullets := strings.ToLower(strings.Join(allBullets, " "))
+	bannedPhrases := []string{
+		"leveraged", "spearheaded", "empowered", "utilized", "cutting-edge",
+		"game-changer", "transformative", "synergy", "seamless",
+	}
+	for _, phrase := range bannedPhrases {
+		if strings.Contains(lowerBullets, phrase) {
+			styleIssues = append(styleIssues, "banned phrase: "+phrase)
+		}
+	}
+	result.StyleIssues = styleIssues
+
+	immutableIssues := []string{}
+	if profile.Contact.FullName != "" {
+		nameParts := strings.Fields(profile.Contact.FullName)
+		for _, part := range nameParts {
+			partLower := strings.ToLower(part)
+			if !strings.Contains(strings.ToLower(resume.Headline), partLower) && !strings.Contains(strings.ToLower(resume.Summary), partLower) {
+				immutableIssues = append(immutableIssues, "candidate name part missing from headline and summary: "+part)
+				break
+			}
+		}
+	}
+	result.ImmutableIssues = immutableIssues
+
+	titleIssues := []string{}
+	if strings.TrimSpace(resume.Headline) == "" {
+		titleIssues = append(titleIssues, "headline is empty")
+	}
+	for _, entry := range resume.Experience {
+		if strings.TrimSpace(entry.Title) == "" {
+			titleIssues = append(titleIssues, "experience entry missing title")
+		}
+	}
+	result.TitleIssues = titleIssues
+
+	for _, entry := range resume.Experience {
+		for _, bullet := range entry.Bullets {
+			bulletIssues := styleRiskFlags(bullet)
+			for _, issue := range bulletIssues {
+				result.Warnings = append(result.Warnings, "bullet style: "+issue+": "+bullet)
+			}
+		}
+	}
+
+	for _, check := range result.FactualityChecks {
+		if !check.AllApproved {
+			result.Passed = false
+			result.Errors = append(result.Errors, fmt.Sprintf("bullet %d: unapproved claims", check.BulletIndex))
+		}
+		for _, issue := range check.Issues {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("bullet %d: %s", check.BulletIndex, issue))
+		}
+	}
+
+	for _, issue := range result.StyleIssues {
+		result.Warnings = append(result.Warnings, issue)
+	}
+	for _, issue := range result.ImmutableIssues {
+		result.Errors = append(result.Errors, issue)
+		result.Passed = false
+	}
+	for _, issue := range result.TitleIssues {
+		result.Errors = append(result.Errors, issue)
+		result.Passed = false
+	}
+
+	return result, nil
+}
+
+func supportedBulletEvidence(bullet string, claimsByID map[int64]CandidateClaim) string {
+	parts := []string{}
+	for _, claim := range claimsByID {
+		parts = append(parts,
+			claim.ClaimText,
+			strings.Join(claim.Actions, " "),
+			strings.Join(claim.Technologies, " "),
+			strings.Join(claim.Capabilities, " "),
+			strings.Join(claim.Objects, " "),
+			strings.Join(claim.Domains, " "),
+			strings.Join(claim.Artifacts, " "),
+			strings.Join(claim.Scope, " "),
+			strings.Join(claim.Metrics, " "),
+			strings.Join(claim.Outcomes, " "),
+		)
+	}
+	return strings.Join(parts, " ")
+}
+
+func (s *Store) RenderResumePDF(ctx context.Context, resume ResumeJSON) (RenderPDFResult, error) {
+	texContent, err := renderResumeTemplate(resume)
+	if err != nil {
+		return RenderPDFResult{}, err
+	}
+	texContent = hardenResumeTex(texContent)
+
+	firstName := resumeFirstName(resume.Headline)
+	if firstName == "" {
+		firstName = "resume"
+	}
+	pdfName := firstName + "_Resume"
+
+	outputDir := filepath.Join(s.generatedPath, fmt.Sprintf("resume-%d", time.Now().Unix()))
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return RenderPDFResult{}, err
+	}
+
+	texPath := filepath.Join(outputDir, pdfName+".tex")
+	if err := os.WriteFile(texPath, []byte(texContent), 0o644); err != nil {
+		return RenderPDFResult{}, err
+	}
+
+	pdfPath := filepath.Join(outputDir, pdfName+".pdf")
+	status := s.TectonicStatus()
+	pdfResult := RenderPDFResult{TexPath: texPath, PDFPath: pdfPath, OutputDir: outputDir}
+	if status.Status != "installed" {
+		pdfResult.Error = "Tectonic is " + status.Status
+		_ = s.LogEvent("error", "resume PDF render failed: "+pdfResult.Error)
+		return pdfResult, nil
+	}
+	cmd := execCommandContext(ctx, status.ExecutablePath, "-X", "compile", "--outdir", outputDir, texPath)
+	cmd.Dir = outputDir
+	output, pdfErr := cmd.CombinedOutput()
+	if pdfErr != nil {
+		pdfResult.Error = strings.TrimSpace(string(output))
+		if pdfResult.Error == "" {
+			pdfResult.Error = pdfErr.Error()
+		}
+		_ = s.LogEvent("error", "resume PDF render failed: "+pdfResult.Error)
+		return pdfResult, nil
+	}
+	if _, err := os.Stat(pdfPath); err != nil {
+		pdfResult.Error = "PDF was not created"
+		_ = s.LogEvent("error", "resume PDF render failed: "+pdfResult.Error)
+		return pdfResult, nil
+	}
+	pdfResult.Success = true
+	_ = s.LogEvent("info", "resume PDF rendered")
+
+	return RenderPDFResult{
+		Success:   pdfResult.Success,
+		TexPath:   texPath,
+		PDFPath:   pdfPath,
+		OutputDir: outputDir,
+		Error:     pdfResult.Error,
+	}, nil
+}
+
+func resumeFirstName(headline string) string {
+	headline = strings.TrimSpace(headline)
+	if headline == "" {
+		return ""
+	}
+	idx := strings.IndexAny(headline, " ,")
+	if idx <= 0 {
+		return headline
+	}
+	return strings.TrimSpace(headline[:idx])
+}
+
+func normalizeResumeTexSource(source string) string {
+	tex := strings.TrimSpace(source)
+	if tex == "" {
+		return ""
+	}
+	if strings.HasPrefix(tex, "```") {
+		tex = strings.TrimPrefix(tex, "```latex")
+		tex = strings.TrimPrefix(tex, "```tex")
+		tex = strings.TrimPrefix(tex, "```")
+		tex = strings.TrimSuffix(tex, "```")
+		tex = strings.TrimSpace(tex)
+	}
+	if idx := strings.Index(tex, `\documentclass`); idx >= 0 {
+		tex = tex[idx:]
+	}
+	if end := strings.LastIndex(tex, `\end{document}`); end >= 0 {
+		tex = tex[:end+len(`\end{document}`)]
+	}
+	return strings.TrimSpace(tex)
+}
+
+func validResumeTexDocument(tex string) bool {
+	trimmed := strings.TrimSpace(tex)
+	return strings.HasPrefix(trimmed, `\documentclass`) && strings.Contains(trimmed, `\begin{document}`) && strings.Contains(trimmed, `\end{document}`)
+}
+
+func hardenResumeTex(tex string) string {
+	lines := strings.Split(tex, "\n")
+	kept := make([]string, 0, len(lines))
+	skipNextFi := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if skipNextFi && trimmed == `\fi` {
+			skipNextFi = false
+			continue
+		}
+		if strings.Contains(trimmed, `\ifdefined\pdfgentounicode`) {
+			skipNextFi = true
+			continue
+		}
+		if strings.Contains(trimmed, "glyphtounicode") || strings.Contains(trimmed, `\pdfgentounicode`) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	tex = strings.Join(kept, "\n")
+	return repairSkillsItemize(tex)
+}
+
+func repairSkillsItemize(tex string) string {
+	section := `\section{Technical Skills}`
+	sectionIdx := strings.Index(tex, section)
+	if sectionIdx < 0 {
+		return tex
+	}
+	startRel := strings.Index(tex[sectionIdx:], `\resumeSubHeadingListStart`)
+	if startRel < 0 {
+		return tex
+	}
+	start := sectionIdx + startRel
+	endRel := strings.Index(tex[start:], `\resumeSubHeadingListEnd`)
+	if endRel < 0 {
+		return tex
+	}
+	end := start + endRel
+	block := tex[start:end]
+	if strings.Contains(block, `\item`) || !strings.Contains(block, `\textbf`) {
+		return tex
+	}
+	inner := strings.TrimSpace(strings.TrimPrefix(block, `\resumeSubHeadingListStart`))
+	repaired := `\resumeSubHeadingListStart
+\small{\item{
+` + inner + `
+}}
+`
+	return tex[:start] + repaired + tex[end:]
+}
+
+func renderResumeTemplate(resume ResumeJSON) (string, error) {
+	funcs := template.FuncMap{
+		"join": func(items []string, sep string) string {
+			return strings.Join(items, sep)
+		},
+		"tex": sanitizeLaTeX,
+	}
+	tmpl, err := template.New("resume").Delims("[[", "]]").Funcs(funcs).Parse(latexResumeTemplate())
+	if err != nil {
+		return "", fmt.Errorf("failed to parse LaTeX template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, resume); err != nil {
+		return "", fmt.Errorf("failed to execute LaTeX template: %w", err)
+	}
+	return buf.String(), nil
+}
+
+func (s *Store) SaveResumeVersion(version ResumeVersion) (ResumeVersion, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	resumeJSONBytes, _ := json.Marshal(version.ResumeJSON)
+	validationBytes, _ := json.Marshal(version.ValidationResult)
+
+	result, err := s.db.ExecContext(
+		context.Background(),
+		`INSERT INTO resume_versions (job_id, resume_json, tex_source, pdf_path, validation_result, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		version.JobID,
+		string(resumeJSONBytes),
+		version.TexSource,
+		version.PDFPath,
+		string(validationBytes),
+		now,
+	)
+	if err != nil {
+		return ResumeVersion{}, err
+	}
+	id, _ := result.LastInsertId()
+	version.ID = id
+	version.CreatedAt = now
+	return version, nil
+}
+
+func (s *Store) GetResumeVersion(id int64) (ResumeVersion, error) {
+	var version ResumeVersion
+	var resumeJSONStr, validationStr string
+	err := s.db.QueryRowContext(
+		context.Background(),
+		`SELECT id, job_id, resume_json, tex_source, pdf_path, validation_result, created_at
+		FROM resume_versions WHERE id = ?`,
+		id,
+	).Scan(&version.ID, &version.JobID, &resumeJSONStr, &version.TexSource, &version.PDFPath, &validationStr, &version.CreatedAt)
+	if err != nil {
+		return ResumeVersion{}, err
+	}
+	json.Unmarshal([]byte(resumeJSONStr), &version.ResumeJSON)
+	json.Unmarshal([]byte(validationStr), &version.ValidationResult)
+	return version, nil
+}
+
+func (s *Store) ListResumeVersions(jobID int64) ([]ResumeVersion, error) {
+	rows, err := s.db.QueryContext(
+		context.Background(),
+		`SELECT id, job_id, resume_json, tex_source, pdf_path, validation_result, created_at
+		FROM resume_versions WHERE job_id = ? ORDER BY created_at DESC`,
+		jobID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var versions []ResumeVersion
+	for rows.Next() {
+		var version ResumeVersion
+		var resumeJSONStr, validationStr string
+		if err := rows.Scan(&version.ID, &version.JobID, &resumeJSONStr, &version.TexSource, &version.PDFPath, &validationStr, &version.CreatedAt); err != nil {
+			return nil, err
+		}
+		json.Unmarshal([]byte(resumeJSONStr), &version.ResumeJSON)
+		json.Unmarshal([]byte(validationStr), &version.ValidationResult)
+		versions = append(versions, version)
+	}
+	return versions, rows.Err()
+}
+
+func (s *Store) SaveApplication(app Application) (Application, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	if app.ID > 0 {
+		_, err := s.db.ExecContext(
+			context.Background(),
+			`UPDATE applications SET status = ?, fit_score = ?, resume_version_id = ?, cover_letter_version_id = ?, notes = ?, updated_at = ? WHERE id = ?`,
+			normalizeAppStatus(app.Status), app.FitScore, app.ResumeVersionID, app.CoverLetterVersionID, strings.TrimSpace(app.Notes), now, app.ID,
+		)
+		if err != nil {
+			return Application{}, err
+		}
+		app.UpdatedAt = now
+		return app, nil
+	}
+
+	result, err := s.db.ExecContext(
+		context.Background(),
+		`INSERT INTO applications (job_id, status, fit_score, resume_version_id, cover_letter_version_id, notes, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		app.JobID, normalizeAppStatus(app.Status), app.FitScore, app.ResumeVersionID, app.CoverLetterVersionID, strings.TrimSpace(app.Notes), now, now,
+	)
+	if err != nil {
+		return Application{}, err
+	}
+	id, _ := result.LastInsertId()
+	app.ID = id
+	app.CreatedAt = now
+	app.UpdatedAt = now
+	return app, nil
+}
+
+func (s *Store) GetApplication(id int64) (Application, error) {
+	var app Application
+	err := s.db.QueryRowContext(
+		context.Background(),
+		`SELECT id, job_id, status, fit_score, resume_version_id, cover_letter_version_id, notes, created_at, updated_at
+		FROM applications WHERE id = ?`,
+		id,
+	).Scan(&app.ID, &app.JobID, &app.Status, &app.FitScore, &app.ResumeVersionID, &app.CoverLetterVersionID, &app.Notes, &app.CreatedAt, &app.UpdatedAt)
+	if err != nil {
+		return Application{}, err
+	}
+	return app, nil
+}
+
+func (s *Store) ListApplications() ([]Application, error) {
+	rows, err := s.db.QueryContext(
+		context.Background(),
+		`SELECT id, job_id, status, fit_score, resume_version_id, cover_letter_version_id, notes, created_at, updated_at
+		FROM applications ORDER BY updated_at DESC, id DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var apps []Application
+	for rows.Next() {
+		var app Application
+		if err := rows.Scan(&app.ID, &app.JobID, &app.Status, &app.FitScore, &app.ResumeVersionID, &app.CoverLetterVersionID, &app.Notes, &app.CreatedAt, &app.UpdatedAt); err != nil {
+			return nil, err
+		}
+		apps = append(apps, app)
+	}
+	return apps, rows.Err()
+}
+
+func (s *Store) UpdateApplicationStatus(id int64, status string) (Application, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(context.Background(), `UPDATE applications SET status = ?, updated_at = ? WHERE id = ?`, normalizeAppStatus(status), now, id)
+	if err != nil {
+		return Application{}, err
+	}
+	return s.GetApplication(id)
+}
+
+func (s *Store) LogCorrection(correction CorrectionLog) (CorrectionLog, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	claimJSON, _ := encodeInt64List(correction.ClaimIDs)
+	result, err := s.db.ExecContext(
+		context.Background(),
+		`INSERT INTO correction_logs (application_id, resume_version_id, original_text, corrected_text, claim_ids, reason, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		correction.ApplicationID,
+		correction.ResumeVersionID,
+		correction.OriginalBulletText,
+		correction.CorrectedBulletText,
+		claimJSON,
+		strings.TrimSpace(correction.Reason),
+		now,
+	)
+	if err != nil {
+		return CorrectionLog{}, err
+	}
+	id, _ := result.LastInsertId()
+	correction.ID = id
+	correction.CreatedAt = now
+	return correction, nil
+}
+
+func (s *Store) ListCorrections(applicationID int64) ([]CorrectionLog, error) {
+	rows, err := s.db.QueryContext(
+		context.Background(),
+		`SELECT id, application_id, resume_version_id, original_text, corrected_text, claim_ids, reason, created_at
+		FROM correction_logs WHERE application_id = ? ORDER BY created_at DESC`,
+		applicationID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var corrections []CorrectionLog
+	for rows.Next() {
+		var c CorrectionLog
+		var claimJSON string
+		if err := rows.Scan(&c.ID, &c.ApplicationID, &c.ResumeVersionID, &c.OriginalBulletText, &c.CorrectedBulletText, &claimJSON, &c.Reason, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		c.ClaimIDs = decodeInt64List(claimJSON)
+		corrections = append(corrections, c)
+	}
+	return corrections, rows.Err()
+}
+
+func normalizeAppStatus(status string) string {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "draft", "ready_to_apply", "applied", "rejected", "interviewing", "offer":
+		return strings.TrimSpace(strings.ToLower(status))
+	}
+	return "draft"
+}
+
+func buildContactLine(contact CandidateContact) string {
+	parts := []string{}
+	if contact.Phone != "" {
+		parts = append(parts, "\\href{tel:"+contact.Phone+"}{"+sanitizeLaTeX(contact.Phone)+"}")
+	}
+	if contact.Email != "" {
+		parts = append(parts, "\\href{mailto:"+contact.Email+"}{"+sanitizeLaTeX(contact.Email)+"}")
+	}
+	if contact.LinkedIn != "" {
+		parts = append(parts, "\\href{https://"+strings.TrimPrefix(contact.LinkedIn, "https://")+"}{"+sanitizeLaTeX(contact.LinkedIn)+"}")
+	}
+	if contact.GitHub != "" {
+		parts = append(parts, "\\href{https://"+strings.TrimPrefix(contact.GitHub, "https://")+"}{"+sanitizeLaTeX(contact.GitHub)+"}")
+	}
+	if contact.Location != "" {
+		parts = append(parts, sanitizeLaTeX(contact.Location))
+	}
+	return strings.Join(parts, " $|$ ")
+}
+
+func buildSkillsLine(skills []ResumeSkill) string {
+	parts := []string{}
+	for _, skill := range skills {
+		parts = append(parts, skill.Category+": "+strings.Join(skill.Items, ", "))
+	}
+	return strings.Join(parts, " \\ ")
+}
+
+func buildEducationFromSections(sections []SourceSection) []ResumeEducation {
+	education := []ResumeEducation{}
+	for _, section := range sections {
+		if section.SectionType != "education" {
+			continue
+		}
+		entry := parseEducationSection(section)
+		if entry.Degree == "" && entry.Location == "" && entry.Organization == "" {
+			continue
+		}
+		education = append(education, entry)
+	}
+	if len(education) == 0 {
+		for _, section := range sections {
+			heading := strings.TrimSpace(section.Heading)
+			content := strings.TrimSpace(section.Content)
+			if heading == "" && content == "" {
+				continue
+			}
+			lower := strings.ToLower(heading + " " + content)
+			if strings.Contains(lower, "university") || strings.Contains(lower, "bachelor") || strings.Contains(lower, "master") || strings.Contains(lower, "phd") || strings.Contains(lower, "college") || strings.Contains(lower, "institute") {
+				education = append(education, ResumeEducation{
+					Organization: heading,
+					Degree:       content,
+				})
+			}
+		}
+	}
+	return education
+}
+
+func parseEducationSection(section SourceSection) ResumeEducation {
+	entry := ResumeEducation{}
+	heading := strings.TrimSpace(section.Heading)
+	if left, right, ok := strings.Cut(heading, " - "); ok {
+		entry.Organization = strings.TrimSpace(left)
+		if educationDegreeLike(right) {
+			entry.Degree = strings.TrimSpace(right)
+		}
+	} else if educationDegreeLike(heading) {
+		entry.Degree = heading
+	} else {
+		entry.Organization = heading
+	}
+
+	for _, line := range nonEmptyLines(section.Content) {
+		line = strings.TrimSpace(strings.TrimPrefix(line, "-"))
+		if line == "" {
+			continue
+		}
+		for _, field := range educationFields(line) {
+			applyEducationField(&entry, strings.TrimSpace(field))
+		}
+	}
+	if entry.Location == "" {
+		entry.Location = extractEducationLocation(section.Content)
+	}
+	return entry
+}
+
+func applyEducationField(entry *ResumeEducation, field string) {
+	if field == "" {
+		return
+	}
+	if strings.Contains(field, " - ") {
+		left, right, _ := strings.Cut(field, " - ")
+		applyEducationField(entry, strings.TrimSpace(left))
+		applyEducationField(entry, strings.TrimSpace(right))
+		return
+	}
+	if start, end := splitDateRange(field); start != "" || end != "" {
+		entry.EndDate = strings.TrimSpace(strings.Join([]string{start, end}, " -- "))
+		return
+	}
+	if end := extractEndDate(field); end != "" {
+		entry.EndDate = end
+		return
+	}
+	if firstYear(field) != 0 {
+		entry.EndDate = field
+		return
+	}
+	if educationDegreeLike(field) {
+		if entry.Degree == "" || len(field) > len(entry.Degree) {
+			entry.Degree = field
+		}
+		return
+	}
+	if educationInstitutionLike(field) {
+		if entry.Organization == "" {
+			entry.Organization = field
+		}
+		return
+	}
+	if entry.Location == "" && educationLocationLike(field) && !strings.EqualFold(field, entry.Organization) && !strings.EqualFold(field, entry.Degree) {
+		entry.Location = field
+	}
+}
+
+func educationDegreeLike(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "bachelor") || strings.Contains(lower, "master") || strings.Contains(lower, "phd") || strings.Contains(lower, "diploma") || strings.Contains(lower, "certificate") || strings.Contains(lower, "doctor") || strings.Contains(lower, "engineering") || strings.Contains(lower, "technology") || strings.Contains(lower, "science") || strings.Contains(lower, "information")
+}
+
+func educationInstitutionLike(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "university") || strings.Contains(lower, "college") || strings.Contains(lower, "institute") || strings.Contains(lower, "vit")
+}
+
+func educationLocationLike(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || educationDegreeLike(value) || firstYear(value) != 0 {
+		return false
+	}
+	lower := strings.ToLower(value)
+	if strings.Contains(lower, "remote") || strings.Contains(lower, "online") {
+		return true
+	}
+	if strings.Contains(value, ",") {
+		return true
+	}
+	words := strings.Fields(value)
+	if len(words) < 2 || len(words) > 4 {
+		return false
+	}
+	for _, word := range words {
+		trimmed := strings.Trim(word, ".,()")
+		if trimmed == "" {
+			return false
+		}
+		first := rune(trimmed[0])
+		if first < 'A' || first > 'Z' {
+			return false
+		}
+	}
+	return !educationInstitutionLike(value)
+}
+
+func extractEducationLocation(content string) string {
+	for _, line := range nonEmptyLines(content) {
+		for _, field := range educationFields(line) {
+			field = strings.TrimSpace(strings.TrimPrefix(field, "-"))
+			if educationLocationLike(field) {
+				return field
+			}
+		}
+	}
+	return ""
+}
+
+func educationFields(line string) []string {
+	line = strings.NewReplacer("•", "|", "·", "|", "–", "--", "—", "--").Replace(line)
+	fields := []string{}
+	for _, field := range strings.Split(line, "|") {
+		field = strings.TrimSpace(field)
+		if field != "" {
+			fields = append(fields, field)
+		}
+	}
+	return fields
+}
+
+func linkLabelFromURL(rawURL string) string {
+	label := strings.TrimPrefix(strings.TrimPrefix(rawURL, "https://"), "http://")
+	label = strings.TrimPrefix(label, "www.")
+	if host, _, ok := strings.Cut(label, "/"); ok {
+		label = host
+	}
+	if label == "" {
+		return "Link"
+	}
+	return label
+}
+
+func extractEndDate(text string) string {
+	text = strings.TrimSpace(text)
+	parts := strings.FieldsFunc(text, func(r rune) bool {
+		return r == '-' || r == 0x2013 || r == 0x2014
+	})
+	if len(parts) >= 2 {
+		date := strings.TrimSpace(parts[len(parts)-1])
+		if strings.Contains(date, "/") || strings.Contains(date, "Present") || strings.Contains(date, "present") {
+			return date
+		}
+	}
+	return ""
+}
+
+type resumeTexPromptInput struct {
+	Headline    string
+	Summary     string
+	ContactLine string
+	SkillsLine  string
+	Skills      []ResumeSkill
+	Experience  []ResumeEntry
+	Projects    []ResumeEntry
+	Education   []ResumeEducation
+	Sections    []SourceSection
+	Facts       []EvidenceFact
+	Claims      []CandidateClaim
+	Drafts      []TailoredBulletDraft
+	Analysis    JobAnalysis
+	Strategy    ApplicationStrategy
+}
+
+func buildResumeTexPrompt(input resumeTexPromptInput) string {
+	profileJSON, _ := jsonMarshalNoErr(map[string]any{
+		"headline":     input.Headline,
+		"summary":      input.Summary,
+		"contact_line": input.ContactLine,
+		"skills_line":  input.SkillsLine,
+		"skills":       input.Skills,
+		"experience":   input.Experience,
+		"projects":     input.Projects,
+		"education":    input.Education,
+	})
+	sourceSectionJSON, _ := jsonMarshalNoErr(sourceSectionSummaries(input.Sections))
+	factJSON, _ := jsonMarshalNoErr(factSummaries(input.Facts))
+	claimJSON, _ := jsonMarshalNoErr(claimSummaries(input.Claims))
+	draftJSON, _ := jsonMarshalNoErr(draftSummaries(input.Drafts))
+	jdJSON, _ := jsonMarshalNoErr(map[string]any{
+		"role_title":           input.Analysis.RoleTitle,
+		"company":              input.Analysis.Company,
+		"required_skills":      input.Analysis.RequiredSkills,
+		"preferred_skills":     input.Analysis.PreferredSkills,
+		"responsibilities":     input.Analysis.Responsibilities,
+		"top_pain_points":      input.Analysis.TopPainPoints,
+		"positioning_strategy": input.Strategy.PositioningStrategy,
+		"resume_headline":      input.Strategy.ResumeHeadline,
+		"do_not_overclaim":     input.Strategy.DoNotOverclaim,
+	})
+
+	skeleton := latexResumeTemplate()
+
+	return fmt.Sprintf(`# Task
+Generate a one-page LaTeX resume that exactly matches the provided format skeleton. Replace ALL placeholder content with tailored content from the context data below. Do NOT invent data not present in the context. Use the best-fit content for the target job description.
+
+# Format Skeleton (use this EXACT formatting, replace only content)
+`+"```latex\n%s\n```"+`
+
+# Structured Resume Data
+`+"```json\n%s\n```"+`
+
+# Source Section Content (original resume sections)
+`+"```json\n%s\n```"+`
+
+# Evidence Facts (atom-level extracted facts)
+`+"```json\n%s\n```"+`
+
+# Candidate Claims (approved atom-bank profile claims)
+`+"```json\n%s\n```"+`
+
+# Tailored Bullet Drafts (JD-specific bullet drafts)
+`+"```json\n%s\n```"+`
+
+# Job Description Analysis
+`+"```json\n%s\n```"+`
+
+# Instructions
+1. Output ONLY valid LaTeX code matching the skeleton format.
+2. Use the structured resume data as the baseline, then improve it only with source sections, evidence facts, approved claims, and tailored drafts.
+3. Do NOT invent employers, roles, dates, technologies, metrics, links, achievements, or education.
+4. Keep the resume to ONE page: 4-5 bullets for the most relevant current/recent role, 1-2 bullets for older roles, 1 bullet per project, and only the strongest 1-2 projects.
+5. Preserve real employer/project/education names, locations, dates, URLs, and contact details from the source sections/profile.
+6. Use concise, impact-oriented bullets grounded in facts/claims; prefer JD-relevant bullets but include enough verified breadth to avoid a thin one-role resume.
+7. Skills must reflect only technologies evidenced in facts/claims/source sections and should be grouped as Languages, Backend, Frontend, Databases/Infra, AI, and Tools when present.
+8. Keep the EXACT same LaTeX commands and formatting as the skeleton.
+9. Avoid banned phrases: leveraged, spearheaded, empowered, utilized, cutting-edge, game-changer, transformative, synergy, seamless.
+10. If a source value contains special LaTeX characters, escape them correctly.
+
+Return ONLY the LaTeX code, no explanations.`, skeleton, profileJSON, sourceSectionJSON, factJSON, claimJSON, draftJSON, jdJSON)
+}
+
+func (s *Store) generateResumeTex(ctx context.Context, prompt string) string {
+	if prompt == "" {
+		return ""
+	}
+	system := `You are JD Tailor's resume LaTeX generator. Return ONLY valid LaTeX code matching the provided skeleton format. Never include markdown fences or explanations.`
+	rules := s.promptRuleDigest("resume", "validation")
+	systemWithRules := system
+	if rules != "" {
+		systemWithRules = system + "\n\n# Validation Rules\n" + rules
+	}
+	text, err := s.GenerateLLMText(ctx, nil, systemWithRules, prompt, 2400)
+	if err != nil {
+		_ = s.LogEvent("warning", "resume tex generation failed: "+err.Error())
+		return ""
+	}
+	text = strings.TrimSpace(text)
+	return text
+}
+
+func jsonMarshalNoErr(v any) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+func sourceSectionSummaries(sections []SourceSection) []map[string]any {
+	result := []map[string]any{}
+	for _, section := range sections {
+		result = append(result, map[string]any{
+			"heading":      section.Heading,
+			"section_type": section.SectionType,
+			"content":      section.Content,
+		})
+	}
+	return result
+}
+
+func factSummaries(facts []EvidenceFact) []map[string]any {
+	result := []map[string]any{}
+	for _, fact := range facts {
+		result = append(result, map[string]any{
+			"fact_text":      fact.FactText,
+			"evidence_quote": fact.EvidenceQuote,
+			"technologies":   fact.Technologies,
+			"origin_heading": fact.OriginHeading,
+			"origin_type":    fact.OriginType,
+		})
+	}
+	return result
+}
+
+func claimSummaries(claims []CandidateClaim) []map[string]any {
+	result := []map[string]any{}
+	for _, claim := range claims {
+		if claim.Status != "approved" && claim.Status != "approved_restricted" {
+			continue
+		}
+		result = append(result, map[string]any{
+			"claim_text":     claim.ClaimText,
+			"technologies":   claim.Technologies,
+			"actions":        claim.Actions,
+			"capabilities":   claim.Capabilities,
+			"origin_heading": claim.OriginHeading,
+			"origin_type":    claim.OriginType,
+			"status":         claim.Status,
+		})
+	}
+	return result
+}
+
+func draftSummaries(drafts []TailoredBulletDraft) []map[string]any {
+	result := []map[string]any{}
+	for _, draft := range drafts {
+		result = append(result, map[string]any{
+			"draft_text":     draft.DraftText,
+			"origin_heading": draft.OriginHeading,
+			"origin_type":    draft.OriginType,
+		})
+	}
+	return result
+}
+
+// extractDatesFromSection extracts start and end dates from a source section's content
+func extractDatesFromSection(section SourceSection) (startDate, endDate string) {
+	lines := strings.Split(section.Content, "\n")
+	if len(lines) < 2 {
+		return "", ""
+	}
+	// First line typically has: Company | Location | Role
+	// Second line typically has: dates
+	dateLine := strings.TrimSpace(lines[len(lines)-1])
+	parts := strings.Split(dateLine, "--")
+	if len(parts) >= 2 {
+		startDate = strings.TrimSpace(parts[0])
+		endDate = strings.TrimSpace(parts[1])
+	}
+	return startDate, endDate
+}
+
+func parseSectionMetadata(section SourceSection) (company, location, title, startDate, endDate string) {
+	lines := nonEmptyLines(section.Content)
+	if len(lines) == 0 {
+		return section.Heading, "", "", "", ""
+	}
+
+	parts := strings.Split(strings.TrimSpace(lines[0]), "|")
+	if len(parts) >= 1 {
+		company = strings.TrimSpace(stripURLs(parts[0]))
+	}
+	for _, raw := range parts[1:] {
+		part := strings.TrimSpace(stripURLs(raw))
+		if part == "" || resumeLinkLabelLike(part) {
+			continue
+		}
+		if location == "" && resumeLocationLike(part) {
+			location = part
+		}
+	}
+
+	if len(lines) >= 2 {
+		secondParts := strings.Split(strings.TrimSpace(lines[1]), "|")
+		if len(secondParts) >= 1 {
+			title = strings.TrimSpace(secondParts[0])
+		}
+		if len(secondParts) >= 2 {
+			datePart := strings.TrimSpace(secondParts[len(secondParts)-1])
+			dateParts := strings.Split(datePart, "--")
+			if len(dateParts) >= 1 {
+				startDate = strings.TrimSpace(dateParts[0])
+			}
+			if len(dateParts) >= 2 {
+				endDate = strings.TrimSpace(dateParts[1])
+			}
+		}
+	}
+	return company, location, title, startDate, endDate
+}
+
+func extractCompanyURL(section SourceSection) string {
+	text := section.Heading + "\n" + section.Content
+	url := firstURLInText(text)
+	if url == "" {
+		return ""
+	}
+	return "$|$ \\href{" + url + "}{" + sanitizeLaTeX(linkLabelNearURL(text, url)) + "}"
+}
+
+func firstURLInText(text string) string {
+	for _, field := range strings.Fields(text) {
+		field = strings.Trim(field, "<>[](){}.,;'")
+		if strings.HasPrefix(field, "https://") || strings.HasPrefix(field, "http://") {
+			return field
+		}
+	}
+	return ""
+}
+
+func stripURLs(text string) string {
+	fields := strings.Fields(text)
+	kept := []string{}
+	for _, field := range fields {
+		trimmed := strings.Trim(field, "<>[](){}.,;'")
+		if strings.HasPrefix(trimmed, "https://") || strings.HasPrefix(trimmed, "http://") {
+			continue
+		}
+		kept = append(kept, field)
+	}
+	return strings.TrimSpace(strings.Join(kept, " "))
+}
+
+func linkLabelNearURL(text string, url string) string {
+	parts := strings.FieldsFunc(text, func(r rune) bool { return r == '|' || r == '\n' || r == '\t' })
+	for _, part := range parts {
+		if !strings.Contains(part, url) {
+			continue
+		}
+		label := strings.TrimSpace(stripURLs(part))
+		if resumeLinkLabelLike(label) {
+			return label
+		}
+	}
+	return linkLabelFromURL(url)
+}
+
+func resumeLinkLabelLike(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "website", "site", "github", "gitlab", "portfolio", "demo", "link", "repo", "repository":
+		return true
+	default:
+		return false
+	}
+}
+
+func resumeLocationLike(value string) bool {
+	if educationLocationLike(value) {
+		return true
+	}
+	lower := strings.ToLower(strings.TrimSpace(value))
+	return lower == "remote" || lower == "hybrid" || lower == "onsite" || strings.Contains(lower, "remote")
+}
+
+func latexResumeTemplate() string {
+	return `%-------------------------
+% Resume in Latex
+% Author : [[tex .Headline]]
+%------------------------
+
+\documentclass[letterpaper,11pt]{article}
+\usepackage{lmodern}
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+
+\hypersetup{
+    colorlinks=true,
+    urlcolor=blue
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+%----------PAGE SETUP----------
+\addtolength{\oddsidemargin}{-0.5in}
+\addtolength{\evensidemargin}{-0.5in}
+\addtolength{\textwidth}{1in}
+\addtolength{\topmargin}{-.62in}
+\addtolength{\textheight}{1.22in}
+
+\urlstyle{same}
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+%----------SECTION FORMAT----------
+\titleformat{\section}{
+  \vspace{-3pt}\scshape\raggedright\large
+}{}{0em}{}[\color{black}\titlerule \vspace{-4pt}]
+
+%----------CUSTOM COMMANDS----------
+\newcommand{\resumeItem}[1]{
+  \item\small{{#1 \vspace{-3pt}}}
+}
+
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-1pt}\item
+    \begin{tabular*}{0.97\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \textbf{#1} & #2 \\
+      \textit{\small#3} & \textit{\small #4} \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{0.97\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & #2 \\
+    \end{tabular*}\vspace{-7pt}
+}
+
+\renewcommand\labelitemii{$\vcenter{\hbox{\tiny$\bullet$}}$}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.15in, label={}]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}
+\newcommand{\resumeItemListStart}{\begin{itemize}[leftmargin=0.18in]}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-6pt}}
+
+\begin{document}
+
+%----------HEADING----------
+\begin{center}
+    \textbf{\Huge \scshape [[tex .Headline]]} \\ \vspace{1pt}
+    \small
+    [[.ContactLine]]
+\end{center}
+
+%-----------SUMMARY-----------
+\section{Professional Summary}
+\small{[[tex .Summary]]} \vspace{-4pt}
+
+%-----------TECHNICAL SKILLS-----------
+\section{Technical Skills}
+\begin{itemize}[leftmargin=0.15in, label={}]
+\small{\item{
+[[range .Skills]]\textbf{[[tex .Category]]}{: [[tex (join .Items ", ")]]} \\
+[[end]]
+}}
+\end{itemize}
+
+%-----------EXPERIENCE-----------
+\section{Experience}
+\resumeSubHeadingListStart
+[[range .Experience]]
+\resumeSubheading{[[tex .Company]] [[.URL]]}{[[tex .Location]]}{[[tex .Title]]}{[[tex .StartDate]] -- [[tex .EndDate]]}
+\resumeItemListStart
+[[range .Bullets]]\resumeItem{[[tex .]]}
+[[end]]
+\resumeItemListEnd
+[[end]]
+\resumeSubHeadingListEnd
+
+%-----------PROJECTS-----------
+\section{Projects}
+\resumeSubHeadingListStart
+[[range .Projects]]
+\resumeProjectHeading{\textbf{[[tex .Title]]}[[.URL]]}{[[tex .StartDate]] -- [[tex .EndDate]]}
+\resumeItemListStart
+[[range .Bullets]]\resumeItem{[[tex .]]}
+[[end]]
+\resumeItemListEnd
+[[end]]
+\resumeSubHeadingListEnd
+
+%-----------EDUCATION-----------
+\section{Education}
+\resumeSubHeadingListStart
+[[range .Education]]
+\resumeSubheading{[[tex .Organization]]}{[[tex .Location]]}{[[tex .Degree]]}{[[tex .EndDate]]}
+\vspace{3pt}
+[[end]]
+\resumeSubHeadingListEnd
+
+\end{document}
+`
+}
+
+func sanitizeLaTeX(input string) string {
+	return strings.NewReplacer(
+		`\`, `\textbackslash{}`,
+		`&`, `\&`,
+		`%`, `\%`,
+		`$`, `\$`,
+		`#`, `\#`,
+		`{`, `\{`,
+		`}`, `\}`,
+		`~`, `\textasciitilde{}`,
+		`^`, `\textasciicircum{}`,
+	).Replace(input)
+}
