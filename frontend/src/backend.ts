@@ -166,6 +166,38 @@ export type JobDescription = {
   updated_at: string;
 };
 
+export type JobAgentWorkflowInput = {
+  job: {company: string; title: string; url: string; raw_text: string};
+  job_id: number;
+  auto_select_bullets: boolean;
+  build_resume: boolean;
+  min_selected_bullets: number;
+  max_selected_bullets: number;
+  require_resume_review: boolean;
+};
+
+export type JobAgentWorkflowStage = {
+  key: string;
+  label: string;
+  status: string;
+  message: string;
+};
+
+export type JobAgentWorkflowResult = {
+  job: JobDescription;
+  stages: JobAgentWorkflowStage[];
+  requirements: JobRequirement[];
+  matches: JobFactMatch[];
+  drafts: TailoredBulletDraft[];
+  analysis: JobAnalysis;
+  fit: JobFitAnalysis;
+  strategy: ApplicationStrategy;
+  resume: ResumeJSON;
+  validation: ValidationResult;
+  resume_generated: boolean;
+  created_at: string;
+};
+
 export type JobRequirement = {
   id: number;
   job_id: number;
@@ -2997,6 +3029,40 @@ export async function GenerateResumeJSON(input: GenerateResumeJSONInput) {
   return resume;
 }
 
+export async function RunJobAgentWorkflow(input: JobAgentWorkflowInput) {
+  if (hasWailsBackend()) {
+    return (window as any).go.main.App.RunJobAgentWorkflow(input) as Promise<JobAgentWorkflowResult>;
+  }
+  const saved = (input.job_id > 0
+    ? await UpdateJobDescription({id: input.job_id, ...input.job})
+    : await CreateJobDescription(input.job)) as JobDescription;
+  const requirements = await ParseJobDescription(saved.id) as JobRequirement[];
+  const analysis = await AnalyzeJobDescription(saved.id) as JobAnalysis;
+  const matches = await BuildJobMatchMap(saved.id) as JobFactMatch[];
+  const fit = await GenerateFitAnalysis(saved.id) as JobFitAnalysis;
+  const strategy = await GenerateApplicationStrategy(saved.id) as ApplicationStrategy;
+  let drafts = await GenerateTailoredBulletDrafts(saved.id) as TailoredBulletDraft[];
+  if (input.auto_select_bullets) drafts = await AutoSelectResumeBullets(saved.id) as TailoredBulletDraft[];
+  let resume: ResumeJSON = {contact: {full_name: '', email: '', phone: '', location: '', linkedin: '', github: ''}, headline: '', summary: '', contact_line: '', skills_line: '', skills: [], experience: [], projects: [], education: [], tex_source: '', generated_at: ''};
+  let validation: ValidationResult = {passed: false, errors: [], warnings: [], factuality_checks: [], style_issues: [], immutable_issues: [], title_issues: []};
+  let resume_generated = false;
+  if (input.build_resume) {
+    resume = await GenerateResumeJSON({job_id: saved.id, selected_bullet_ids: drafts.filter((draft) => draft.selected_for_resume).map((draft) => draft.id)}) as ResumeJSON;
+    validation = await ValidateResumeJSON(resume, saved.id) as ValidationResult;
+    resume_generated = true;
+  }
+  return {
+    job: saved, requirements, analysis, matches, fit, strategy, drafts, resume, validation, resume_generated,
+    created_at: now(),
+    stages: [
+      {key: 'intake', label: 'JD intake', status: 'ok', message: 'job saved'},
+      {key: 'parse', label: 'Requirement parser', status: 'ok', message: `${requirements.length} requirements`},
+      {key: 'match', label: 'Evidence matcher', status: 'ok', message: `${matches.length} matches`},
+      {key: 'resume', label: 'Resume assembler', status: resume_generated ? 'ok' : 'skipped', message: resume_generated ? 'resume draft ready' : 'resume skipped'},
+    ],
+  } as JobAgentWorkflowResult;
+}
+
 export async function ValidateResumeJSON(resume: ResumeJSON, jobID: number) {
   if (hasWailsBackend()) {
     return WailsValidateResumeJSON(resume as any, jobID);
@@ -3079,6 +3145,17 @@ export async function UpdateApplicationStatus(id: number, status: string) {
   }
   const timestamp = now();
   mockApplications = mockApplications.map((a) => a.id === id ? { ...a, status, updated_at: timestamp } : a);
+  const app = mockApplications.find((a) => a.id === id);
+  if (!app) throw new Error('application not found');
+  return app;
+}
+
+export async function UpdateApplicationResumeVersion(id: number, resumeVersionID: number) {
+  if (hasWailsBackend()) {
+    return (window as any).go.main.App.UpdateApplicationResumeVersion(id, resumeVersionID);
+  }
+  const timestamp = now();
+  mockApplications = mockApplications.map((a) => a.id === id ? { ...a, resume_version_id: resumeVersionID, updated_at: timestamp } : a);
   const app = mockApplications.find((a) => a.id === id);
   if (!app) throw new Error('application not found');
   return app;

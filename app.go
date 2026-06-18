@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sync"
 )
@@ -611,6 +613,13 @@ func (a *App) GenerateResumeJSON(input GenerateResumeJSONInput) (ResumeJSON, err
 	return a.store.GenerateResumeJSON(a.ctx, input)
 }
 
+func (a *App) RunJobAgentWorkflow(input JobAgentWorkflowInput) (JobAgentWorkflowResult, error) {
+	if err := a.ensureStore(); err != nil {
+		return JobAgentWorkflowResult{}, err
+	}
+	return a.store.RunJobAgentWorkflow(a.ctx, input, nil)
+}
+
 func (a *App) ValidateResumeJSON(resume ResumeJSON, jobID int64) (ValidationResult, error) {
 	if err := a.ensureStore(); err != nil {
 		return ValidationResult{}, err
@@ -629,13 +638,19 @@ func (a *App) OpenFolder(path string) error {
 	if path == "" {
 		return errors.New("path is required")
 	}
+	openPath := path
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		openPath = filepath.Dir(path)
+	} else if err != nil && filepath.Ext(path) != "" {
+		openPath = filepath.Dir(path)
+	}
 	switch runtime.GOOS {
 	case "windows":
-		return exec.Command("explorer", path).Start()
+		return exec.Command("explorer", openPath).Start()
 	case "darwin":
-		return exec.Command("open", path).Start()
+		return exec.Command("open", openPath).Start()
 	default:
-		return exec.Command("xdg-open", path).Start()
+		return exec.Command("xdg-open", openPath).Start()
 	}
 }
 
@@ -686,6 +701,13 @@ func (a *App) UpdateApplicationStatus(id int64, status string) (Application, err
 		return Application{}, err
 	}
 	return a.store.UpdateApplicationStatus(id, status)
+}
+
+func (a *App) UpdateApplicationResumeVersion(id int64, resumeVersionID int64) (Application, error) {
+	if err := a.ensureStore(); err != nil {
+		return Application{}, err
+	}
+	return a.store.UpdateApplicationResumeVersion(id, resumeVersionID)
 }
 
 func (a *App) LogCorrection(correction CorrectionLog) (CorrectionLog, error) {

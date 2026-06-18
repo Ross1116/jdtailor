@@ -933,10 +933,13 @@ func (s *Store) generateBulletDraftsForOriginAttempt(ctx context.Context, client
 	system := `You are JD Tailor's section-scoped resume bullet drafter. Return strict JSON only.
 Write bullet suggestions for one resume origin only. Never use facts from another origin.`
 
+	atsTerms := atsKeywordGuidance(group.Requirements)
 	resumeValueRules := `- Prefer bullets that show concrete engineering output, technical ownership, system design, production reliability, security, observability, or measurable scope.
 - Prefer real artifacts over generic skills: APIs, backend services, data models, ingestion pipelines, auth systems, tracing, background jobs, schedulers, distributed systems, UI surfaces, packaging systems.
 - Prefer supported outcomes: improved debugging, reduced manual work, reliability, validation, auditability, recovery, processing quality, or delivery breadth.
 - Prefer bullets with clear action + artifact + technical detail + supported outcome/scope.
+- Optimize for ATS only with exact JD terms that are supported by same-origin evidence. Use natural wording, not keyword stuffing.
+- If the JD names a supported tool, architecture pattern, or responsibility, prefer the JD's exact spelling in one relevant bullet.
 - Do not write low-value bullets only to cover missing JD terms.
 - Do not force bullets for soft skills, degree requirements, team culture, collaboration, generic ownership, or domain language unless same-origin evidence directly supports it.
 - If a JD requirement is only weakly supported, do not write a bullet for it unless the underlying evidence is still strong and resume-worthy.`
@@ -985,6 +988,14 @@ Return at most %d drafts.
 - A bullet does not need to perfectly satisfy a high-priority requirement if it is still one of the strongest same-origin resume bullets.
 - Do not create one bullet per requirement. Create only the strongest bullets for this origin.
 - Prefer story diversity over exact JD mirroring: one product/platform bullet, one security/reliability/quality bullet, one automation/frontend/architecture bullet when evidence supports those lanes.
+
+# ATS optimization
+- This resume is for this JD only. Do not reuse generic bullets if a supported JD-specific phrasing would be more targeted.
+- Include 1 to 3 supported ATS terms per bullet when they fit naturally.
+- Prefer exact JD nouns over synonyms when evidence supports them, e.g. if the JD says "REST APIs", use "REST APIs" instead of only "backend services".
+- Do not add unsupported ATS terms. If unsupported, mention the omission in Missing/unsupported.
+- Avoid repeating the same ATS keyword across all bullets; distribute coverage across different supported requirements.
+- Priority ATS terms for this origin: %s
 
 # Bullet style
 - Start each draft_text with a strong past-tense action verb, no leading hyphen.
@@ -1036,6 +1047,7 @@ Missing/unsupported: mention any important JD detail that was not supported and 
 		group.OriginHeading,
 		group.OriginType,
 		resumeValueRules,
+		atsTerms,
 		firstNonEmpty(styleRules, "Use plain, specific, evidence-backed resume language."),
 		job.Company,
 		job.Title,
@@ -2554,8 +2566,12 @@ func draftSelectionScoreDetail(draft parsedBulletDraft, req JobRequirement, clai
 		detail.Final += detail.ResumeValue * 0.45
 	}
 
-	// 2. JD relevance is secondary.
+	// 2. JD relevance is critical for ATS, but only when supported by the draft's evidence.
 	switch req.Priority {
+	case "required":
+		detail.JDRelevance = 0.18
+	case "preferred":
+		detail.JDRelevance = 0.10
 	case "high":
 		detail.JDRelevance = 0.12
 	case "medium":
@@ -2566,6 +2582,7 @@ func draftSelectionScoreDetail(draft parsedBulletDraft, req JobRequirement, clai
 	if req.Category == "must_have" || req.Category == "responsibility" {
 		detail.JDRelevance += 0.03
 	}
+	detail.JDRelevance += atsCoverageBonus(draft, req, claimIDs, claimsByID)
 	detail.Final += detail.JDRelevance
 
 	// 3. Prefer real work experience over projects when the JD asks for production.
@@ -2642,6 +2659,87 @@ func draftSelectionReason(draft parsedBulletDraft, detail draftScoreDetail) stri
 		parts = append(parts, "project evidence capped below experience evidence")
 	}
 	return strings.Join(parts, "; ")
+}
+
+func atsKeywordGuidance(requirements []JobRequirement) string {
+	terms := []string{}
+	for _, req := range requirements {
+		if req.Priority != "required" && req.Priority != "preferred" {
+			continue
+		}
+		terms = append(terms, req.Keywords...)
+		terms = append(terms, importantRequirementTerms(req.RequirementText)...)
+	}
+	terms = normalizeStringList(terms)
+	if len(terms) == 0 {
+		return "none extracted; prioritize concrete supported nouns from requirements"
+	}
+	return strings.Join(limitStrings(terms, 18), ", ")
+}
+
+func atsCoverageBonus(draft parsedBulletDraft, req JobRequirement, claimIDs []int64, claimsByID map[int64]CandidateClaim) float64 {
+	terms := append([]string{}, req.Keywords...)
+	terms = append(terms, importantRequirementTerms(req.RequirementText)...)
+	terms = normalizeStringList(terms)
+	if len(terms) == 0 {
+		return 0
+	}
+	draftText := strings.ToLower(draft.DraftText + " " + draft.ValueTheme)
+	evidenceText := strings.ToLower(draft.Rationale)
+	for _, claimID := range claimIDs {
+		claim := claimsByID[claimID]
+		evidenceText += " " + strings.Join(claim.Technologies, " ") + " " + strings.Join(claim.Capabilities, " ") + " " + strings.Join(claim.Objects, " ") + " " + strings.Join(claim.Artifacts, " ") + " " + strings.Join(claim.Outcomes, " ")
+	}
+	covered := 0
+	supportedButMissing := 0
+	for _, term := range terms {
+		term = strings.ToLower(strings.TrimSpace(term))
+		if len(term) < 3 {
+			continue
+		}
+		inDraft := strings.Contains(draftText, term)
+		inEvidence := strings.Contains(evidenceText, term)
+		if inDraft && inEvidence {
+			covered++
+		} else if inEvidence {
+			supportedButMissing++
+		}
+	}
+	bonus := float64(covered) * 0.035
+	bonus += float64(supportedButMissing) * 0.012
+	if bonus > 0.16 {
+		bonus = 0.16
+	}
+	return bonus
+}
+
+func importantRequirementTerms(text string) []string {
+	terms := []string{}
+	for _, phrase := range extractKnownTechPhrases(text) {
+		terms = append(terms, phrase)
+	}
+	for _, raw := range strings.Fields(strings.ToLower(text)) {
+		word := strings.Trim(raw, " .,:;()[]{}+-/")
+		if len(word) < 4 || commonResumeFitWord(word) {
+			continue
+		}
+		if strings.HasSuffix(word, "ing") || strings.HasSuffix(word, "ed") || strings.HasSuffix(word, "s") {
+			terms = append(terms, word)
+		}
+	}
+	return terms
+}
+
+func extractKnownTechPhrases(text string) []string {
+	lower := strings.ToLower(text)
+	candidates := []string{"rest api", "rest apis", "microservices", "postgresql", "mysql", "sqlite", "react", "typescript", "javascript", "python", "golang", "go", "docker", "kubernetes", "aws", "ci/cd", "github actions", "openai", "llm", "rag", "embeddings", "fastapi", "gin", "node.js", "redis", "elasticsearch", "oauth", "jwt", "rbac"}
+	found := []string{}
+	for _, candidate := range candidates {
+		if strings.Contains(lower, candidate) {
+			found = append(found, candidate)
+		}
+	}
+	return found
 }
 
 func looksLikeToolListBullet(text string) bool {
@@ -4329,6 +4427,18 @@ func (s *Store) getJobDescription(id int64) (JobDescription, error) {
 		return JobDescription{}, sql.ErrNoRows
 	}
 	return jobs[0], nil
+}
+
+func (s *Store) jobExists(id int64) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(context.Background(), `SELECT 1 FROM job_descriptions WHERE id = ?`, id).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) getTailoredBulletDraft(id int64) (TailoredBulletDraft, error) {

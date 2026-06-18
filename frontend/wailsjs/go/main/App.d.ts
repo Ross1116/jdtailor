@@ -120,6 +120,8 @@ export function RenderResumePDF(arg1:main.ResumeJSON):Promise<main.RenderPDFResu
 
 export function RenderSamplePDF():Promise<main.RenderPDFResult>;
 
+export function RunJobAgentWorkflow(arg1:main.JobAgentWorkflowInput):Promise<main.JobAgentWorkflowResult>;
+
 export function SaveAPIKey(arg1:main.SaveAPIKeyInput):Promise<main.ToolStatus>;
 
 export function SaveApplication(arg1:main.Application):Promise<main.Application>;
@@ -137,6 +139,8 @@ export function StartContextAgent(arg1:number):Promise<main.ContextAgentRun>;
 export function StopContextAgent(arg1:number):Promise<main.ContextAgentRun>;
 
 export function TestLLM():Promise<main.LLMTestResult>;
+
+export function UpdateApplicationResumeVersion(arg1:number,arg2:number):Promise<main.Application>;
 
 export function UpdateApplicationStatus(arg1:number,arg2:string):Promise<main.Application>;
 

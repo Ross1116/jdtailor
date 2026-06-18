@@ -238,6 +238,10 @@ export function RenderSamplePDF() {
   return window['go']['main']['App']['RenderSamplePDF']();
 }
 
+export function RunJobAgentWorkflow(arg1) {
+  return window['go']['main']['App']['RunJobAgentWorkflow'](arg1);
+}
+
 export function SaveAPIKey(arg1) {
   return window['go']['main']['App']['SaveAPIKey'](arg1);
 }
@@ -272,6 +276,10 @@ export function StopContextAgent(arg1) {
 
 export function TestLLM() {
   return window['go']['main']['App']['TestLLM']();
+}
+
+export function UpdateApplicationResumeVersion(arg1, arg2) {
+  return window['go']['main']['App']['UpdateApplicationResumeVersion'](arg1, arg2);
 }
 
 export function UpdateApplicationStatus(arg1, arg2) {

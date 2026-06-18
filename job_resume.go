@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -110,7 +111,7 @@ type GenerateResumeJSONInput struct {
 }
 
 func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSONInput) (ResumeJSON, error) {
-	_, err := s.getJobDescription(input.JobID)
+	job, err := s.getJobDescription(input.JobID)
 	if err != nil {
 		return ResumeJSON{}, err
 	}
@@ -289,6 +290,7 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 	frontendSet := map[string]bool{"React": true, "Next.js": true, "Vite": true, "Tailwind": true}
 	dbInfraSet := map[string]bool{"PostgreSQL": true, "MySQL": true, "SQLite": true, "ElasticSearch": true, "Elasticsearch": true, "Redis": true, "MongoDB": true, "Docker": true, "Linux": true, "GitHub Actions": true}
 	aiSet := map[string]bool{"LLM": true, "LLM API": true, "OpenAI": true, "Embeddings": true, "Vector Databases": true, "RAG": true}
+	jobTerms := resumeTailoringTerms(job, analysis, strategy)
 	for skill := range skillSet {
 		if !resumeSkillAllowed(skill) {
 			continue
@@ -313,22 +315,22 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 
 	skills := []ResumeSkill{}
 	if len(langSkills) > 0 {
-		skills = append(skills, ResumeSkill{Category: "Languages", Items: normalizeStringList(langSkills)})
+		skills = append(skills, ResumeSkill{Category: "Languages", Items: rankResumeSkills(langSkills, jobTerms, 6)})
 	}
 	if len(backendSkills) > 0 {
-		skills = append(skills, ResumeSkill{Category: "Backend", Items: normalizeStringList(backendSkills)})
+		skills = append(skills, ResumeSkill{Category: "Backend", Items: rankResumeSkills(backendSkills, jobTerms, 7)})
 	}
 	if len(frontendSkills) > 0 {
-		skills = append(skills, ResumeSkill{Category: "Frontend", Items: normalizeStringList(frontendSkills)})
+		skills = append(skills, ResumeSkill{Category: "Frontend", Items: rankResumeSkills(frontendSkills, jobTerms, 6)})
 	}
 	if len(dbInfraSkills) > 0 {
-		skills = append(skills, ResumeSkill{Category: "Databases/Infra", Items: normalizeStringList(dbInfraSkills)})
+		skills = append(skills, ResumeSkill{Category: "Databases/Infra", Items: rankResumeSkills(dbInfraSkills, jobTerms, 7)})
 	}
 	if len(aiSkills) > 0 {
-		skills = append(skills, ResumeSkill{Category: "AI", Items: normalizeStringList(aiSkills)})
+		skills = append(skills, ResumeSkill{Category: "AI", Items: rankResumeSkills(aiSkills, jobTerms, 6)})
 	}
 	if len(toolSkills) > 0 {
-		skills = append(skills, ResumeSkill{Category: "Tools", Items: normalizeStringList(toolSkills)})
+		skills = append(skills, ResumeSkill{Category: "Tools", Items: rankResumeSkills(toolSkills, jobTerms, 5)})
 	}
 
 	headline := strings.TrimSpace(profile.Contact.FullName)
@@ -342,7 +344,7 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 	contactLine := buildContactLine(profile.Contact)
 	skillsLine := buildSkillsLine(skills)
 	education := buildEducationFromSections(sections)
-	summary := buildResumeSummary(analysis, claimIDs, claimsByID, approvedFacts, profile, sections)
+	summary := buildResumeSummary(job, analysis, strategy, selectedDrafts, claimIDs, claimsByID, approvedFacts, profile, sections)
 	resume := ResumeJSON{
 		Headline:    headline,
 		Summary:     summary,
@@ -355,8 +357,32 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 		TexSource:   "",
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 	}
+	resume = optimizeResumeForATS(job, analysis, strategy, resume)
 
 	return resume, nil
+}
+
+func optimizeResumeForATS(job JobDescription, analysis JobAnalysis, strategy ApplicationStrategy, resume ResumeJSON) ResumeJSON {
+	terms := resumeTailoringTerms(job, analysis, strategy)
+	for i := range resume.Skills {
+		resume.Skills[i].Items = rankResumeSkills(resume.Skills[i].Items, terms, 8)
+	}
+	resume.SkillsLine = buildSkillsLine(resume.Skills)
+	jdSkills := rankResumeSkills(append(append([]string{}, analysis.RequiredSkills...), analysis.PreferredSkills...), terms, 4)
+	if len(jdSkills) > 0 && !containsAnyFold(resume.Summary, jdSkills) {
+		resume.Summary = strings.TrimSuffix(resume.Summary, ".") + ", with recent work aligned to " + strings.Join(limitStrings(jdSkills, 2), " and ") + "."
+	}
+	return resume
+}
+
+func containsAnyFold(text string, terms []string) bool {
+	lower := strings.ToLower(text)
+	for _, term := range terms {
+		if strings.Contains(lower, strings.ToLower(term)) {
+			return true
+		}
+	}
+	return false
 }
 
 func supplementResumeEntriesFromSections(experienceEntries []ResumeEntry, projectEntries []ResumeEntry, sections []SourceSection) ([]ResumeEntry, []ResumeEntry) {
@@ -619,7 +645,70 @@ func resumeToolSkillAllowed(skill string) bool {
 	return allowed[lower]
 }
 
-func buildResumeSummary(analysis JobAnalysis, claimIDs map[int64]bool, claimsByID map[int64]CandidateClaim, facts []EvidenceFact, profile CandidateProfile, sections []SourceSection) string {
+func resumeTailoringTerms(job JobDescription, analysis JobAnalysis, strategy ApplicationStrategy) map[string]bool {
+	terms := map[string]bool{}
+	add := func(values ...string) {
+		for _, value := range values {
+			for _, token := range strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+				return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '#'
+			}) {
+				if len(token) > 1 {
+					terms[token] = true
+				}
+			}
+		}
+	}
+	add(job.Title, job.RawText, analysis.RoleTitle, analysis.RoleArchetype)
+	add(analysis.RequiredSkills...)
+	add(analysis.PreferredSkills...)
+	add(analysis.Responsibilities...)
+	add(analysis.TopPainPoints...)
+	add(strategy.Keywords...)
+	add(strategy.ResumeHeadline, strategy.PositioningStrategy)
+	return terms
+}
+
+func rankResumeSkills(skills []string, jobTerms map[string]bool, limit int) []string {
+	type scoredSkill struct {
+		Value string
+		Score int
+	}
+	scored := []scoredSkill{}
+	seen := map[string]bool{}
+	for _, skill := range normalizeStringList(skills) {
+		key := strings.ToLower(strings.TrimSpace(skill))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		score := 0
+		for _, token := range strings.FieldsFunc(key, func(r rune) bool { return r == ' ' || r == '-' || r == '/' || r == '.' }) {
+			if jobTerms[token] {
+				score += 10
+			}
+		}
+		if jobTerms[key] {
+			score += 20
+		}
+		scored = append(scored, scoredSkill{Value: skill, Score: score})
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].Score == scored[j].Score {
+			return scored[i].Value < scored[j].Value
+		}
+		return scored[i].Score > scored[j].Score
+	})
+	result := []string{}
+	for _, item := range scored {
+		result = append(result, item.Value)
+		if limit > 0 && len(result) >= limit {
+			break
+		}
+	}
+	return result
+}
+
+func buildResumeSummary(job JobDescription, analysis JobAnalysis, strategy ApplicationStrategy, drafts []TailoredBulletDraft, claimIDs map[int64]bool, claimsByID map[int64]CandidateClaim, facts []EvidenceFact, profile CandidateProfile, sections []SourceSection) string {
 	techs := []string{}
 	capabilities := []string{}
 	artifacts := []string{}
@@ -635,15 +724,31 @@ func buildResumeSummary(analysis JobAnalysis, claimIDs map[int64]bool, claimsByI
 	for _, fact := range facts {
 		techs = append(techs, fact.Technologies...)
 	}
+	for _, draft := range drafts {
+		artifacts = append(artifacts, draft.ValueTheme, draft.OriginType)
+	}
 	techs = normalizeStringList(techs)
 	capabilities = normalizeStringList(capabilities)
 	artifacts = normalizeStringList(artifacts)
 	domains = normalizeStringList(domains)
+	jobTerms := resumeTailoringTerms(job, analysis, strategy)
+	techs = rankResumeSkills(techs, jobTerms, 6)
 
 	role := humanSummaryRole(analysis.RoleTitle, capabilities, techs)
+	if strings.TrimSpace(strategy.ResumeHeadline) != "" {
+		role = strings.TrimSuffix(strategy.ResumeHeadline, ".")
+	}
 	focus := humanSummaryFocus(capabilities, domains, artifacts)
+	if len(analysis.TopPainPoints) > 0 {
+		focus = humanizeRequirementPhrase(analysis.TopPainPoints[0])
+	} else if len(analysis.Responsibilities) > 0 {
+		focus = humanizeRequirementPhrase(analysis.Responsibilities[0])
+	}
 	techStr := strings.Join(limitStrings(techs, 6), ", ")
 	recentWork := humanSummaryRecentWork(capabilities, artifacts)
+	if len(drafts) > 0 && strings.TrimSpace(drafts[0].ValueTheme) != "" {
+		recentWork = "Recent work includes " + strings.TrimSuffix(strings.ToLower(drafts[0].ValueTheme), ".")
+	}
 	duration := humanExperienceDuration(profile, sections)
 
 	contexts := make(map[string]bool)
@@ -661,6 +766,23 @@ func buildResumeSummary(analysis JobAnalysis, claimIDs map[int64]bool, claimsByI
 		return role + duration + " focused on " + focus + contextPhrase + ". " + recentWork + "."
 	}
 	return role + duration + " focused on " + focus + " using " + techStr + contextPhrase + ". " + recentWork + "."
+}
+
+func humanizeRequirementPhrase(text string) string {
+	text = strings.TrimSpace(text)
+	text = strings.Trim(text, ".")
+	if text == "" {
+		return "shipping practical software systems"
+	}
+	text = strings.TrimPrefix(text, "Responsible for ")
+	text = strings.TrimPrefix(text, "responsible for ")
+	if len(text) > 90 {
+		text = text[:90]
+		if idx := strings.LastIndex(text, " "); idx > 40 {
+			text = text[:idx]
+		}
+	}
+	return strings.ToLower(text[:1]) + text[1:]
 }
 
 func humanSummaryRole(roleTitle string, capabilities []string, techs []string) string {
@@ -985,6 +1107,110 @@ func (s *Store) ValidateResumeJSON(resume ResumeJSON, jobID int64) (ValidationRe
 	return result, nil
 }
 
+func (s *Store) HumanizeTailoredResume(ctx context.Context, client *http.Client, job JobDescription, analysis JobAnalysis, resume ResumeJSON) (ResumeJSON, error) {
+	atsTerms := rankResumeSkills(append(append([]string{}, analysis.RequiredSkills...), analysis.PreferredSkills...), resumeTailoringTerms(job, analysis, ApplicationStrategy{}), 18)
+	input := map[string]any{
+		"job_title":       job.Title,
+		"company":         job.Company,
+		"jd_focus":        append(analysis.TopPainPoints, analysis.RequiredSkills...),
+		"ats_terms":       atsTerms,
+		"resume":          resume,
+		"editable_fields": []string{"summary", "skills", "skills_line", "experience.bullets", "projects.bullets"},
+	}
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return resume, err
+	}
+	system := `You are JD Tailor's human resume editor. Return only valid JSON for the same resume schema.
+Rules:
+- Make the summary, skills ordering, and bullets sound human, precise, and professional.
+- Tailor wording toward the JD's actual needs.
+- Optimize for ATS by placing supported JD keywords naturally in Summary, Skills, and relevant bullets.
+- Prefer exact JD phrasing for supported tools/responsibilities, but never stuff keywords or make awkward sentences.
+- If two JDs are different, the summary and bullets should visibly emphasize different supported themes.
+- Do not invent tools, metrics, companies, titles, domains, responsibilities, dates, or impact.
+- Preserve contact, education, company/title/date fields, claim_ids, and bullet_ids exactly.
+- Avoid AI resume cliches: leveraged, spearheaded, dynamic, innovative, cutting-edge, seamless, empowered, utilized.
+- Keep concise one-page resume style.`
+	text, err := s.GenerateLLMText(ctx, client, system, string(payload), 2600)
+	if err != nil {
+		return resume, err
+	}
+	var edited ResumeJSON
+	if err := json.Unmarshal([]byte(extractJSONObject(text)), &edited); err != nil {
+		return resume, err
+	}
+	edited = normalizeResumeJSONForHumanEdit(resume, edited)
+	return edited, nil
+}
+
+func normalizeResumeJSONForHumanEdit(original ResumeJSON, edited ResumeJSON) ResumeJSON {
+	edited.ContactLine = original.ContactLine
+	edited.Headline = firstNonEmpty(edited.Headline, original.Headline)
+	edited.TexSource = original.TexSource
+	edited.GeneratedAt = original.GeneratedAt
+	if len(edited.Experience) != len(original.Experience) {
+		edited.Experience = original.Experience
+	} else {
+		for i := range edited.Experience {
+			edited.Experience[i].Company = original.Experience[i].Company
+			edited.Experience[i].URL = original.Experience[i].URL
+			edited.Experience[i].Title = original.Experience[i].Title
+			edited.Experience[i].Location = original.Experience[i].Location
+			edited.Experience[i].StartDate = original.Experience[i].StartDate
+			edited.Experience[i].EndDate = original.Experience[i].EndDate
+			edited.Experience[i].ClaimIDs = original.Experience[i].ClaimIDs
+			edited.Experience[i].BulletIDs = original.Experience[i].BulletIDs
+			if len(edited.Experience[i].Bullets) == 0 || len(edited.Experience[i].Bullets) > len(original.Experience[i].Bullets)+1 {
+				edited.Experience[i].Bullets = original.Experience[i].Bullets
+			}
+		}
+	}
+	if len(edited.Projects) != len(original.Projects) {
+		edited.Projects = original.Projects
+	} else {
+		for i := range edited.Projects {
+			edited.Projects[i].Company = original.Projects[i].Company
+			edited.Projects[i].URL = original.Projects[i].URL
+			edited.Projects[i].Title = original.Projects[i].Title
+			edited.Projects[i].Location = original.Projects[i].Location
+			edited.Projects[i].StartDate = original.Projects[i].StartDate
+			edited.Projects[i].EndDate = original.Projects[i].EndDate
+			edited.Projects[i].ClaimIDs = original.Projects[i].ClaimIDs
+			edited.Projects[i].BulletIDs = original.Projects[i].BulletIDs
+			if len(edited.Projects[i].Bullets) == 0 || len(edited.Projects[i].Bullets) > len(original.Projects[i].Bullets)+1 {
+				edited.Projects[i].Bullets = original.Projects[i].Bullets
+			}
+		}
+	}
+	if len(edited.Education) == 0 {
+		edited.Education = original.Education
+	}
+	if len(edited.Skills) == 0 {
+		edited.Skills = original.Skills
+	}
+	if edited.SkillsLine == "" {
+		edited.SkillsLine = buildSkillsLine(edited.Skills)
+	}
+	if edited.Summary == "" {
+		edited.Summary = original.Summary
+	}
+	return edited
+}
+
+func extractJSONObject(text string) string {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "{") && strings.HasSuffix(text, "}") {
+		return text
+	}
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+	if start >= 0 && end > start {
+		return text[start : end+1]
+	}
+	return text
+}
+
 func supportedBulletEvidence(bullet string, claimsByID map[int64]CandidateClaim) string {
 	parts := []string{}
 	for _, claim := range claimsByID {
@@ -1173,6 +1399,16 @@ func renderResumeTemplate(resume ResumeJSON) (string, error) {
 }
 
 func (s *Store) SaveResumeVersion(version ResumeVersion) (ResumeVersion, error) {
+	if version.JobID <= 0 {
+		return ResumeVersion{}, fmt.Errorf("invalid job_id %d for resume version", version.JobID)
+	}
+	exists, err := s.jobExists(version.JobID)
+	if err != nil {
+		return ResumeVersion{}, fmt.Errorf("checking job existence: %w", err)
+	}
+	if !exists {
+		return ResumeVersion{}, fmt.Errorf("job %d does not exist", version.JobID)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	resumeJSONBytes, _ := json.Marshal(version.ResumeJSON)
 	validationBytes, _ := json.Marshal(version.ValidationResult)
@@ -1254,6 +1490,9 @@ func (s *Store) SaveApplication(app Application) (Application, error) {
 		app.UpdatedAt = now
 		return app, nil
 	}
+	if app.JobID <= 0 {
+		return Application{}, fmt.Errorf("invalid job_id %d for application", app.JobID)
+	}
 
 	result, err := s.db.ExecContext(
 		context.Background(),
@@ -1310,6 +1549,15 @@ func (s *Store) ListApplications() ([]Application, error) {
 func (s *Store) UpdateApplicationStatus(id int64, status string) (Application, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.ExecContext(context.Background(), `UPDATE applications SET status = ?, updated_at = ? WHERE id = ?`, normalizeAppStatus(status), now, id)
+	if err != nil {
+		return Application{}, err
+	}
+	return s.GetApplication(id)
+}
+
+func (s *Store) UpdateApplicationResumeVersion(id int64, resumeVersionID int64) (Application, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(context.Background(), `UPDATE applications SET resume_version_id = ?, updated_at = ? WHERE id = ?`, resumeVersionID, now, id)
 	if err != nil {
 		return Application{}, err
 	}

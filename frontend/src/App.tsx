@@ -121,6 +121,7 @@ import {
   StartContextAgent,
   StopContextAgent,
   GenerateResumeJSON,
+  RunJobAgentWorkflow,
   ValidateResumeJSON,
   RenderResumePDF,
   OpenFolder,
@@ -130,6 +131,7 @@ import {
   GetApplication,
   ListApplications,
   UpdateApplicationStatus,
+  UpdateApplicationResumeVersion,
   LogCorrection,
   ListCorrections,
   ResumeJSON,
@@ -138,6 +140,7 @@ import {
   CorrectionLog,
   ValidationResult,
   GenerateResumeJSONInput,
+  JobAgentWorkflowResult,
 } from './backend';
 
 type Health = {
@@ -199,10 +202,24 @@ type WorkItem = {
 };
 
 type LoadState = 'loading' | 'ready' | 'error';
-type View = 'pipeline' | 'sources' | 'settings';
+type View = 'dashboard' | 'pipeline' | 'sources' | 'settings';
 type PipelineStep = 'job' | 'bullets' | 'resume' | 'tracker';
 type JobDraft = {company: string; title: string; url: string; raw_text: string};
-type PipelineOptions = {autoSelectBullets: boolean; buildResume: boolean};
+type GeneratedResumeDraft = {
+  id: string;
+  job_id: number;
+  resume: ResumeJSON;
+  validation: ValidationResult;
+  created_at: string;
+};
+type JobWorkflowState = {
+  pct: number;
+  stage: PipelineStep;
+  label: string;
+  tone: 'slate' | 'blue' | 'green' | 'amber' | 'red';
+  selectedBullets: number;
+  totalBullets: number;
+};
 
 const emptyJobDraft: JobDraft = {company: '', title: '', url: '', raw_text: ''};
 
@@ -232,7 +249,7 @@ const APP_STATUS_LABELS: Record<string, string> = {
 };
 
 function App() {
-  const [activeView, setActiveView] = useState<View>('pipeline');
+  const [activeView, setActiveView] = useState<View>('dashboard');
   const [pipelineStep, setPipelineStep] = useState<PipelineStep>('job');
   const [loadState, setLoadState] = useState<LoadState>('loading');
   const [error, setError] = useState('');
@@ -258,6 +275,7 @@ function App() {
   const [jobRequirements, setJobRequirements] = useState<JobRequirement[]>([]);
   const [jobMatches, setJobMatches] = useState<JobFactMatch[]>([]);
   const [bulletDrafts, setBulletDrafts] = useState<TailoredBulletDraft[]>([]);
+  const bulletDraftsRef = useRef<Map<number, TailoredBulletDraft[]>>(new Map());
   const [bulletEvents, setBulletEvents] = useState<BulletGenerationEvent[]>([]);
   const [jobAnalysis, setJobAnalysis] = useState<JobAnalysis | null>(null);
   const [fitAnalysis, setFitAnalysis] = useState<JobFitAnalysis | null>(null);
@@ -277,27 +295,35 @@ function App() {
     raw_text: '',
   });
   const [newJobDraft, setNewJobDraft] = useState<JobDraft>(emptyJobDraft);
-  const [pipelineOptions, setPipelineOptions] = useState<PipelineOptions>({autoSelectBullets: true, buildResume: true});
   const [apiKey, setAPIKey] = useState('');
   const [llmResult, setLLMResult] = useState<LLMTestResult | null>(null);
   const [pdfResult, setPDFResult] = useState<RenderPDFResult | null>(null);
-  const [pdfSuccess, setPDFSuccess] = useState<{ path: string; jobTitle: string } | null>(null);
+  const [pdfSuccess, setPDFSuccess] = useState<{ path: string; jobTitle: string; jobID: number } | null>(null);
   const [busyAction, setBusyAction] = useState('');
   const [applications, setApplications] = useState<Application[]>([]);
   const [resumeVersions, setResumeVersions] = useState<ResumeVersion[]>([]);
+  const [generatedResumeDrafts, setGeneratedResumeDrafts] = useState<GeneratedResumeDraft[]>([]);
   const [activeResume, setActiveResume] = useState<ResumeJSON | null>(null);
   const [editingResume, setEditingResume] = useState<ResumeJSON | null>(null);
   const [activeValidation, setActiveValidation] = useState<ValidationResult | null>(null);
   const [selectedApplicationID, setSelectedApplicationID] = useState<number>(0);
   const [applicationNotes, setApplicationNotes] = useState('');
+  const [applicationStatusDraft, setApplicationStatusDraft] = useState('draft');
+  const [jobAgentStages, setJobAgentStages] = useState<JobAgentWorkflowResult['stages']>([]);
+  const [jobSearch, setJobSearch] = useState('');
+  const [jobStatusFilter, setJobStatusFilter] = useState('all');
   const pollingContextRunIDs = useRef<Set<number>>(new Set());
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
   const [showAddJob, setShowAddJob] = useState(false);
   const [showImportSource, setShowImportSource] = useState(false);
   const [editingProfile, setEditingProfile] = useState(false);
+  const jobContextRequestRef = useRef(0);
 
   const selectedSource = sources.find((source) => source.id === selectedSourceID);
   const selectedJob = jobs.find((job) => job.id === selectedJobID);
+  const selectedJobDrafts = useMemo(() => bulletDrafts.filter((draft) => draft.job_id === selectedJobID), [bulletDrafts, selectedJobID]);
+  const selectedGeneratedResumes = useMemo(() => generatedResumeDrafts.filter((draft) => draft.job_id === selectedJobID), [generatedResumeDrafts, selectedJobID]);
+  const newJobInferred = useMemo(() => inferJobDetailsFromText(newJobDraft.raw_text), [newJobDraft.raw_text]);
   const selectedApplicationInfo = applications.find((a) => a.id === selectedApplicationID);
   const queuedFacts = facts.filter((fact) => fact.status === 'needs_review');
   const queuedClaims = claims.filter((claim) => claim.status === 'needs_review');
@@ -312,6 +338,38 @@ function App() {
     }
     return map;
   }, [applications]);
+
+  const resumeVersionsByJobID = useMemo(() => {
+    const map = new Map<number, ResumeVersion[]>();
+    for (const version of resumeVersions) {
+      const jobVersions = map.get(version.job_id) || [];
+      map.set(version.job_id, [version, ...jobVersions]);
+    }
+    return map;
+  }, [resumeVersions]);
+
+  const jobWorkflowByID = useMemo(() => {
+    const map = new Map<number, JobWorkflowState>();
+    for (const job of jobs) {
+      const app = jobAppsMap.get(job.id);
+      const versions = resumeVersionsByJobID.get(job.id) || [];
+      const drafts = bulletDrafts.filter((draft) => draft.job_id === job.id);
+      map.set(job.id, buildJobWorkflowState(job, app, versions, drafts, selectedJobID === job.id ? jobRequirements : []));
+    }
+    return map;
+  }, [jobs, jobAppsMap, resumeVersionsByJobID, bulletDrafts, selectedJobID, jobRequirements]);
+
+  const filteredJobs = useMemo(() => {
+    const query = jobSearch.trim().toLowerCase();
+    return jobs.filter((job) => {
+      const app = jobAppsMap.get(job.id);
+      if (jobStatusFilter === 'active' && app?.status && ['rejected', 'offer'].includes(app.status)) return false;
+      if (jobStatusFilter === 'no_resume' && (resumeVersionsByJobID.get(job.id)?.length || generatedResumeDrafts.some((draft) => draft.job_id === job.id))) return false;
+      if (jobStatusFilter !== 'all' && jobStatusFilter !== 'active' && jobStatusFilter !== 'no_resume' && app?.status !== jobStatusFilter) return false;
+      if (!query) return true;
+      return [job.company, job.title, job.url, app?.status || ''].join(' ').toLowerCase().includes(query);
+    });
+  }, [jobs, jobAppsMap, resumeVersionsByJobID, generatedResumeDrafts, jobSearch, jobStatusFilter]);
 
   const activeWorkItems: WorkItem[] = [
     ...runningContextRuns.map((run) => {
@@ -351,7 +409,7 @@ function App() {
         ListJobDescriptions().catch((e: any) => { throw new Error('ListJobDescriptions: ' + e) }),
         ListApplications().catch((e: any) => { throw new Error('ListApplications: ' + e) }),
       ]);
-      const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results;
+const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results;
       setHealth(nh as Health);
       setSettings(ns as Settings);
       setToolStatus(nst as ToolStatus);
@@ -363,11 +421,24 @@ function App() {
       setClaims(normalizeClaims(ncl as CandidateClaim[] | null | undefined));
       setBlockedClaims(normalizeBlockedClaims(nblk as BlockedClaim[] | null | undefined));
       setContextRuns(normalizeContextRuns(ncr as ContextAgentRun[] | null | undefined));
-      setJobs((nj ?? []) as JobDescription[]);
+      setJobs(normalizeJobs(nj as JobDescription[] | null | undefined));
       setApplications((na ?? []) as Application[]);
+      const loadedJobs = (nj as JobDescription[]) ?? [];
+      bulletDraftsRef.current.clear();
+      for (const job of loadedJobs) {
+        const drafts = normalizeDrafts(await ListTailoredBulletDrafts(job.id).catch(() => []) as TailoredBulletDraft[] | null | undefined);
+        bulletDraftsRef.current.set(job.id, drafts);
+      }
+      setBulletDrafts(Array.from(bulletDraftsRef.current.values()).flat());
+      const allVersions: ResumeVersion[] = [];
+      for (const job of loadedJobs) {
+        const vers = normalizeResumeVersions(await ListResumeVersions(job.id).catch(() => []) as ResumeVersion[] | null | undefined);
+        allVersions.push(...vers);
+      }
+      setResumeVersions(normalizeResumeVersions(allVersions));
       const firstSrc = (nsrc as CandidateSource[] | undefined)?.[0];
       if (!selectedSourceID && firstSrc) setSelectedSourceID(firstSrc.id);
-      const firstJob = (nj as JobDescription[] | undefined)?.[0];
+      const firstJob = loadedJobs[0];
       if (!selectedJobID && firstJob) {
         setSelectedJobID(firstJob.id);
         setJobDraft({company: firstJob.company, title: firstJob.title, url: firstJob.url, raw_text: firstJob.raw_text});
@@ -381,6 +452,50 @@ function App() {
       setRuntimeError(msg);
       console.error('App load error:', err);
     }
+  }
+
+  async function loadAllResumeVersions() {
+    const fetchedJobs = jobs.length > 0 ? jobs : ((await ListJobDescriptions()) as JobDescription[]);
+    const allVersions: ResumeVersion[] = [];
+    for (const job of fetchedJobs) {
+      const vers = normalizeResumeVersions(await ListResumeVersions(job.id).catch(() => []) as ResumeVersion[] | null | undefined);
+      allVersions.push(...vers);
+    }
+    setResumeVersions(normalizeResumeVersions(allVersions));
+  }
+
+  async function refreshJobsAndVersions(): Promise<JobDescription[]> {
+    const nextJobs = normalizeJobs((await ListJobDescriptions()) as JobDescription[] | null | undefined);
+    setJobs(nextJobs);
+    const allVersions: ResumeVersion[] = [];
+    for (const job of nextJobs) {
+      const vers = normalizeResumeVersions(await ListResumeVersions(job.id).catch(() => []) as ResumeVersion[] | null | undefined);
+      allVersions.push(...vers);
+    }
+    setResumeVersions(normalizeResumeVersions(allVersions));
+    return nextJobs;
+  }
+
+  function replaceDraftsForJob(jobID: number, drafts: TailoredBulletDraft[] | null | undefined) {
+    const normalized = normalizeDrafts(drafts);
+    bulletDraftsRef.current.set(jobID, normalized);
+    setBulletDrafts(Array.from(bulletDraftsRef.current.values()).flat());
+  }
+
+  function updateDraftInCache(saved: TailoredBulletDraft) {
+    const existing = bulletDraftsRef.current.get(saved.job_id) || [];
+    bulletDraftsRef.current.set(saved.job_id, normalizeDrafts(existing.map((draft) => draft.id === saved.id ? saved : draft)));
+    setBulletDrafts(Array.from(bulletDraftsRef.current.values()).flat());
+  }
+
+  function removeDraftFromCache(draftID: number) {
+    for (const [jobID, drafts] of bulletDraftsRef.current.entries()) {
+      if (drafts.some((draft) => draft.id === draftID)) {
+        bulletDraftsRef.current.set(jobID, drafts.filter((draft) => draft.id !== draftID));
+        break;
+      }
+    }
+    setBulletDrafts(Array.from(bulletDraftsRef.current.values()).flat());
   }
 
   async function refreshEvents() {
@@ -448,25 +563,24 @@ function App() {
   }
 
   async function refreshWorkflow() {
-    const [nSrc, nSec, nF, nCl, nRuns, nJobs] = await Promise.all([
+    const [nSrc, nSec, nF, nCl, nRuns, nJobs, nApps] = await Promise.all([
       ListCandidateSources(), ListSourceSections(0), ListEvidenceFacts('all'),
-      ListCandidateClaims('all'), ListContextAgentRuns(0), ListJobDescriptions(),
+      ListCandidateClaims('all'), ListContextAgentRuns(0), ListJobDescriptions(), ListApplications(),
     ]);
     setSources(normalizeSources(nSrc as CandidateSource[] | null | undefined));
     setSections((nSec ?? []) as SourceSection[]);
     setFacts(normalizeFacts(nF as EvidenceFact[] | null | undefined));
     setClaims(normalizeClaims(nCl as CandidateClaim[] | null | undefined));
     setContextRuns(normalizeContextRuns(nRuns as ContextAgentRun[] | null | undefined));
-    setJobs((nJobs ?? []) as JobDescription[]);
-    const na = (await ListApplications()) as Application[];
-    setApplications(na);
+    setJobs(normalizeJobs(nJobs as JobDescription[] | null | undefined));
+    setApplications((nApps ?? []) as Application[]);
     await refreshEvents();
   }
 
   async function generateResume() {
     if (!selectedJobID) return;
     await runAction('generate-resume', async () => {
-      await buildResumeFromBullets(selectedJobID, bulletDrafts);
+      await buildResumeFromBullets(selectedJobID, selectedJobDrafts);
     });
   }
 
@@ -479,11 +593,50 @@ function App() {
     setActiveResume(resume);
     const validation = normalizeValidationResult((await ValidateResumeJSON(resume, jobID)) as ValidationResult | null | undefined);
     setActiveValidation(validation);
-    const version = (await SaveResumeVersion({
-      job_id: jobID, resume_json: resume, tex_source: '', pdf_path: '', validation_result: validation,
-    })) as ResumeVersion;
-    setResumeVersions((prev) => [normalizeResumeVersion(version), ...prev]);
+    const generated: GeneratedResumeDraft = {id: `draft-${Date.now()}`, job_id: jobID, resume, validation, created_at: new Date().toISOString()};
+    setGeneratedResumeDrafts((prev) => [generated, ...prev]);
     setPipelineStep('resume');
+  }
+
+  function applyJobAgentResult(result: JobAgentWorkflowResult) {
+    const saved = result.job;
+    setSelectedJobID(saved.id);
+    setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
+    setJobs((prev) => normalizeJobs([saved, ...prev.filter((job) => job.id !== saved.id)]));
+    setJobRequirements(normalizeRequirements(result.requirements));
+    setJobMatches(normalizeMatches(result.matches));
+    replaceDraftsForJob(saved.id, result.drafts);
+    setJobAnalysis(normalizeJobAnalysis(result.analysis));
+    setFitAnalysis(normalizeFitAnalysis(result.fit));
+    setApplicationStrategy(normalizeApplicationStrategy(result.strategy));
+    setJobAgentStages(result.stages || []);
+    if (result.resume_generated) {
+      const resume = normalizeResumeJSON(result.resume);
+      const validation = normalizeValidationResult(result.validation);
+      setActiveResume(resume);
+      setActiveValidation(validation);
+      setGeneratedResumeDrafts((prev) => [{id: `agent-${Date.now()}`, job_id: saved.id, resume, validation, created_at: result.created_at || new Date().toISOString()}, ...prev]);
+      setPipelineStep('resume');
+    } else {
+      setActiveResume(null);
+      setActiveValidation(null);
+      setPipelineStep('bullets');
+    }
+  }
+
+  async function runJobAgent(jobID: number, draft: JobDraft) {
+    const result = (await RunJobAgentWorkflow({
+      job: draft,
+      job_id: jobID,
+      auto_select_bullets: true,
+      build_resume: true,
+      min_selected_bullets: 4,
+      max_selected_bullets: 10,
+      require_resume_review: true,
+    })) as JobAgentWorkflowResult;
+    applyJobAgentResult(result);
+    await refreshJobsAndVersions();
+    await refreshEvents();
   }
 
   function startEditingResume() {
@@ -502,10 +655,19 @@ function App() {
     setEditingResume(null);
     const validation = normalizeValidationResult((await ValidateResumeJSON(cleaned, selectedJobID)) as ValidationResult | null | undefined);
     setActiveValidation(validation);
-    const version = (await SaveResumeVersion({
-      job_id: selectedJobID, resume_json: cleaned, tex_source: '', pdf_path: '', validation_result: validation,
-    })) as ResumeVersion;
-    setResumeVersions((prev) => [normalizeResumeVersion(version), ...prev]);
+    const generated: GeneratedResumeDraft = {id: `draft-${Date.now()}`, job_id: selectedJobID, resume: cleaned, validation, created_at: new Date().toISOString()};
+    setGeneratedResumeDrafts((prev) => [generated, ...prev]);
+  }
+
+  async function saveActiveResumeVersion() {
+    if (!activeResume || !selectedJobID) return;
+    await runAction('save-resume-version', async () => {
+      const validation = activeValidation ?? normalizeValidationResult((await ValidateResumeJSON(activeResume, selectedJobID)) as ValidationResult | null | undefined);
+      const version = (await SaveResumeVersion({
+        job_id: selectedJobID, resume_json: activeResume, tex_source: '', pdf_path: '', validation_result: validation,
+      })) as ResumeVersion;
+      setResumeVersions((prev) => [normalizeResumeVersion(version), ...prev.filter((v) => v.id !== version.id)]);
+    });
   }
 
   function updateEditingField(field: string, value: string) {
@@ -608,24 +770,39 @@ function App() {
       if (!result.success && result.error) {
         setError(result.error);
       } else if (result.success && result.pdf_path) {
-        setPDFSuccess({ path: result.pdf_path, jobTitle: selectedJob?.title || 'Resume' });
+        setPDFSuccess({ path: result.pdf_path, jobTitle: selectedJob?.title || 'Resume', jobID: selectedJobID });
+        await OpenFolder(result.pdf_path);
       }
     });
   }
 
-  async function saveApplication() {
-    if (!selectedJobID) return;
+  async function saveApplication(statusOverride?: string, jobIDOverride?: number) {
+    const targetJobID = jobIDOverride || selectedJobID;
+    if (!targetJobID) return;
     await runAction('save-application', async () => {
+      const jobID = targetJobID;
+      const existingApp = applications.find((a) => a.job_id === jobID);
       const app = {
-        id: selectedApplicationID || 0, job_id: selectedJobID, status: 'draft',
-        fit_score: fitAnalysis?.overall_score || 0, resume_version_id: resumeVersions[0]?.id || 0,
+        id: existingApp?.id || 0, job_id: jobID, status: statusOverride || applicationStatusDraft || existingApp?.status || 'draft',
+        fit_score: fitAnalysis?.overall_score || existingApp?.fit_score || 0, resume_version_id: resumeVersionsByJobID.get(jobID)?.[0]?.id || existingApp?.resume_version_id || 0,
         cover_letter_version_id: 0, notes: applicationNotes,
       } as Application;
       const saved = (await SaveApplication(app)) as Application;
       setSelectedApplicationID(saved.id);
+      setApplicationStatusDraft(saved.status);
       const na = (await ListApplications()) as Application[];
       setApplications(na);
     });
+  }
+
+  async function markApplicationStatus(status: string, jobID = selectedJobID) {
+    const existingApp = applications.find((app) => app.job_id === jobID);
+    if (existingApp) {
+      await updateApplicationStatus(existingApp.id, status);
+      if (jobID === selectedJobID) setApplicationStatusDraft(status);
+      return;
+    }
+    await saveApplication(status, jobID);
   }
 
   async function updateApplicationStatus(id: number, status: string) {
@@ -635,35 +812,81 @@ function App() {
     });
   }
 
-  async function deleteJob(jobID: number) {
-    await runAction(`del-job-${jobID}`, async () => {
-      await DeleteJobDescription({id: jobID});
-      if (selectedJobID === jobID) {
-        setSelectedJobID(0); setActiveResume(null); setActiveValidation(null);
-      }
-      setJobs((await ListJobDescriptions()) as JobDescription[]);
+  async function updateApplicationResumeVersion(id: number, resumeVersionID: number) {
+    await runAction(`upd-resume-${id}`, async () => {
+      const u = (await UpdateApplicationResumeVersion(id, resumeVersionID)) as Application;
+      setApplications((prev) => prev.map((a) => a.id === id ? u : a));
     });
   }
 
-  async function saveNewJob(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await runAction('save-new-job', async () => {
-      const saved = (await CreateJobDescription(newJobDraft)) as JobDescription;
-      setSelectedJobID(saved.id);
-      setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
+async function deleteJob(jobID: number) {
+    await runAction(`del-job-${jobID}`, async () => {
+      await DeleteJobDescription({id: jobID});
+      bulletDraftsRef.current.delete(jobID);
+      setBulletDrafts(Array.from(bulletDraftsRef.current.values()).flat());
+      if (selectedJobID === jobID) {
+        setSelectedJobID(0); setActiveResume(null); setActiveValidation(null);
+      }
+      const nextJobs = await refreshJobsAndVersions();
+      if (selectedJobID === jobID && nextJobs[0]) selectJob(nextJobs[0]);
+    });
+  }
+
+async function saveNewJob(event: FormEvent<HTMLFormElement>) {
+     event.preventDefault();
+     await runAction('save-new-job', async () => {
+       const saved = (await CreateJobDescription(newJobDraft)) as JobDescription;
+       setSelectedJobID(saved.id);
+       setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
+       setNewJobDraft(emptyJobDraft);
+       await refreshJobsAndVersions();
+       await refreshJobContext(saved.id);
+       setShowAddJob(false);
+     });
+   }
+
+  async function saveNewJobAndRun() {
+    await runAction('save-new-job-agent', async () => {
+      setActiveView('pipeline');
+      setJobAgentStages([]);
+      const result = (await RunJobAgentWorkflow({
+        job: newJobDraft,
+        job_id: 0,
+        auto_select_bullets: true,
+        build_resume: true,
+        min_selected_bullets: 4,
+        max_selected_bullets: 10,
+        require_resume_review: true,
+      })) as JobAgentWorkflowResult;
+      applyJobAgentResult(result);
       setNewJobDraft(emptyJobDraft);
-      setJobs((await ListJobDescriptions()) as JobDescription[]);
-      await refreshJobContext(saved.id);
       setShowAddJob(false);
+      await refreshJobsAndVersions();
+      await refreshEvents();
     });
   }
 
   function selectJob(job: JobDescription) {
+    setShowAddJob(false);
     setSelectedJobID(job.id);
     setJobDraft({company: job.company, title: job.title, url: job.url, raw_text: job.raw_text});
-    setActiveResume(null); setActiveValidation(null);
+    const existingApp = jobAppsMap.get(job.id);
+    setApplicationNotes(existingApp?.notes || '');
+    setApplicationStatusDraft(existingApp?.status || 'draft');
+    const generated = generatedResumeDrafts.find((draft) => draft.job_id === job.id);
+    const jobVersions = resumeVersionsByJobID.get(job.id) || [];
+    if (generated) {
+      setActiveResume(generated.resume);
+      setActiveValidation(generated.validation);
+    } else if (jobVersions.length > 0) {
+      setActiveResume(normalizeResumeJSON(jobVersions[0].resume_json));
+      setActiveValidation(normalizeValidationResult(jobVersions[0].validation_result));
+    } else {
+      setActiveResume(null);
+      setActiveValidation(null);
+    }
     setPipelineStep('job');
-    refreshJobContext(job.id);
+    void refreshJobContext(job.id);
   }
 
   function updateJobDraft(nextDraft: JobDraft) {
@@ -685,19 +908,23 @@ function App() {
   }
 
   async function refreshJobContext(jobID = selectedJobID) {
+    const requestID = ++jobContextRequestRef.current;
     if (!jobID) { setJobRequirements([]); setJobMatches([]); setBulletDrafts([]); setJobAnalysis(null); setFitAnalysis(null); setApplicationStrategy(null); return; }
-    const [req, mat, dra, gen, ana, fit, strat] = await Promise.all([
+    const [req, mat, dra, gen, ana, fit, strat, vers] = await Promise.all([
       ListJobRequirements(jobID), ListJobFactMatches(jobID), ListTailoredBulletDrafts(jobID),
       ListBulletGenerationEvents(jobID).catch(() => []),
       GetJobAnalysis(jobID).catch(() => null), GetFitAnalysis(jobID).catch(() => null),
-      GetApplicationStrategy(jobID).catch(() => null),
+      GetApplicationStrategy(jobID).catch(() => null), ListResumeVersions(jobID).catch(() => []),
     ]);
+    if (requestID !== jobContextRequestRef.current) return;
     setJobRequirements(normalizeRequirements(req as JobRequirement[] | null | undefined));
     setJobMatches(normalizeMatches(mat as JobFactMatch[] | null | undefined));
-    setBulletDrafts(normalizeDrafts(dra as TailoredBulletDraft[] | null | undefined));
+    replaceDraftsForJob(jobID, dra as TailoredBulletDraft[] | null | undefined);
     setJobAnalysis(normalizeJobAnalysis(ana as JobAnalysis | null | undefined));
     setFitAnalysis(normalizeFitAnalysis(fit as JobFitAnalysis | null | undefined));
     setApplicationStrategy(normalizeApplicationStrategy(strat as ApplicationStrategy | null | undefined));
+    const jobVersions = normalizeResumeVersions(vers as ResumeVersion[] | null | undefined);
+    setResumeVersions((prev) => normalizeResumeVersions([...jobVersions, ...prev.filter((v) => v.job_id !== jobID)]));
   }
 
   async function runAction(name: string, action: () => Promise<void>) {
@@ -707,19 +934,18 @@ function App() {
     finally { setBusyAction(''); }
   }
 
-  function handleSaveJob(e: FormEvent) {
-    e.preventDefault();
-    void runAction('save-job', async () => {
-      const saved = selectedJobID
-        ? (await UpdateJobDescription({id: selectedJobID, ...jobDraft})) as JobDescription
-        : (await CreateJobDescription(jobDraft)) as JobDescription;
-      setSelectedJobID(saved.id);
-      setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
-      setJobs((await ListJobDescriptions()) as JobDescription[]);
-      await refreshJobContext(saved.id);
-      setShowAddJob(false);
-    });
-  }
+function handleSaveJob(e: FormEvent) {
+     e.preventDefault();
+     void runAction('save-job', async () => {
+       const saved = selectedJobID
+         ? (await UpdateJobDescription({id: selectedJobID, ...jobDraft})) as JobDescription
+         : (await CreateJobDescription(jobDraft)) as JobDescription;
+       setSelectedJobID(saved.id);
+       setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
+       await refreshJobsAndVersions();
+       await refreshJobContext(saved.id);
+     });
+   }
 
   function handleParseJD() {
     if (!selectedJobID) return;
@@ -753,7 +979,7 @@ function App() {
     if (!selectedJobID) return;
     void runAction('bullets', async () => {
       const d = (await GenerateTailoredBulletDrafts(selectedJobID)) as TailoredBulletDraft[];
-      setBulletDrafts(normalizeDrafts(d));
+        replaceDraftsForJob(selectedJobID, d);
       const ev = (await ListBulletGenerationEvents(selectedJobID)) as BulletGenerationEvent[];
       setBulletEvents(normalizeBulletEvents(ev));
     });
@@ -767,49 +993,12 @@ function App() {
     });
   }
 
-  function runAgenticPipeline() {
-    void runAction('agentic-pipeline', async () => {
-      const saved = selectedJobID
-        ? (await UpdateJobDescription({id: selectedJobID, ...jobDraft})) as JobDescription
-        : (await CreateJobDescription(jobDraft)) as JobDescription;
-      const jobID = saved.id;
-      setSelectedJobID(jobID);
-      setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
-      setJobs((await ListJobDescriptions()) as JobDescription[]);
-      setActiveResume(null);
-      setActiveValidation(null);
-
-      const reqs = normalizeRequirements((await ParseJobDescription(jobID)) as JobRequirement[] | null | undefined);
-      setJobRequirements(reqs);
-      const analysis = normalizeJobAnalysis((await AnalyzeJobDescription(jobID)) as JobAnalysis | null | undefined);
-      setJobAnalysis(analysis);
-
-      const matches = normalizeMatches((await BuildJobMatchMap(jobID)) as JobFactMatch[] | null | undefined);
-      setJobMatches(matches);
-      const fit = normalizeFitAnalysis((await GenerateFitAnalysis(jobID)) as JobFitAnalysis | null | undefined);
-      setFitAnalysis(fit);
-      const strategy = normalizeApplicationStrategy((await GenerateApplicationStrategy(jobID)) as ApplicationStrategy | null | undefined);
-      setApplicationStrategy(strategy);
-
-      let drafts = normalizeDrafts((await GenerateTailoredBulletDrafts(jobID)) as TailoredBulletDraft[] | null | undefined);
-      setBulletDrafts(drafts);
-      const events = normalizeBulletEvents((await ListBulletGenerationEvents(jobID)) as BulletGenerationEvent[] | null | undefined);
-      setBulletEvents(events);
-
-      if (pipelineOptions.autoSelectBullets) {
-        drafts = normalizeDrafts((await AutoSelectResumeBullets(jobID)) as TailoredBulletDraft[] | null | undefined);
-        setBulletDrafts(drafts);
-      }
-
-      if (pipelineOptions.buildResume) {
-        if (!drafts.some((draft) => draft.selected_for_resume)) {
-          setPipelineStep('bullets');
-          throw new Error('No bullets are selected. Enable auto-select or choose bullets before building the resume.');
-        }
-        await buildResumeFromBullets(jobID, drafts);
-      } else {
-        setPipelineStep('bullets');
-      }
+function runAgenticPipeline() {
+     void runAction('agentic-pipeline', async () => {
+       setActiveResume(null);
+       setActiveValidation(null);
+       setJobAgentStages([]);
+       await runJobAgent(selectedJobID, jobDraft);
     });
   }
 
@@ -818,14 +1007,14 @@ function App() {
       const saved = (await UpdateTailoredBulletDraft({
         id: draft.id, draft_text: newText, rationale: draft.rationale, status: draft.status, risk_flags: draft.risk_flags,
       })) as TailoredBulletDraft;
-      setBulletDrafts((prev) => normalizeDrafts(prev.map((x) => x.id === saved.id ? saved : x)));
+      updateDraftInCache(saved);
     });
   }
 
   function handleDeleteBullet(draftID: number) {
     void runAction(`del-${draftID}`, async () => {
       await DeleteTailoredBulletDraft({id: draftID});
-      setBulletDrafts((prev) => prev.filter((d) => d.id !== draftID));
+      removeDraftFromCache(draftID);
     });
   }
 
@@ -833,14 +1022,14 @@ function App() {
     if (!selectedJobID) return;
     void runAction('auto-sel', async () => {
       const d = (await AutoSelectResumeBullets(selectedJobID)) as TailoredBulletDraft[];
-      setBulletDrafts(normalizeDrafts(d));
+      replaceDraftsForJob(selectedJobID, d);
     });
   }
 
   function handleToggleBullet(draft: TailoredBulletDraft) {
     void runAction(`sel-${draft.id}`, async () => {
       const s = (await SelectTailoredBulletDraft({id: draft.id, selected: !draft.selected_for_resume})) as TailoredBulletDraft;
-      setBulletDrafts((prev) => normalizeDrafts(prev.map((x) => x.id === s.id ? s : x)));
+      updateDraftInCache(s);
     });
   }
 
@@ -889,21 +1078,28 @@ function App() {
 
   useEffect(() => { for (const run of runningContextRuns) ensureContextAgentPolling(run.id, run.source_id); }, [contextRuns]);
 
+  useEffect(() => {
+    if (jobs.length > 0) {
+      loadAllResumeVersions();
+    }
+  }, [jobs]);
+
   const statusText = loadState === 'loading' ? 'Loading' : loadState === 'error' ? 'Needs attention' : 'Ready';
 
   const pipelineSteps: {key: PipelineStep; label: string; icon: React.ReactNode}[] = [
-    {key: 'job', label: 'Job', icon: <BriefcaseBusiness size={14} />},
-    {key: 'bullets', label: 'Bullets', icon: <ListChecks size={14} />},
+    {key: 'job', label: 'Agent', icon: <Bot size={14} />},
     {key: 'resume', label: 'Resume', icon: <FileText size={14} />},
-    {key: 'tracker', label: 'Tracker', icon: <Gauge size={14} />},
   ];
 
   function getJobProgress(jobID: number): {step: PipelineStep; pct: number} {
-    const app = jobAppsMap.get(jobID);
-    if (app && app.status !== 'draft') return {step: 'tracker', pct: 100};
-    if (resumeVersions.some((v) => v.job_id === jobID)) return {step: 'resume', pct: 75};
-    if (bulletDrafts.filter((d) => d.job_id === jobID).length > 0) return {step: 'bullets', pct: 50};
-    return {step: 'job', pct: 10};
+    const wf = jobWorkflowByID.get(jobID);
+    return {step: wf?.stage || 'job', pct: wf?.pct || 10};
+  }
+
+  function openJob(job: JobDescription, step: PipelineStep = 'job') {
+    selectJob(job);
+    setActiveView('pipeline');
+    setPipelineStep(step === 'tracker' ? 'resume' : step);
   }
 
   return (
@@ -934,57 +1130,63 @@ function App() {
           </div>
         </div>
 
-        <div className="flex border-b border-slate-200">
+        <div className="grid grid-cols-4 gap-1 border-b border-slate-200 p-2">
           <button
-            className={`flex-1 py-2.5 text-xs font-medium ${activeView === 'pipeline' ? 'border-b-2 border-slate-900 text-slate-950' : 'text-slate-500 hover:text-slate-700'}`}
-            onClick={() => setActiveView('pipeline')}
+            className={`rounded-lg py-2 text-xs font-semibold transition ${activeView === 'dashboard' ? 'bg-slate-950 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}
+            onClick={() => setActiveView('dashboard')}
           >
-            Workspace
+            Home
           </button>
           <button
-            className={`flex-1 py-2.5 text-xs font-medium ${activeView === 'sources' ? 'border-b-2 border-slate-900 text-slate-950' : 'text-slate-500 hover:text-slate-700'}`}
+            className={`rounded-lg py-2 text-xs font-semibold transition ${activeView === 'pipeline' ? 'bg-slate-950 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}
+            onClick={() => setActiveView('pipeline')}
+          >
+            Work
+          </button>
+          <button
+            className={`rounded-lg py-2 text-xs font-semibold transition ${activeView === 'sources' ? 'bg-slate-950 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}
             onClick={() => setActiveView('sources')}
           >
             Sources
           </button>
           <button
-            className={`flex-1 py-2.5 text-xs font-medium ${activeView === 'settings' ? 'border-b-2 border-slate-900 text-slate-950' : 'text-slate-500 hover:text-slate-700'}`}
+            className={`rounded-lg py-2 text-xs font-semibold transition ${activeView === 'settings' ? 'bg-slate-950 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}
             onClick={() => setActiveView('settings')}
           >
-            Settings
+            Setup
           </button>
         </div>
 
         <div className="flex-1 overflow-y-auto px-3 py-3">
           <div className="mb-3 flex items-center justify-between px-1">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Jobs</span>
-            <button className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600" onClick={toggleNewJobForm}>
+            <span className="text-[10px] font-semibold text-slate-400">{filteredJobs.length}/{jobs.length}</span>
+            <button className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={() => { setShowAddJob(true); setActiveView('pipeline'); }} title="Add JD">
               <Plus size={14} />
             </button>
           </div>
 
-          {showAddJob && (
-            <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-              <form onSubmit={saveNewJob} className="space-y-2">
-                <TextInput label="Company" value={newJobDraft.company} onChange={(v) => updateNewJobDraft({...newJobDraft, company: v})} />
-                <TextInput label="Role" value={newJobDraft.title} onChange={(v) => updateNewJobDraft({...newJobDraft, title: v})} />
-                <TextArea label="Job description" rows={6} value={newJobDraft.raw_text} onChange={(v) => updateNewJobDraft({...newJobDraft, raw_text: v})} />
-                <div className="flex gap-2">
-                  <button type="submit" className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800">Save</button>
-                  <button type="button" className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100" onClick={cancelNewJob}>Cancel</button>
-                </div>
-              </form>
-            </div>
-          )}
+          <div className="mb-3 space-y-2">
+            <input type="search" value={jobSearch} onChange={(event) => setJobSearch(event.target.value)} placeholder="Search jobs..." className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-slate-300 focus:bg-white" />
+            <select value={jobStatusFilter} onChange={(event) => setJobStatusFilter(event.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 outline-none focus:border-slate-300">
+              <option value="all">All jobs</option>
+              <option value="active">Active jobs</option>
+              <option value="no_resume">Needs resume</option>
+              {Object.entries(APP_STATUS_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+            </select>
+          </div>
 
           {jobs.length === 0 ? (
-            <p className="px-1 py-4 text-center text-xs text-slate-400">No jobs yet.</p>
+            <button type="button" onClick={() => { setShowAddJob(true); setActiveView('pipeline'); }} className="w-full rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-xs font-semibold text-slate-400 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-600">Add your first JD</button>
           ) : (
             <div className="space-y-1">
-              {jobs.map((job) => {
+              {filteredJobs.map((job) => {
                 const app = jobAppsMap.get(job.id);
                 const prog = getJobProgress(job.id);
+                const wf = jobWorkflowByID.get(job.id);
                 const isSelected = job.id === selectedJobID;
+                const jobVersions = resumeVersionsByJobID.get(job.id) || [];
+                const latestVer = jobVersions[0];
                 return (
                   <div
                     key={job.id}
@@ -997,8 +1199,8 @@ function App() {
                             <p className="truncate text-xs font-semibold text-slate-950">{job.title || 'Untitled'}</p>
                             <p className="truncate text-xs text-slate-500">{job.company || 'No company'}</p>
                           </div>
-                          <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${app ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>
-                            {app ? APP_STATUS_LABELS[app.status] || app.status : `${prog.pct}%`}
+                          <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${workflowToneClass(wf?.tone)}`}>
+                            {app ? APP_STATUS_LABELS[app.status] || app.status : latestVer ? 'Saved' : wf?.label || `${prog.pct}%`}
                           </span>
                         </div>
                       </button>
@@ -1012,7 +1214,7 @@ function App() {
                       </button>
                     </div>
                     <div className="mt-2 h-1.5 w-full rounded-full bg-slate-200">
-                      <div className="h-1.5 rounded-full bg-slate-600 transition-all" style={{width: `${prog.pct}%`}} />
+                      <div className="h-1.5 rounded-full bg-slate-600" style={{width: `${prog.pct}%`}} />
                     </div>
                   </div>
                 );
@@ -1048,15 +1250,31 @@ function App() {
         )}
 
         {pdfSuccess && (
-          <div className="mx-6 mt-4 flex items-center gap-3 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900">
+          <div className="mx-6 mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900 shadow-sm shadow-green-100/70">
             <FileText className="mt-0.5 shrink-0" size={16} />
             <div className="flex-1 min-w-0">
               <p className="font-medium">PDF generated: {pdfSuccess.jobTitle}</p>
               <p className="mt-1 text-xs text-green-700 truncate">{pdfSuccess.path}</p>
             </div>
+            {pdfSuccess.jobID > 0 && (
+              <>
+                <button
+                  onClick={() => markApplicationStatus('ready_to_apply', pdfSuccess.jobID)}
+                  className="shrink-0 rounded-xl border border-green-300 bg-white px-3 py-2 text-xs font-bold text-green-800 shadow-sm transition hover:-translate-y-0.5 hover:bg-green-50 hover:shadow-md"
+                >
+                  Mark Ready
+                </button>
+                <button
+                  onClick={() => markApplicationStatus('applied', pdfSuccess.jobID)}
+                  className="shrink-0 rounded-xl bg-green-700 px-3 py-2 text-xs font-bold text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-green-800 hover:shadow-md"
+                >
+                  Mark Applied
+                </button>
+              </>
+            )}
             <button
               onClick={async () => { await OpenFolder(pdfSuccess.path); setPDFSuccess(null); }}
-              className="shrink-0 rounded-md border border-green-300 bg-white px-3 py-1.5 text-xs font-medium text-green-700 hover:bg-green-50"
+              className="shrink-0 rounded-xl border border-green-300 bg-white px-3 py-2 text-xs font-bold text-green-700 transition hover:bg-green-50"
             >
               <Folder className="inline mr-1" size={12} /> Open Folder
             </button>
@@ -1064,234 +1282,265 @@ function App() {
           </div>
         )}
 
-        {activeWorkItems.length > 0 && (
-          <WorkBanner busyAction={busyAction} items={activeWorkItems} onStopAgent={() => {}} />
-        )}
+{activeWorkItems.length > 0 && (
+           <WorkBanner busyAction={busyAction} items={activeWorkItems} onStopAgent={() => {}} />
+         )}
 
-        {activeView === 'pipeline' && selectedJob && (
-          <div className="flex flex-1 flex-col overflow-hidden">
-            <div className="border-b border-slate-200 bg-white px-6 py-3">
-              <div className="flex items-center gap-3">
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-semibold text-slate-950">{selectedJob.title || 'Untitled'}</p>
-                  <p className="truncate text-xs text-slate-500">{selectedJob.company || 'No company'}</p>
-                </div>
-                <div className="flex gap-1 rounded-lg border border-slate-200 bg-slate-50 p-1">
-                  {pipelineSteps.map((s, i) => (
-                    <button
-                      key={s.key}
-                      className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${pipelineStep === s.key ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
-                      onClick={() => setPipelineStep(s.key)}
-                    >
-                      <span className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold ${pipelineStep === s.key ? 'bg-slate-900 text-white' : 'bg-slate-200 text-slate-500'}`}>{i + 1}</span>
-                      {s.label}
-                    </button>
-                  ))}
-                </div>
-                <IconButton label="Refresh" onClick={load} disabled={busyAction !== ''}>
-                  <RefreshCcw size={14} />
-                </IconButton>
-              </div>
-            </div>
+         {activeView === 'dashboard' && (
+           <div className="flex-1 overflow-y-auto p-6">
+             <div className="mx-auto max-w-6xl space-y-6">
+               <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
+                 <div className="flex flex-wrap items-center justify-between gap-4">
+                   <div>
+                     <h2 className="text-2xl font-bold tracking-tight text-slate-950">Job workspace</h2>
+                     <p className="mt-1 text-sm text-slate-500">Add a JD, run the agent, review the resume.</p>
+                   </div>
+                   <button className="inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-xs font-bold text-white shadow-sm shadow-slate-300/80 transition hover:-translate-y-0.5 hover:bg-slate-800 hover:shadow-md" onClick={() => { setShowAddJob(true); setActiveView('pipeline'); }}>
+                     <Plus size={14} /> Add JD
+                   </button>
+                 </div>
+                 <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                   <TrackerStat label="Jobs" value={jobs.length} detail="tracked JDs" />
+                   <TrackerStat label="Resumes" value={resumeVersions.length + generatedResumeDrafts.length} detail="drafts and saved" />
+                   <TrackerStat label="Sources" value={sources.length} detail="evidence inputs" />
+                 </div>
+               </div>
 
-            <div className="flex-1 overflow-y-auto p-6">
-              {pipelineStep === 'job' && (
+                {jobs.length === 0 ? (
+                  <EmptyState text="No jobs yet. Add a JD to start the agentic workflow." />
+                ) : filteredJobs.length === 0 ? (
+                  <EmptyState text="No jobs match the current search/filter." />
+                ) : (
+                  <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+                    {filteredJobs.map((job) => {
+                     const app = jobAppsMap.get(job.id);
+                     const wf = jobWorkflowByID.get(job.id) || buildJobWorkflowState(job, app, resumeVersionsByJobID.get(job.id) || [], [], []);
+                     const jobVersions = resumeVersionsByJobID.get(job.id) || [];
+                     return (
+                       <div key={job.id} className="rounded-2xl border border-slate-200 bg-white p-3 shadow-sm shadow-slate-200/60 transition hover:-translate-y-0.5 hover:shadow-md">
+                         <div className="flex items-start justify-between gap-3">
+                           <button type="button" className="min-w-0 flex-1 text-left" onClick={() => openJob(job, wf.stage)}>
+                             <p className="truncate text-sm font-bold text-slate-950">{job.title || 'Untitled role'}</p>
+                             <p className="truncate text-xs text-slate-500">{job.company || 'No company'}</p>
+                           </button>
+                           <StatusBadge text={wf.label} color={wf.tone} />
+                         </div>
+                         <div className="mt-4">
+                           <div className="flex items-center justify-between text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                             <span>Workflow progress</span><span>{wf.pct}%</span>
+                           </div>
+                           <div className="mt-1.5 h-2 w-full rounded-full bg-slate-100">
+                             <div className="h-2 rounded-full bg-gradient-to-r from-blue-500 via-slate-800 to-emerald-500 transition-all" style={{width: `${wf.pct}%`}} />
+                           </div>
+                         </div>
+                         <div className="mt-3 grid grid-cols-2 gap-2 text-center text-xs">
+                           <MiniMetric label="Resume" value={jobVersions.length ? 'Saved' : generatedResumeDrafts.some((draft) => draft.job_id === job.id) ? 'Draft' : '-'} />
+                           <MiniMetric label="Fit" value={app?.fit_score ? `${app.fit_score}%` : '-'} />
+                         </div>
+                         <div className="mt-3 flex flex-wrap items-center gap-2">
+                           <PipelineButton label="Open" onClick={() => openJob(job, wf.stage)} />
+                           {app ? (
+                             <select
+                               className="rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 focus:border-slate-400 focus:outline-none"
+                               value={app.status}
+                               onClick={(e) => e.stopPropagation()}
+                               onChange={(e) => { e.stopPropagation(); updateApplicationStatus(app.id, e.target.value); }}
+                             >
+                               {Object.entries(APP_STATUS_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+                             </select>
+                           ) : (
+                             <span className="rounded-md border border-dashed border-slate-200 px-2 py-1.5 text-xs font-medium text-slate-400">No application</span>
+                           )}
+                         </div>
+                       </div>
+                     );
+                   })}
+                 </div>
+               )}
+             </div>
+           </div>
+         )}
+
+         {activeView === 'pipeline' && showAddJob && (
+           <div className="flex-1 overflow-y-auto p-6">
+             <div className="mx-auto max-w-5xl">
+               <div className="mb-5 flex items-center justify-between gap-4">
+                 <div>
+                   <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">New job</p>
+                   <h2 className="mt-1 text-2xl font-bold tracking-tight text-slate-950">Paste a JD and let the agent work</h2>
+                   <p className="mt-1 text-sm text-slate-500">The agent will parse the JD, match evidence, select bullets, and return a resume draft for review.</p>
+                 </div>
+                 <SecondaryButton label="Cancel" onClick={cancelNewJob} />
+               </div>
+
+               <form onSubmit={saveNewJob} className="grid gap-5 lg:grid-cols-[1fr_320px]">
+                 <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
+                   <TextArea label="Job description" rows={22} value={newJobDraft.raw_text} onChange={(v) => updateNewJobDraft({...newJobDraft, raw_text: v})} />
+                   <div className="mt-3 flex flex-wrap gap-1.5">
+                     <StatusBadge text={`${newJobDraft.raw_text.length}/50000 chars`} color={newJobDraft.raw_text.length > 50000 ? 'red' : 'slate'} />
+                     {(newJobDraft.company || newJobInferred.company) && <StatusBadge text={newJobDraft.company || newJobInferred.company} color="blue" />}
+                     {(newJobDraft.title || newJobInferred.title) && <StatusBadge text={newJobDraft.title || newJobInferred.title} color="green" />}
+                   </div>
+                 </div>
+
+                 <div className="space-y-4">
+                   <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
+                     <div className="space-y-3">
+                       <TextInput label="Company" value={newJobDraft.company} onChange={(v) => updateNewJobDraft({...newJobDraft, company: v})} />
+                       <TextInput label="Role" value={newJobDraft.title} onChange={(v) => updateNewJobDraft({...newJobDraft, title: v})} />
+                       <TextInput label="Posting URL" value={newJobDraft.url} onChange={(v) => updateNewJobDraft({...newJobDraft, url: v})} />
+                     </div>
+                   </div>
+
+                   <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
+                     <p className="text-sm font-bold text-slate-950">Agent run</p>
+                     <p className="mt-1 text-xs leading-5 text-slate-500">Evidence-only generation. Resume drafts stay in memory until you save a version.</p>
+                     <div className="mt-4 grid gap-2">
+                       <button type="button" disabled={!newJobDraft.raw_text.trim() || busyAction !== '' || newJobDraft.raw_text.length > 50000} onClick={saveNewJobAndRun} className="rounded-xl bg-slate-950 px-4 py-3 text-xs font-bold text-white shadow-sm shadow-slate-300/80 transition hover:-translate-y-0.5 hover:bg-slate-800 hover:shadow-md disabled:pointer-events-none disabled:opacity-40">
+                         Save & Run Agent
+                       </button>
+                       <button type="submit" disabled={!newJobDraft.raw_text.trim() || busyAction !== '' || newJobDraft.raw_text.length > 50000} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs font-bold text-slate-700 shadow-sm shadow-slate-200/70 transition hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50 hover:shadow-md disabled:pointer-events-none disabled:opacity-40">
+                         Save only
+                       </button>
+                     </div>
+                   </div>
+                 </div>
+               </form>
+             </div>
+           </div>
+         )}
+
+{activeView === 'pipeline' && selectedJob && !showAddJob && (
+           <div className="flex flex-1 flex-col overflow-hidden">
+             <div className="border-b border-slate-200 bg-white px-6 py-3">
+               <div className="flex items-center justify-between gap-3">
+                 <div className="min-w-0 flex-1">
+                   <p className="truncate text-sm font-semibold text-slate-950">{selectedJob.title || 'Untitled'}</p>
+                   <p className="truncate text-xs text-slate-500">{selectedJob.company || 'No company'}</p>
+                 </div>
+                  <div className="flex items-center gap-2">
+                    {pipelineSteps.map((step) => (
+                      <button
+                        key={step.key}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${pipelineStep === step.key ? 'bg-slate-900 text-white shadow-sm' : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}
+                        onClick={() => setPipelineStep(step.key)}
+                      >
+                        {step.icon}{step.label}
+                      </button>
+                    ))}
+                    <IconButton label="Refresh" onClick={load} disabled={busyAction !== ''}>
+                      <RefreshCcw size={14} />
+                    </IconButton>
+                  </div>
+               </div>
+             </div>
+
+             <div className="flex-1 overflow-y-auto p-6">
+               {pipelineStep === 'job' && (
                 <div className="mx-auto max-w-3xl space-y-4">
-                  <Panel icon={<BriefcaseBusiness size={16} />} title="Job Description" compact>
-                    <form onSubmit={handleSaveJob} className="space-y-3">
+                   <Panel icon={<BriefcaseBusiness size={16} />} title="Job workspace" compact>
+                     <form onSubmit={handleSaveJob} className="space-y-4">
                       <div className="grid gap-3 md:grid-cols-2">
                         <TextInput label="Company" value={jobDraft.company} onChange={(v) => updateJobDraft({...jobDraft, company: v})} />
                         <TextInput label="Role" value={jobDraft.title} onChange={(v) => updateJobDraft({...jobDraft, title: v})} />
                       </div>
                       <TextInput label="URL" value={jobDraft.url} onChange={(v) => updateJobDraft({...jobDraft, url: v})} />
                       <TextArea label="Description" rows={12} value={jobDraft.raw_text} onChange={(v) => updateJobDraft({...jobDraft, raw_text: v})} />
-                      <div className="flex gap-2">
-                        <IconButton label="Save" submit><Save size={14} /></IconButton>
-                        {selectedJobID > 0 && (
-                          <IconButton label="Delete" onClick={() => deleteJob(selectedJobID)}><Trash2 size={14} /></IconButton>
-                        )}
-                      </div>
+                        <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                              <p className="text-sm font-bold text-slate-950">Generate tailored resume</p>
+                              <p className="mt-1 text-xs text-slate-600">Saves the JD, matches evidence, selects bullets, and returns a resume draft for review.</p>
+                            </div>
+                            <PipelineButton label="Save & run" onClick={runAgenticPipeline} tone="primary" />
+                          </div>
+                          {jobAgentStages.length > 0 && (
+                            <div className="mt-3 grid gap-1.5">
+                              {jobAgentStages.map((stage, index) => (
+                                <div key={`${stage.key}-${index}`} className="flex items-center gap-2 rounded-lg bg-white/80 px-3 py-2 text-xs ring-1 ring-blue-100">
+                                  <span className={`h-2 w-2 rounded-full ${stage.status === 'ok' ? 'bg-emerald-500' : stage.status === 'warning' ? 'bg-amber-500' : stage.status === 'failed' ? 'bg-red-500' : 'bg-blue-500'}`} />
+                                  <span className="font-semibold text-slate-800">{stage.label}</span>
+                                  <span className="min-w-0 truncate text-slate-500">{stage.message}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button type="submit" disabled={busyAction !== ''} className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 shadow-sm shadow-slate-200/70 transition-all hover:bg-slate-50 disabled:pointer-events-none disabled:opacity-40">
+                            <Save size={14} /> Save JD only
+                          </button>
+                          {selectedJobID > 0 && <SecondaryButton label="Delete" onClick={() => deleteJob(selectedJobID)} variant="red" />}
+                        </div>
                     </form>
                   </Panel>
 
-                  <Panel icon={<Bot size={16} />} title="Agentic JD Pipeline" compact summary="Save, analyze, match evidence, score fit, draft strategy, generate bullets, and optionally assemble the resume in one run.">
-                    <div className="space-y-3">
-                      <div className="grid gap-2 md:grid-cols-2">
-                        <CheckInput
-                          checked={pipelineOptions.autoSelectBullets}
-                          label="Auto-select resume bullets"
-                          onChange={(v) => setPipelineOptions((prev) => ({...prev, autoSelectBullets: v}))}
-                        />
-                        <CheckInput
-                          checked={pipelineOptions.buildResume}
-                          label="Build resume after bullets"
-                          onChange={(v) => setPipelineOptions((prev) => ({...prev, buildResume: v}))}
-                        />
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <PipelineButton label="Run Pipeline" onClick={runAgenticPipeline} tone="primary" />
-                        <span className="text-xs text-slate-400">Stops at bullet review if resume build is off or no bullets are selected.</span>
-                      </div>
-                    </div>
-                  </Panel>
-
-                  {jobAnalysis && (
-                    <CollapsibleSection label={`Analysis — ${jobAnalysis.role_archetype}`}>
+                   {(fitAnalysis || jobAnalysis || applicationStrategy || jobRequirements.length > 0 || jobMatches.length > 0) && (
+                     <CollapsibleSection label="Diagnostics">
                       <div className="mt-2 space-y-2 text-xs text-slate-600">
-                        {jobAnalysis.company && <p><span className="font-medium text-slate-700">Company:</span> {jobAnalysis.company}</p>}
-                        {jobAnalysis.location && <p><span className="font-medium text-slate-700">Location:</span> {jobAnalysis.location}</p>}
-                        {jobAnalysis.seniority_level && <p><span className="font-medium text-slate-700">Seniority:</span> {jobAnalysis.seniority_level}</p>}
-                        {jobAnalysis.work_arrangement && <p><span className="font-medium text-slate-700">Work:</span> {jobAnalysis.work_arrangement}</p>}
-                        {jobAnalysis.salary && <p><span className="font-medium text-slate-700">Salary:</span> {jobAnalysis.salary}</p>}
-                        {jobAnalysis.responsibilities.length > 0 && (
-                          <div>
-                            <p className="font-medium text-slate-700">Responsibilities:</p>
-                            {jobAnalysis.responsibilities.map((r, i) => <p key={i} className="mt-0.5">• {r}</p>)}
-                          </div>
-                        )}
-                        {jobAnalysis.required_skills.length > 0 && (
-                          <div>
-                            <p className="font-medium text-slate-700">Required skills:</p>
-                            <p className="mt-0.5">{jobAnalysis.required_skills.join(', ')}</p>
-                          </div>
-                        )}
-                        {jobAnalysis.preferred_skills.length > 0 && (
-                          <div>
-                            <p className="font-medium text-slate-700">Preferred skills:</p>
-                            <p className="mt-0.5">{jobAnalysis.preferred_skills.join(', ')}</p>
-                          </div>
-                        )}
-                        {jobAnalysis.top_pain_points.length > 0 && (
-                          <div>
-                            <p className="font-medium text-slate-700">Pain points:</p>
-                            {jobAnalysis.top_pain_points.map((p, i) => <p key={i} className="mt-0.5">• {p}</p>)}
-                          </div>
-                        )}
+                        {fitAnalysis && <p><span className="font-semibold text-slate-800">Fit:</span> {fitAnalysis.overall_score}% — {fitAnalysis.recommendation}. {fitAnalysis.reality_check}</p>}
+                        {jobAnalysis?.role_archetype && <p><span className="font-semibold text-slate-800">Role:</span> {jobAnalysis.role_archetype}</p>}
+                        {applicationStrategy?.resume_headline && <p><span className="font-semibold text-slate-800">Headline:</span> {applicationStrategy.resume_headline}</p>}
+                        <p><span className="font-semibold text-slate-800">Parsed:</span> {jobRequirements.length} requirements, {jobMatches.length} evidence matches</p>
                       </div>
                     </CollapsibleSection>
                   )}
-
-                  {jobRequirements.length > 0 && (
-                    <CollapsibleSection label={`Requirements (${jobRequirements.length})`}>
-                      <div className="mt-2 space-y-1">
-                        {jobRequirements.map((req) => (
-                          <div key={req.id} className="flex items-start gap-2 text-xs">
-                            <span className={`mt-1 shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-bold ${req.priority === 'required' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500'}`}>{req.priority === 'required' ? 'REQ' : 'pref'}</span>
-                            <span className="text-slate-600">{req.requirement_text}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </CollapsibleSection>
-                  )}
-
-                  {jobMatches.length > 0 && (
-                    <CollapsibleSection label={`Match map (${jobMatches.length})`}>
-                      <div className="mt-2 space-y-2">
-                        {jobMatches.map((m) => (
-                          <div key={m.id} className="flex items-start gap-2 text-xs">
-                            <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${m.coverage_status === 'covered' ? 'bg-green-100 text-green-800' : m.coverage_status === 'partial' ? 'bg-amber-100 text-amber-800' : 'bg-red-100 text-red-800'}`}>
-                              {m.coverage_status}
-                            </span>
-                            <div className="min-w-0">
-                              <p className="text-slate-700">{m.fact_text}</p>
-                              {m.rationale && <p className="text-slate-400">{m.rationale}</p>}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </CollapsibleSection>
-                  )}
-
-                  {applicationStrategy && (
-                    <CollapsibleSection label="Strategy">
-                      <div className="mt-2 space-y-2 text-xs text-slate-600">
-                        {applicationStrategy.resume_headline && <p><span className="font-medium text-slate-700">Headline:</span> {applicationStrategy.resume_headline}</p>}
-                        {applicationStrategy.weak_or_missing_requirements.length > 0 && (
-                          <div>
-                            <p className="font-medium text-slate-700">Weak/missing:</p>
-                            {applicationStrategy.weak_or_missing_requirements.map((w, i) => <p key={i} className="mt-0.5">• {w}</p>)}
-                          </div>
-                        )}
-                      </div>
-                    </CollapsibleSection>
-                  )}
-
-                  {fitAnalysis && (
-                    <Panel icon={<Gauge size={16} />} title={`Fit: ${fitAnalysis.overall_score}% — ${fitAnalysis.recommendation}`} compact summary={fitAnalysis.reality_check}>
-                      <div className="space-y-2 mt-3 text-xs text-slate-600">
-                        {fitAnalysis.strengths.length > 0 && (
-                          <div>
-                            <p className="font-medium text-slate-700">Strengths:</p>
-                            {fitAnalysis.strengths.map((s, i) => <p key={i} className="mt-0.5">• {s}</p>)}
-                          </div>
-                        )}
-                        {fitAnalysis.critical_gaps.length > 0 && (
-                          <div>
-                            <p className="font-medium text-slate-700">Gaps:</p>
-                            {fitAnalysis.critical_gaps.map((g, i) => <p key={i} className="mt-0.5">• {g}</p>)}
-                          </div>
-                        )}
-                      </div>
-                    </Panel>
-                  )}
-
-                  <div className="pt-2">
-                    <button className="w-full rounded-lg border-2 border-dashed border-slate-300 py-3 text-xs font-medium text-slate-500 hover:border-slate-400 hover:text-slate-600" onClick={() => setPipelineStep('bullets')}>
-                      → Continue to bullet selection
-                    </button>
-                  </div>
                 </div>
               )}
 
               {pipelineStep === 'bullets' && (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <p className="text-xs text-slate-500">{bulletDrafts.filter((d) => d.job_id === selectedJobID).length} bullets · {bulletDrafts.filter((d) => d.job_id === selectedJobID && d.selected_for_resume).length} selected</p>
-                    <SecondaryButton label="Auto-select" onClick={handleAutoSelect} />
+                <div className="mx-auto max-w-4xl space-y-4">
+                  <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-600">Evidence</p>
+                        <h3 className="mt-1 text-lg font-bold text-slate-950">Resume bullet source</h3>
+                        <p className="mt-1 text-sm text-slate-500">Use this only when you want to inspect or edit the evidence behind the resume.</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <PipelineButton label="Generate" onClick={handleBullets} tone="primary" />
+                        <SecondaryButton label="Use best" onClick={handleAutoSelect} icon={<Sparkles size={13} />} disabled={selectedJobDrafts.length === 0} />
+                        <SecondaryButton label="Build resume" onClick={generateResume} icon={<FileText size={13} />} disabled={!selectedJobDrafts.some((draft) => draft.selected_for_resume)} variant="green" />
+                      </div>
+                    </div>
                   </div>
+
+                  {selectedJobDrafts.length === 0 ? (
+                    <EmptyState text="No bullets generated yet. Run the agentic pipeline or generate bullets from this step." />
+                  ) : (
+                    <div className="space-y-2">
+                      {selectedJobDrafts
+                        .slice()
+                        .sort((a, b) => a.display_order - b.display_order || b.selection_score - a.selection_score)
+                        .map((draft) => (
+                          <BulletCard key={draft.id} draft={draft} onToggle={() => handleToggleBullet(draft)} onEdit={handleEditBullet} onDelete={handleDeleteBullet} />
+                        ))}
+                    </div>
+                  )}
+
                   {bulletEvents.length > 0 && (
                     <CollapsibleSection label={`Generation log (${bulletEvents.length})`}>
-                      <div className="mt-2 space-y-1">
-                        {bulletEvents.slice(-5).map((ev) => (
-                          <div key={ev.id} className="flex items-start gap-2 text-xs">
-                            <span className={`mt-0.5 shrink-0 rounded px-1 py-0.5 text-[10px] font-medium ${ev.status === 'selected' ? 'bg-green-100 text-green-700' : ev.status === 'rejected' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500'}`}>
-                              {ev.status}
-                            </span>
-                            <div className="min-w-0">
-                              <p className="text-slate-700">{ev.draft_text || ev.origin_heading}</p>
-                              {ev['reason'] && <p className="text-slate-400">{ev['reason']}</p>}
-                            </div>
+                      <div className="space-y-1">
+                        {bulletEvents.slice(-8).reverse().map((event) => (
+                          <div key={event.id} className="rounded-md bg-white px-3 py-2 text-xs text-slate-500 ring-1 ring-slate-100">
+                            <span className="font-semibold text-slate-700">{event.stage}</span> {event.reason || event.status}
                           </div>
                         ))}
                       </div>
                     </CollapsibleSection>
                   )}
-                  {bulletDrafts.filter((d) => d.job_id === selectedJobID).length === 0 ? (
-                    <EmptyState text="No bullets yet. Generate bullets from the Job step." />
-                  ) : (
-                    <div className="space-y-2">
-                      {bulletDrafts.filter((d) => d.job_id === selectedJobID).map((draft) => (
-                        <BulletCard key={draft.id} draft={draft} onToggle={() => handleToggleBullet(draft)} onEdit={handleEditBullet} onDelete={handleDeleteBullet} />
-                      ))}
-                    </div>
-                  )}
-                  <div className="pt-2">
-                    <button className="w-full rounded-lg border-2 border-dashed border-slate-300 py-3 text-xs font-medium text-slate-500 hover:border-slate-400 hover:text-slate-600" onClick={() => setPipelineStep('resume')}>
-                      → Continue to resume assembly
-                    </button>
-                  </div>
                 </div>
               )}
 
               {pipelineStep === 'resume' && (
-                <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+                <div className="mx-auto grid max-w-5xl gap-4">
                   <div className="space-y-4">
                     {!activeResume ? (
                       <div className="rounded-lg border border-slate-200 bg-white p-6 text-center">
-                        <p className="text-sm text-slate-600">{bulletDrafts.filter((d) => d.selected_for_resume).length} bullets ready.</p>
+                        <p className="text-sm text-slate-600">Review generated resumes here. Generate a new draft from the selected JD evidence when needed.</p>
                         <div className="mt-4 flex justify-center gap-2">
-                          <IconButton label="Generate Resume" onClick={generateResume}><Sparkles size={14} /></IconButton>
-                          <SecondaryButton label="Edit bullets" onClick={() => setPipelineStep('bullets')} />
+                          <PipelineButton label="Generate Resume" onClick={generateResume} tone="primary" />
+                          <SecondaryButton label="Tune bullets" onClick={() => setPipelineStep('bullets')} disabled={selectedJobDrafts.length === 0} />
                         </div>
                       </div>
                     ) : (
@@ -1472,19 +1721,26 @@ function App() {
                           )}
                         </div>
                         <div className="flex items-center gap-2">
-                          {resumeVersions.length > 1 && (
-                            <select className="rounded border border-slate-200 px-2 py-1 text-xs" value={resumeVersions[0]?.id ?? 0} onChange={async (e) => {
-                              const v = resumeVersions.find((rv) => rv.id === Number(e.target.value));
+                          {(selectedGeneratedResumes.length > 0 || (resumeVersionsByJobID.get(selectedJobID) || []).length > 0) && (
+                            <select className="rounded border border-slate-200 px-2 py-1 text-xs" value="" onChange={(e) => {
+                              const value = e.target.value;
+                              const generated = selectedGeneratedResumes.find((draft) => draft.id === value);
+                              if (generated) { setActiveResume(generated.resume); setActiveValidation(generated.validation); return; }
+                              const v = (resumeVersionsByJobID.get(selectedJobID) || []).find((rv) => `version-${rv.id}` === value);
                               if (v) { setActiveResume(normalizeResumeJSON(v.resume_json)); setActiveValidation(normalizeValidationResult(v.validation_result)); }
                             }}>
-                              {resumeVersions.map((v) => <option key={v.id} value={v.id}>v{v.id} — {v.created_at?.slice(0, 16)}</option>)}
+                              <option value="">Switch resume...</option>
+                              {selectedGeneratedResumes.map((draft) => <option key={draft.id} value={draft.id}>Draft — {formatDateTime(draft.created_at)}</option>)}
+                              {(resumeVersionsByJobID.get(selectedJobID) || []).map((v) => <option key={v.id} value={`version-${v.id}`}>Saved resume — {formatDateTime(v.created_at)}</option>)}
                             </select>
                           )}
+                          <PipelineButton label="Regenerate" onClick={generateResume} />
                           {activeResume && !editingResume && (
                             <SecondaryButton label="Edit" onClick={startEditingResume} variant="blue" />
                           )}
-                          <IconButton label="Export JSON" onClick={exportResumeJSON}><FileText size={14} /></IconButton>
-                          <IconButton label="PDF" onClick={renderPDF}><FilePlus2 size={14} /></IconButton>
+                          <SecondaryButton label="Save resume" onClick={saveActiveResumeVersion} disabled={!activeResume} variant="green" />
+                          <SecondaryButton label="PDF" onClick={renderPDF} icon={<FilePlus2 size={13} />} />
+                          <SecondaryButton label="Applied" onClick={() => markApplicationStatus('applied')} disabled={!selectedJobID} variant="green" />
                         </div>
                       </>
                     )}
@@ -1508,52 +1764,20 @@ function App() {
                         )}
                       </div>
                     )}
-                    <Panel icon={<BriefcaseBusiness size={14} />} title="Application" compact>
-                      <div className="space-y-2 mt-2">
+                    <Panel icon={<BriefcaseBusiness size={14} />} title="Application notes" compact>
+                      <div className="mt-2 grid gap-3 md:grid-cols-[220px_1fr_auto] md:items-end">
+                        <div>
+                          <label className="mb-1 block text-xs font-medium text-slate-500">Status</label>
+                          <select value={applicationStatusDraft} onChange={(event) => setApplicationStatusDraft(event.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300">
+                            {Object.entries(APP_STATUS_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                          </select>
+                        </div>
                         <TextInput label="Notes" value={applicationNotes} onChange={setApplicationNotes} />
-                        <IconButton label="Save" onClick={saveApplication} disabled={!selectedJobID}><Save size={14} /></IconButton>
+                        <IconButton label="Save application" onClick={() => saveApplication()} disabled={!selectedJobID}><Save size={14} /></IconButton>
                       </div>
                     </Panel>
                   </div>
-                </div>
-              )}
-
-              {pipelineStep === 'tracker' && (
-                <div className="space-y-4">
-                  {applications.length === 0 ? (
-                    <EmptyState text="No applications yet. Save one from the Resume step." />
-                  ) : (
-                    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-                      <table className="w-full text-xs">
-                        <thead>
-                          <tr className="border-b border-slate-200 text-left font-semibold text-slate-500">
-                            <th className="px-4 py-3">Company</th>
-                            <th className="px-4 py-3">Role</th>
-                            <th className="px-4 py-3">Status</th>
-                            <th className="px-4 py-3">Fit</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {applications.map((app) => {
-                            const j = jobs.find((jj) => jj.id === app.job_id);
-                            return (
-                              <tr key={app.id} className="border-b border-slate-100 hover:bg-slate-50">
-                                <td className="px-4 py-3 font-medium">{j?.company || '—'}</td>
-                                <td className="px-4 py-3">{j?.title || '—'}</td>
-                                 <td className="px-4 py-3">
-                                  <select className="rounded-lg border border-slate-200 px-2 py-1 text-xs font-medium focus:border-slate-400 focus:outline-none" value={app.status} onChange={(e) => updateApplicationStatus(app.id, e.target.value)}>
-                                     {Object.entries(APP_STATUS_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
-                                  </select>
-                                 </td>
-                                <td className="px-4 py-3">{app.fit_score}%</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </div>
+</div>
               )}
             </div>
           </div>
@@ -1647,9 +1871,11 @@ function App() {
               <p className="text-xs text-slate-500">Configure LLM provider, API keys, and profile</p>
               <Panel icon={<KeyRound size={14} />} title="API" compact>
                 <div className="space-y-2 mt-2">
-                  <SelectInput label="Provider" value={settings.provider} onChange={(v) => setSettings({...settings, provider: v})} options={[['openrouter', 'OpenRouter'], ['openai', 'OpenAI']]} />
-                  <TextInput label="Model" value={settings.model} onChange={(v) => setSettings({...settings, model: v})} />
-                  <TextInput label="API Key" value={apiKey} onChange={setAPIKey} />
+                   <SelectInput label="Provider" value={settings.provider} onChange={(v) => setSettings({...settings, provider: v})} options={[['openrouter', 'OpenRouter'], ['openai', 'OpenAI']]} />
+                   <TextInput label="Model" value={settings.model} onChange={(v) => setSettings({...settings, model: v})} />
+                   <TextInput label="Embedding model" value={settings.embedding_model} onChange={(v) => setSettings({...settings, embedding_model: v})} />
+                   <p className="text-xs text-slate-400">OpenAI default: text-embedding-3-small. OpenRouter default: openai/text-embedding-3-small.</p>
+                   <TextInput label="API Key" value={apiKey} onChange={setAPIKey} />
                   <button className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800" onClick={handleTestSettings}>Save</button>
                 </div>
               </Panel>
@@ -1669,7 +1895,7 @@ function App() {
               <Panel icon={<Wrench size={14} />} title="Tools" compact>
                 <div className="mt-2 flex flex-wrap gap-2">
                   <SecondaryButton label="Install Tectonic" onClick={async () => { await InstallTectonic(); await load(); }} />
-                  <SecondaryButton label="Render test PDF" onClick={async () => { const r = (await RenderSamplePDF()) as RenderPDFResult; setPDFResult(r); if (r.success && r.pdf_path) setPDFSuccess({ path: r.pdf_path, jobTitle: 'Sample PDF' }); }} />
+                  <SecondaryButton label="Render test PDF" onClick={async () => { const r = (await RenderSamplePDF()) as RenderPDFResult; setPDFResult(r); if (r.success && r.pdf_path) setPDFSuccess({ path: r.pdf_path, jobTitle: 'Sample PDF', jobID: 0 }); }} />
                 </div>
                 {pdfResult && <p className={`mt-1 text-xs ${pdfResult.success ? 'text-green-600' : 'text-red-600'}`}>{pdfResult.success ? 'PDF rendered' : pdfResult.error}</p>}
               </Panel>
@@ -1708,6 +1934,48 @@ function CollapsibleSection({label, children, defaultOpen = false}: {label: stri
       {open && <div className="mt-2">{children}</div>}
     </div>
   );
+}
+
+function TrackerStat({label, value, detail}: {label: string; value: number; detail: string}) {
+  return (
+    <div className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{label}</p>
+      <p className="mt-1 text-2xl font-bold text-slate-950">{value}</p>
+      <p className="text-xs text-slate-500">{detail}</p>
+    </div>
+  );
+}
+
+function MiniMetric({label, value}: {label: string; value: React.ReactNode}) {
+  return (
+    <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
+      <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{label}</p>
+      <p className="mt-0.5 text-sm font-bold text-slate-900">{value}</p>
+    </div>
+  );
+}
+
+function buildJobWorkflowState(job: JobDescription, app: Application | undefined, versions: ResumeVersion[], drafts: TailoredBulletDraft[], requirements: JobRequirement[]): JobWorkflowState {
+  const selectedBullets = drafts.filter((draft) => draft.selected_for_resume).length;
+  if (app && app.status !== 'draft') return {pct: 100, stage: 'tracker', label: APP_STATUS_LABELS[app.status] || app.status, tone: 'green', selectedBullets, totalBullets: drafts.length};
+  if (app) return {pct: 90, stage: 'tracker', label: 'Ready', tone: 'blue', selectedBullets, totalBullets: drafts.length};
+  if (versions.length > 0) return {pct: 82, stage: 'resume', label: 'Saved resume', tone: 'green', selectedBullets, totalBullets: drafts.length};
+  if (selectedBullets > 0) return {pct: 68, stage: 'resume', label: 'Bullets selected', tone: 'blue', selectedBullets, totalBullets: drafts.length};
+  if (drafts.length > 0) return {pct: 56, stage: 'resume', label: 'Resume ready', tone: 'amber', selectedBullets, totalBullets: drafts.length};
+  if (requirements.length > 0) return {pct: 36, stage: 'job', label: 'Matched', tone: 'blue', selectedBullets, totalBullets: drafts.length};
+  if (job.raw_text.trim()) return {pct: 18, stage: 'job', label: 'JD saved', tone: 'slate', selectedBullets, totalBullets: drafts.length};
+  return {pct: 8, stage: 'job', label: 'Draft', tone: 'slate', selectedBullets, totalBullets: drafts.length};
+}
+
+function workflowToneClass(tone: JobWorkflowState['tone'] | undefined) {
+  const classes = {
+    slate: 'bg-slate-100 text-slate-600',
+    blue: 'bg-blue-100 text-blue-700',
+    green: 'bg-emerald-100 text-emerald-700',
+    amber: 'bg-amber-100 text-amber-700',
+    red: 'bg-red-100 text-red-700',
+  };
+  return classes[tone ?? 'slate'];
 }
 
 function BulletCard({draft, onToggle, onEdit, onDelete}: {draft: TailoredBulletDraft; onToggle: () => void; onEdit: (draft: TailoredBulletDraft, text: string) => void; onDelete: (id: number) => void}) {
@@ -1790,14 +2058,14 @@ function Panel({icon, title, subtitle, children, compact, summary}: {icon?: Reac
 
 function SecondaryButton({label, onClick, icon, disabled, variant}: {label: string; onClick: () => void; icon?: React.ReactNode; disabled?: boolean; variant?: 'default' | 'blue' | 'green' | 'amber' | 'red'}) {
   const variants = {
-    default: 'border-slate-300 text-slate-700 before:bg-slate-400 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900',
-    blue: 'border-slate-300 text-slate-700 before:bg-blue-500 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900',
-    green: 'border-slate-300 text-slate-700 before:bg-emerald-500 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900',
-    amber: 'border-slate-300 text-slate-700 before:bg-amber-500 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-900',
-    red: 'border-red-300 text-red-700 before:bg-red-500 hover:border-red-400 hover:bg-red-50 hover:text-red-800',
+    default: 'border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950',
+    blue: 'border-blue-200 text-blue-700 hover:border-blue-300 hover:bg-blue-50',
+    green: 'border-emerald-200 text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50',
+    amber: 'border-amber-200 text-amber-700 hover:border-amber-300 hover:bg-amber-50',
+    red: 'border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50',
   };
   return (
-    <button onClick={onClick} disabled={disabled} className={`relative flex items-center gap-1.5 overflow-hidden rounded-md border bg-white px-3 py-1.5 pl-3.5 text-xs font-semibold shadow-sm shadow-slate-200/70 ring-1 ring-white/70 transition-all before:absolute before:left-0 before:top-0 before:h-full before:w-0.5 active:translate-y-px active:shadow-none disabled:pointer-events-none disabled:opacity-40 ${variants[variant ?? 'default']}`}>
+    <button onClick={onClick} disabled={disabled} className={`inline-flex items-center justify-center gap-1.5 rounded-xl border bg-white px-3.5 py-2 text-xs font-bold shadow-sm shadow-slate-200/60 transition hover:-translate-y-0.5 hover:shadow-md active:translate-y-0 active:shadow-sm disabled:pointer-events-none disabled:opacity-40 ${variants[variant ?? 'default']}`}>
       {icon}{label}
     </button>
   );
@@ -1805,13 +2073,13 @@ function SecondaryButton({label, onClick, icon, disabled, variant}: {label: stri
 
 function PipelineButton({label, onClick, tone}: {label: string; onClick: () => void; tone?: 'primary'}) {
   const classes = tone === 'primary'
-    ? 'border-slate-950 bg-slate-900 text-white shadow-slate-300/80 hover:bg-slate-800 hover:shadow-slate-400/80'
-    : 'border-slate-300 bg-white text-slate-800 shadow-slate-200/90 hover:border-slate-400 hover:bg-slate-50 hover:text-slate-950 hover:shadow-slate-300/90';
+    ? 'border-slate-950 bg-slate-950 text-white shadow-slate-300/80 hover:bg-slate-800 hover:shadow-md'
+    : 'border-slate-200 bg-white text-slate-800 shadow-slate-200/70 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950 hover:shadow-md';
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex min-w-20 items-center justify-center rounded-md border px-4 py-2 text-xs font-bold shadow-sm transition-all active:translate-y-px active:shadow-none ${classes}`}
+      className={`inline-flex min-w-20 items-center justify-center rounded-xl border px-4 py-2 text-xs font-bold shadow-sm transition-all hover:-translate-y-0.5 active:translate-y-0 active:shadow-sm ${classes}`}
     >
       {label}
     </button>
@@ -1821,7 +2089,7 @@ function PipelineButton({label, onClick, tone}: {label: string; onClick: () => v
 function IconButton({label, onClick, children, submit, full, disabled}: {label: string; onClick?: () => void; children?: React.ReactNode; submit?: boolean; full?: boolean; disabled?: boolean}) {
   return (
     <button onClick={onClick} disabled={disabled || submit} type={submit ? 'submit' : 'button'}
-      className={`flex items-center gap-1.5 rounded-md border border-slate-950 bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white shadow-sm shadow-slate-300/80 transition-all hover:bg-slate-800 active:translate-y-px active:shadow-none disabled:pointer-events-none disabled:opacity-40 ${full ? 'flex-1 justify-center' : ''}`}>
+      className={`inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-950 bg-slate-950 px-3.5 py-2 text-xs font-bold text-white shadow-sm shadow-slate-300/80 transition-all hover:-translate-y-0.5 hover:bg-slate-800 hover:shadow-md active:translate-y-0 active:shadow-sm disabled:pointer-events-none disabled:opacity-40 ${full ? 'flex-1 justify-center' : ''}`}>
       {children}{label}
     </button>
   );
@@ -2051,6 +2319,7 @@ function normalizeBulletEvents(v: BulletGenerationEvent[] | null | undefined) { 
 function normalizeJobAnalysis(v: JobAnalysis | null | undefined) { return v ?? null; }
 function normalizeFitAnalysis(v: JobFitAnalysis | null | undefined) { return v ?? null; }
 function normalizeApplicationStrategy(v: ApplicationStrategy | null | undefined) { return v ?? null; }
+function normalizeJobs(v: JobDescription[] | null | undefined): JobDescription[] { return v ?? []; }
 
 function normalizeResumeJSON(v: ResumeJSON | null | undefined): ResumeJSON {
   return {
@@ -2089,6 +2358,22 @@ function normalizeValidationResult(v: ValidationResult | null | undefined): Vali
 
 function normalizeResumeVersion(v: ResumeVersion): ResumeVersion {
   return {...v, resume_json: normalizeResumeJSON(v.resume_json), validation_result: normalizeValidationResult(v.validation_result)};
+}
+
+function normalizeResumeVersions(v: ResumeVersion[] | null | undefined): ResumeVersion[] {
+  return (v ?? []).map(normalizeResumeVersion);
+}
+
+function formatDate(iso: string): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, {month: 'short', day: 'numeric'}).replace(/,/g, '');
+}
+
+function formatDateTime(iso: string): string {
+  if (!iso) return 'saved resume';
+  const d = new Date(iso);
+  return d.toLocaleString(undefined, {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'}).replace(/,/g, '');
 }
 
 function normalizeProfile(p: CandidateProfile) {
