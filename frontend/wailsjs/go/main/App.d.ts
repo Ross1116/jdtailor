@@ -40,6 +40,8 @@ export function DraftCandidateProfileFromSource(arg1:number):Promise<main.Candid
 
 export function ExtractEvidenceFacts(arg1:main.ExtractEvidenceFactsInput):Promise<Array<main.EvidenceFact>>;
 
+export function FetchJobDescription(arg1:main.FetchJobDescriptionInput):Promise<main.FetchJobDescriptionResult>;
+
 export function GenerateApplicationStrategy(arg1:number):Promise<main.ApplicationStrategy>;
 
 export function GenerateCandidateClaims():Promise<Array<main.CandidateClaim>>;
@@ -63,6 +65,8 @@ export function GetFitAnalysis(arg1:number):Promise<main.JobFitAnalysis>;
 export function GetHealth():Promise<main.Health>;
 
 export function GetJobAnalysis(arg1:number):Promise<main.JobAnalysis>;
+
+export function GetPendingExtensionJobDraft():Promise<main.ExtensionJobDraft>;
 
 export function GetRecentEvents():Promise<Array<main.AppEvent>>;
 

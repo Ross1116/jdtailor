@@ -64,6 +64,9 @@ import {
   DraftCandidateProfileFromSource,
   EvidenceFact,
   ExtractEvidenceFacts,
+  ExtensionJobDraft,
+  FetchJobDescription,
+  FetchJobDescriptionResult,
   GenerateCandidateClaims,
   GenerateTailoredBulletDrafts,
   GenerateApplicationStrategy,
@@ -74,6 +77,7 @@ import {
   GetFitAnalysis,
   GetHealth,
   GetJobAnalysis,
+  GetPendingExtensionJobDraft,
   GetRecentEvents,
   GetSettings,
   GetToolStatus,
@@ -295,6 +299,9 @@ function App() {
     raw_text: '',
   });
   const [newJobDraft, setNewJobDraft] = useState<JobDraft>(emptyJobDraft);
+  const [newJobFetchWarnings, setNewJobFetchWarnings] = useState<string[]>([]);
+  const [jobFetchWarnings, setJobFetchWarnings] = useState<string[]>([]);
+  const [extensionImportNotice, setExtensionImportNotice] = useState('');
   const [apiKey, setAPIKey] = useState('');
   const [llmResult, setLLMResult] = useState<LLMTestResult | null>(null);
   const [pdfResult, setPDFResult] = useState<RenderPDFResult | null>(null);
@@ -310,6 +317,7 @@ function App() {
   const [applicationNotes, setApplicationNotes] = useState('');
   const [applicationStatusDraft, setApplicationStatusDraft] = useState('draft');
   const [jobAgentStages, setJobAgentStages] = useState<JobAgentWorkflowResult['stages']>([]);
+  const [resumeSaveNotice, setResumeSaveNotice] = useState('');
   const [jobSearch, setJobSearch] = useState('');
   const [jobStatusFilter, setJobStatusFilter] = useState('all');
   const pollingContextRunIDs = useRef<Set<number>>(new Set());
@@ -324,7 +332,6 @@ function App() {
   const selectedJobDrafts = useMemo(() => bulletDrafts.filter((draft) => draft.job_id === selectedJobID), [bulletDrafts, selectedJobID]);
   const selectedGeneratedResumes = useMemo(() => generatedResumeDrafts.filter((draft) => draft.job_id === selectedJobID), [generatedResumeDrafts, selectedJobID]);
   const newJobInferred = useMemo(() => inferJobDetailsFromText(newJobDraft.raw_text), [newJobDraft.raw_text]);
-  const selectedApplicationInfo = applications.find((a) => a.id === selectedApplicationID);
   const queuedFacts = facts.filter((fact) => fact.status === 'needs_review');
   const queuedClaims = claims.filter((claim) => claim.status === 'needs_review');
   const apiConfigured = toolStatus?.api_key_configured ?? settings.api_key_configured;
@@ -348,6 +355,11 @@ function App() {
     return map;
   }, [resumeVersions]);
 
+  const selectedSavedResumes = useMemo(() => resumeVersionsByJobID.get(selectedJobID) || [], [resumeVersionsByJobID, selectedJobID]);
+  const activeResumeFingerprint = useMemo(() => activeResume ? JSON.stringify(activeResume) : '', [activeResume]);
+  const activeResumeSaved = useMemo(() => activeResumeFingerprint !== '' && selectedSavedResumes.some((version) => JSON.stringify(normalizeResumeJSON(version.resume_json)) === activeResumeFingerprint), [activeResumeFingerprint, selectedSavedResumes]);
+  const activeResumeDraftOnly = Boolean(activeResume && !activeResumeSaved);
+
   const jobWorkflowByID = useMemo(() => {
     const map = new Map<number, JobWorkflowState>();
     for (const job of jobs) {
@@ -358,6 +370,9 @@ function App() {
     }
     return map;
   }, [jobs, jobAppsMap, resumeVersionsByJobID, bulletDrafts, selectedJobID, jobRequirements]);
+
+  const selectedJobWorkflow = selectedJob ? jobWorkflowByID.get(selectedJob.id) : undefined;
+  const selectedJobApplication = selectedJobID ? jobAppsMap.get(selectedJobID) : undefined;
 
   const filteredJobs = useMemo(() => {
     const query = jobSearch.trim().toLowerCase();
@@ -657,6 +672,7 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
     setActiveValidation(validation);
     const generated: GeneratedResumeDraft = {id: `draft-${Date.now()}`, job_id: selectedJobID, resume: cleaned, validation, created_at: new Date().toISOString()};
     setGeneratedResumeDrafts((prev) => [generated, ...prev]);
+    setResumeSaveNotice('Edits saved as a new draft. Save a version when it is ready to use.');
   }
 
   async function saveActiveResumeVersion() {
@@ -667,6 +683,8 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
         job_id: selectedJobID, resume_json: activeResume, tex_source: '', pdf_path: '', validation_result: validation,
       })) as ResumeVersion;
       setResumeVersions((prev) => [normalizeResumeVersion(version), ...prev.filter((v) => v.id !== version.id)]);
+      setApplicationStatusDraft((prev) => prev === 'draft' ? 'ready_to_apply' : prev);
+      setResumeSaveNotice('Resume version saved. You can render a PDF or mark the application ready/applied.');
     });
   }
 
@@ -836,10 +854,11 @@ async function saveNewJob(event: FormEvent<HTMLFormElement>) {
      event.preventDefault();
      await runAction('save-new-job', async () => {
        const saved = (await CreateJobDescription(newJobDraft)) as JobDescription;
-       setSelectedJobID(saved.id);
-       setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
-       setNewJobDraft(emptyJobDraft);
-       await refreshJobsAndVersions();
+        setSelectedJobID(saved.id);
+        setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
+        setNewJobDraft(emptyJobDraft);
+        setExtensionImportNotice('');
+        await refreshJobsAndVersions();
        await refreshJobContext(saved.id);
        setShowAddJob(false);
      });
@@ -860,7 +879,50 @@ async function saveNewJob(event: FormEvent<HTMLFormElement>) {
       })) as JobAgentWorkflowResult;
       applyJobAgentResult(result);
       setNewJobDraft(emptyJobDraft);
+      setExtensionImportNotice('');
       setShowAddJob(false);
+      await refreshJobsAndVersions();
+      await refreshEvents();
+    });
+  }
+
+  function draftFromFetch(result: FetchJobDescriptionResult): JobDraft {
+    return {
+      company: result.company || '',
+      title: result.title || '',
+      url: result.url || '',
+      raw_text: result.raw_text || '',
+    };
+  }
+
+  async function handleFetchNewJobFromURL() {
+    const url = newJobDraft.url.trim();
+    if (!url) { setError('Posting URL is required.'); setLoadState('error'); return; }
+    await runAction('fetch-new-job', async () => {
+      const result = (await FetchJobDescription({url})) as FetchJobDescriptionResult;
+      setNewJobDraft(draftFromFetch(result));
+      setNewJobFetchWarnings(result.warnings || []);
+    });
+  }
+
+  async function handleFetchNewJobAndParse() {
+    const url = newJobDraft.url.trim();
+    if (!url) { setError('Posting URL is required.'); setLoadState('error'); return; }
+    await runAction('fetch-new-job-parse', async () => {
+      const result = (await FetchJobDescription({url})) as FetchJobDescriptionResult;
+      const draft = draftFromFetch(result);
+      setNewJobDraft(draft);
+      setNewJobFetchWarnings(result.warnings || []);
+      const saved = (await CreateJobDescription(draft)) as JobDescription;
+      setSelectedJobID(saved.id);
+      setJobDraft({company: saved.company, title: saved.title, url: saved.url, raw_text: saved.raw_text});
+      const requirements = (await ParseJobDescription(saved.id)) as JobRequirement[];
+      setJobRequirements(normalizeRequirements(requirements));
+      const analysis = (await AnalyzeJobDescription(saved.id)) as JobAnalysis;
+      setJobAnalysis(normalizeJobAnalysis(analysis));
+      setJobMatches([]); setFitAnalysis(null); setApplicationStrategy(null); replaceDraftsForJob(saved.id, []);
+      setShowAddJob(false);
+      setPipelineStep('job');
       await refreshJobsAndVersions();
       await refreshEvents();
     });
@@ -868,6 +930,8 @@ async function saveNewJob(event: FormEvent<HTMLFormElement>) {
 
   function selectJob(job: JobDescription) {
     setShowAddJob(false);
+    setExtensionImportNotice('');
+    setResumeSaveNotice('');
     setSelectedJobID(job.id);
     setJobDraft({company: job.company, title: job.title, url: job.url, raw_text: job.raw_text});
     const existingApp = jobAppsMap.get(job.id);
@@ -899,11 +963,13 @@ async function saveNewJob(event: FormEvent<HTMLFormElement>) {
 
   function cancelNewJob() {
     setNewJobDraft(emptyJobDraft);
+    setExtensionImportNotice('');
     setShowAddJob(false);
   }
 
   function toggleNewJobForm() {
     setNewJobDraft(emptyJobDraft);
+    setExtensionImportNotice('');
     setShowAddJob((prev) => !prev);
   }
 
@@ -955,6 +1021,16 @@ function handleSaveJob(e: FormEvent) {
       const a = (await AnalyzeJobDescription(selectedJobID)) as JobAnalysis;
       setJobAnalysis(normalizeJobAnalysis(a));
       setJobMatches([]); setBulletDrafts([]); setFitAnalysis(null); setApplicationStrategy(null);
+    });
+  }
+
+  function handleFetchSelectedJobFromURL() {
+    const url = jobDraft.url.trim();
+    if (!url) { setError('Posting URL is required.'); setLoadState('error'); return; }
+    void runAction('fetch-job', async () => {
+      const result = (await FetchJobDescription({url})) as FetchJobDescriptionResult;
+      setJobDraft(draftFromFetch(result));
+      setJobFetchWarnings(result.warnings || []);
     });
   }
 
@@ -1074,7 +1150,23 @@ function runAgenticPipeline() {
     })();
   }
 
+  async function pollExtensionJobDraft() {
+    const imported = (await GetPendingExtensionJobDraft()) as ExtensionJobDraft | null;
+    if (!imported?.raw_text) return;
+    setNewJobDraft({company: imported.company || '', title: imported.title || '', url: imported.url || '', raw_text: imported.raw_text || ''});
+    setNewJobFetchWarnings(imported.warnings || []);
+    setExtensionImportNotice(`Imported from ${imported.source || 'Firefox extension'} at ${imported.received_at ? imported.received_at.slice(11, 19) : 'now'}.`);
+    setShowAddJob(true);
+    setActiveView('pipeline');
+    setPipelineStep('job');
+  }
+
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    const id = window.setInterval(() => { void pollExtensionJobDraft().catch(() => null); }, 2000);
+    return () => window.clearInterval(id);
+  }, []);
 
   useEffect(() => { for (const run of runningContextRuns) ensureContextAgentPolling(run.id, run.source_id); }, [contextRuns]);
 
@@ -1087,8 +1179,10 @@ function runAgenticPipeline() {
   const statusText = loadState === 'loading' ? 'Loading' : loadState === 'error' ? 'Needs attention' : 'Ready';
 
   const pipelineSteps: {key: PipelineStep; label: string; icon: React.ReactNode}[] = [
-    {key: 'job', label: 'Agent', icon: <Bot size={14} />},
+    {key: 'job', label: 'JD', icon: <BriefcaseBusiness size={14} />},
+    {key: 'bullets', label: 'Evidence', icon: <ListChecks size={14} />},
     {key: 'resume', label: 'Resume', icon: <FileText size={14} />},
+    {key: 'tracker', label: 'Track', icon: <Gauge size={14} />},
   ];
 
   function getJobProgress(jobID: number): {step: PipelineStep; pct: number} {
@@ -1099,7 +1193,7 @@ function runAgenticPipeline() {
   function openJob(job: JobDescription, step: PipelineStep = 'job') {
     selectJob(job);
     setActiveView('pipeline');
-    setPipelineStep(step === 'tracker' ? 'resume' : step);
+    setPipelineStep(step);
   }
 
   return (
@@ -1161,7 +1255,7 @@ function runAgenticPipeline() {
           <div className="mb-3 flex items-center justify-between px-1">
             <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Jobs</span>
             <span className="text-[10px] font-semibold text-slate-400">{filteredJobs.length}/{jobs.length}</span>
-            <button className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={() => { setShowAddJob(true); setActiveView('pipeline'); }} title="Add JD">
+            <button className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={() => { setShowAddJob(true); setActiveView('pipeline'); }} title="Import job">
               <Plus size={14} />
             </button>
           </div>
@@ -1177,7 +1271,7 @@ function runAgenticPipeline() {
           </div>
 
           {jobs.length === 0 ? (
-            <button type="button" onClick={() => { setShowAddJob(true); setActiveView('pipeline'); }} className="w-full rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-xs font-semibold text-slate-400 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-600">Add your first JD</button>
+            <button type="button" onClick={() => { setShowAddJob(true); setActiveView('pipeline'); }} className="w-full rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-xs font-semibold text-slate-400 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-600">Import your first job</button>
           ) : (
             <div className="space-y-1">
               {filteredJobs.map((job) => {
@@ -1292,16 +1386,16 @@ function runAgenticPipeline() {
                <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
                  <div className="flex flex-wrap items-center justify-between gap-4">
                    <div>
-                     <h2 className="text-2xl font-bold tracking-tight text-slate-950">Job workspace</h2>
-                     <p className="mt-1 text-sm text-slate-500">Add a JD, run the agent, review the resume.</p>
+                      <h2 className="text-2xl font-bold tracking-tight text-slate-950">Resume application tracker</h2>
+                      <p className="mt-1 text-sm text-slate-500">Import jobs, generate tailored resumes, save versions, and track each application.</p>
                    </div>
                    <button className="inline-flex items-center gap-2 rounded-xl bg-slate-950 px-4 py-2.5 text-xs font-bold text-white shadow-sm shadow-slate-300/80 transition hover:-translate-y-0.5 hover:bg-slate-800 hover:shadow-md" onClick={() => { setShowAddJob(true); setActiveView('pipeline'); }}>
-                     <Plus size={14} /> Add JD
+                      <Plus size={14} /> Import job
                    </button>
                  </div>
                  <div className="mt-5 grid gap-3 sm:grid-cols-3">
-                   <TrackerStat label="Jobs" value={jobs.length} detail="tracked JDs" />
-                   <TrackerStat label="Resumes" value={resumeVersions.length + generatedResumeDrafts.length} detail="drafts and saved" />
+                    <TrackerStat label="Jobs" value={jobs.length} detail="tracked postings" />
+                    <TrackerStat label="Resumes" value={resumeVersions.length + generatedResumeDrafts.length} detail="drafts + saved versions" />
                    <TrackerStat label="Sources" value={sources.length} detail="evidence inputs" />
                  </div>
                </div>
@@ -1366,16 +1460,21 @@ function runAgenticPipeline() {
              <div className="mx-auto max-w-5xl">
                <div className="mb-5 flex items-center justify-between gap-4">
                  <div>
-                   <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">New job</p>
-                   <h2 className="mt-1 text-2xl font-bold tracking-tight text-slate-950">Paste a JD and let the agent work</h2>
-                   <p className="mt-1 text-sm text-slate-500">The agent will parse the JD, match evidence, select bullets, and return a resume draft for review.</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Import job</p>
+                    <h2 className="mt-1 text-2xl font-bold tracking-tight text-slate-950">Turn a posting into a tailored resume draft</h2>
+                    <p className="mt-1 text-sm text-slate-500">Use the Firefox LinkedIn button, fetch a public URL, or paste text. Then run the workflow once.</p>
                  </div>
                  <SecondaryButton label="Cancel" onClick={cancelNewJob} />
                </div>
 
                <form onSubmit={saveNewJob} className="grid gap-5 lg:grid-cols-[1fr_320px]">
-                 <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
-                   <TextArea label="Job description" rows={22} value={newJobDraft.raw_text} onChange={(v) => updateNewJobDraft({...newJobDraft, raw_text: v})} />
+                  <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
+                    {extensionImportNotice && (
+                      <div className="mb-4 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-800">
+                        <span className="font-bold">LinkedIn import ready.</span> {extensionImportNotice}
+                      </div>
+                    )}
+                    <TextArea label="Job description" rows={22} value={newJobDraft.raw_text} onChange={(v) => updateNewJobDraft({...newJobDraft, raw_text: v})} />
                    <div className="mt-3 flex flex-wrap gap-1.5">
                      <StatusBadge text={`${newJobDraft.raw_text.length}/50000 chars`} color={newJobDraft.raw_text.length > 50000 ? 'red' : 'slate'} />
                      {(newJobDraft.company || newJobInferred.company) && <StatusBadge text={newJobDraft.company || newJobInferred.company} color="blue" />}
@@ -1383,25 +1482,43 @@ function runAgenticPipeline() {
                    </div>
                  </div>
 
-                 <div className="space-y-4">
-                   <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
-                     <div className="space-y-3">
-                       <TextInput label="Company" value={newJobDraft.company} onChange={(v) => updateNewJobDraft({...newJobDraft, company: v})} />
-                       <TextInput label="Role" value={newJobDraft.title} onChange={(v) => updateNewJobDraft({...newJobDraft, title: v})} />
-                       <TextInput label="Posting URL" value={newJobDraft.url} onChange={(v) => updateNewJobDraft({...newJobDraft, url: v})} />
-                     </div>
-                   </div>
+                  <div className="space-y-4">
+                    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
+                      <div className="space-y-3">
+                        <TextInput label="Company" value={newJobDraft.company} onChange={(v) => updateNewJobDraft({...newJobDraft, company: v})} />
+                        <TextInput label="Role" value={newJobDraft.title} onChange={(v) => updateNewJobDraft({...newJobDraft, title: v})} />
+                        <TextInput label="Posting URL" value={newJobDraft.url} onChange={(v) => updateNewJobDraft({...newJobDraft, url: v})} />
+                      </div>
+                      <div className="mt-4 rounded-2xl border border-slate-100 bg-slate-50 p-3">
+                        <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">Import source</p>
+                        <p className="mt-1 text-xs leading-5 text-slate-500">LinkedIn works best through the Firefox extension. Public company career pages can be fetched here.</p>
+                        <div className="mt-3 grid gap-2">
+                          <button type="button" disabled={!newJobDraft.url.trim() || busyAction !== ''} onClick={handleFetchNewJobFromURL} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-xs font-bold text-slate-700 shadow-sm shadow-slate-200/70 transition hover:bg-slate-50 disabled:pointer-events-none disabled:opacity-40">
+                            Fetch from URL
+                          </button>
+                          <button type="button" disabled={!newJobDraft.url.trim() || busyAction !== ''} onClick={handleFetchNewJobAndParse} className="rounded-xl bg-blue-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm shadow-blue-200 transition hover:bg-blue-700 disabled:pointer-events-none disabled:opacity-40">
+                            Fetch and analyze
+                          </button>
+                        </div>
+                        {(newJobFetchWarnings.length > 0 || newJobDraft.raw_text) && (
+                          <div className="mt-3 space-y-1 text-[11px] text-slate-500">
+                            {newJobDraft.raw_text && <p>{newJobDraft.raw_text.length} extracted characters.</p>}
+                            {newJobFetchWarnings.map((warning, index) => <p key={index} className="text-amber-700">{warning}</p>)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
 
                    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
-                     <p className="text-sm font-bold text-slate-950">Agent run</p>
-                     <p className="mt-1 text-xs leading-5 text-slate-500">Evidence-only generation. Resume drafts stay in memory until you save a version.</p>
-                     <div className="mt-4 grid gap-2">
-                       <button type="button" disabled={!newJobDraft.raw_text.trim() || busyAction !== '' || newJobDraft.raw_text.length > 50000} onClick={saveNewJobAndRun} className="rounded-xl bg-slate-950 px-4 py-3 text-xs font-bold text-white shadow-sm shadow-slate-300/80 transition hover:-translate-y-0.5 hover:bg-slate-800 hover:shadow-md disabled:pointer-events-none disabled:opacity-40">
-                         Save & Run Agent
-                       </button>
-                       <button type="submit" disabled={!newJobDraft.raw_text.trim() || busyAction !== '' || newJobDraft.raw_text.length > 50000} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs font-bold text-slate-700 shadow-sm shadow-slate-200/70 transition hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50 hover:shadow-md disabled:pointer-events-none disabled:opacity-40">
-                         Save only
-                       </button>
+                      <p className="text-sm font-bold text-slate-950">Next step</p>
+                      <p className="mt-1 text-xs leading-5 text-slate-500">Create a resume draft in one run. Save a version from the Resume step when you are happy with it.</p>
+                      <div className="mt-4 grid gap-2">
+                        <button type="button" disabled={!newJobDraft.raw_text.trim() || busyAction !== '' || newJobDraft.raw_text.length > 50000} onClick={saveNewJobAndRun} className="rounded-xl bg-slate-950 px-4 py-3 text-xs font-bold text-white shadow-sm shadow-slate-300/80 transition hover:-translate-y-0.5 hover:bg-slate-800 hover:shadow-md disabled:pointer-events-none disabled:opacity-40">
+                          Create resume draft
+                        </button>
+                        <button type="submit" disabled={!newJobDraft.raw_text.trim() || busyAction !== '' || newJobDraft.raw_text.length > 50000} className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs font-bold text-slate-700 shadow-sm shadow-slate-200/70 transition hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50 hover:shadow-md disabled:pointer-events-none disabled:opacity-40">
+                          Save JD for later
+                        </button>
                      </div>
                    </div>
                  </div>
@@ -1414,10 +1531,14 @@ function runAgenticPipeline() {
            <div className="flex flex-1 flex-col overflow-hidden">
              <div className="border-b border-slate-200 bg-white px-6 py-3">
                <div className="flex items-center justify-between gap-3">
-                 <div className="min-w-0 flex-1">
-                   <p className="truncate text-sm font-semibold text-slate-950">{selectedJob.title || 'Untitled'}</p>
-                   <p className="truncate text-xs text-slate-500">{selectedJob.company || 'No company'}</p>
-                 </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="truncate text-sm font-semibold text-slate-950">{selectedJob.title || 'Untitled'}</p>
+                      {selectedJobWorkflow && <StatusBadge text={selectedJobWorkflow.label} color={selectedJobWorkflow.tone} />}
+                      {selectedJobApplication?.status && <StatusBadge text={APP_STATUS_LABELS[selectedJobApplication.status] || selectedJobApplication.status} color="green" />}
+                    </div>
+                    <p className="truncate text-xs text-slate-500">{selectedJob.company || 'No company'} · {selectedJobWorkflow?.pct || 18}% workflow</p>
+                  </div>
                   <div className="flex items-center gap-2">
                     {pipelineSteps.map((step) => (
                       <button
@@ -1444,15 +1565,26 @@ function runAgenticPipeline() {
                         <TextInput label="Company" value={jobDraft.company} onChange={(v) => updateJobDraft({...jobDraft, company: v})} />
                         <TextInput label="Role" value={jobDraft.title} onChange={(v) => updateJobDraft({...jobDraft, title: v})} />
                       </div>
-                      <TextInput label="URL" value={jobDraft.url} onChange={(v) => updateJobDraft({...jobDraft, url: v})} />
-                      <TextArea label="Description" rows={12} value={jobDraft.raw_text} onChange={(v) => updateJobDraft({...jobDraft, raw_text: v})} />
+                       <div className="grid gap-2 md:grid-cols-[1fr_auto] md:items-end">
+                         <TextInput label="URL" value={jobDraft.url} onChange={(v) => updateJobDraft({...jobDraft, url: v})} />
+                         <button type="button" disabled={!jobDraft.url.trim() || busyAction !== ''} onClick={handleFetchSelectedJobFromURL} className="inline-flex h-10 items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white px-4 text-xs font-bold text-slate-700 shadow-sm shadow-slate-200/70 transition-all hover:bg-slate-50 disabled:pointer-events-none disabled:opacity-40">
+                            <Search size={14} /> Refresh from URL
+                         </button>
+                       </div>
+                       {(jobFetchWarnings.length > 0 || jobDraft.raw_text) && (
+                         <div className="flex flex-wrap gap-1.5">
+                           {jobDraft.raw_text && <StatusBadge text={`${jobDraft.raw_text.length}/50000 chars`} color={jobDraft.raw_text.length > 50000 ? 'red' : 'slate'} />}
+                           {jobFetchWarnings.map((warning, index) => <StatusBadge key={index} text={warning} color="amber" />)}
+                         </div>
+                       )}
+                       <TextArea label="Description" rows={12} value={jobDraft.raw_text} onChange={(v) => updateJobDraft({...jobDraft, raw_text: v})} />
                         <div className="rounded-2xl border border-blue-100 bg-blue-50/60 p-4">
                           <div className="flex flex-wrap items-center justify-between gap-3">
                             <div>
-                              <p className="text-sm font-bold text-slate-950">Generate tailored resume</p>
-                              <p className="mt-1 text-xs text-slate-600">Saves the JD, matches evidence, selects bullets, and returns a resume draft for review.</p>
+                              <p className="text-sm font-bold text-slate-950">Resume workflow</p>
+                              <p className="mt-1 text-xs text-slate-600">Updates the JD, reruns evidence matching, selects bullets, and creates a reviewable resume draft.</p>
                             </div>
-                            <PipelineButton label="Save & run" onClick={runAgenticPipeline} tone="primary" />
+                            <PipelineButton label="Create resume draft" onClick={runAgenticPipeline} tone="primary" disabled={busyAction !== '' || !jobDraft.raw_text.trim()} />
                           </div>
                           {jobAgentStages.length > 0 && (
                             <div className="mt-3 grid gap-1.5">
@@ -1468,7 +1600,7 @@ function runAgenticPipeline() {
                         </div>
                         <div className="flex flex-wrap gap-2">
                           <button type="submit" disabled={busyAction !== ''} className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 shadow-sm shadow-slate-200/70 transition-all hover:bg-slate-50 disabled:pointer-events-none disabled:opacity-40">
-                            <Save size={14} /> Save JD only
+                            <Save size={14} /> Update JD
                           </button>
                           {selectedJobID > 0 && <SecondaryButton label="Delete" onClick={() => deleteJob(selectedJobID)} variant="red" />}
                         </div>
@@ -1498,9 +1630,9 @@ function runAgenticPipeline() {
                         <p className="mt-1 text-sm text-slate-500">Use this only when you want to inspect or edit the evidence behind the resume.</p>
                       </div>
                       <div className="flex flex-wrap gap-2">
-                        <PipelineButton label="Generate" onClick={handleBullets} tone="primary" />
-                        <SecondaryButton label="Use best" onClick={handleAutoSelect} icon={<Sparkles size={13} />} disabled={selectedJobDrafts.length === 0} />
-                        <SecondaryButton label="Build resume" onClick={generateResume} icon={<FileText size={13} />} disabled={!selectedJobDrafts.some((draft) => draft.selected_for_resume)} variant="green" />
+                        <PipelineButton label="Generate evidence" onClick={handleBullets} tone="primary" disabled={busyAction !== ''} />
+                        <SecondaryButton label="Select best" onClick={handleAutoSelect} icon={<Sparkles size={13} />} disabled={selectedJobDrafts.length === 0 || busyAction !== ''} />
+                        <SecondaryButton label="Build resume" onClick={generateResume} icon={<FileText size={13} />} disabled={!selectedJobDrafts.some((draft) => draft.selected_for_resume) || busyAction !== ''} variant="green" />
                       </div>
                     </div>
                   </div>
@@ -1537,10 +1669,10 @@ function runAgenticPipeline() {
                   <div className="space-y-4">
                     {!activeResume ? (
                       <div className="rounded-lg border border-slate-200 bg-white p-6 text-center">
-                        <p className="text-sm text-slate-600">Review generated resumes here. Generate a new draft from the selected JD evidence when needed.</p>
+                        <p className="text-sm text-slate-600">No active resume draft yet. Run the JD workflow, or build one from selected evidence bullets.</p>
                         <div className="mt-4 flex justify-center gap-2">
-                          <PipelineButton label="Generate Resume" onClick={generateResume} tone="primary" />
-                          <SecondaryButton label="Tune bullets" onClick={() => setPipelineStep('bullets')} disabled={selectedJobDrafts.length === 0} />
+                          <PipelineButton label="Build from selected bullets" onClick={generateResume} tone="primary" disabled={!selectedJobDrafts.some((draft) => draft.selected_for_resume) || busyAction !== ''} />
+                          <SecondaryButton label="Review evidence" onClick={() => setPipelineStep('bullets')} disabled={selectedJobDrafts.length === 0} />
                         </div>
                       </div>
                     ) : (
@@ -1720,27 +1852,50 @@ function runAgenticPipeline() {
                             </>
                           )}
                         </div>
-                        <div className="flex items-center gap-2">
-                          {(selectedGeneratedResumes.length > 0 || (resumeVersionsByJobID.get(selectedJobID) || []).length > 0) && (
-                            <select className="rounded border border-slate-200 px-2 py-1 text-xs" value="" onChange={(e) => {
+                        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm shadow-slate-200/70">
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                              <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-400">Resume version</p>
+                              <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                                {activeResumeSaved && <StatusBadge text="Saved version" color="green" />}
+                                {activeResumeDraftOnly && <StatusBadge text="Draft only" color="amber" />}
+                                {activeValidation && <StatusBadge text={activeValidation.passed ? 'Validated' : 'Needs fixes'} color={activeValidation.passed ? 'green' : 'red'} />}
+                              </div>
+                              <p className="mt-1 text-xs text-slate-500">Save a version before rendering a PDF or marking the job ready to apply.</p>
+                            </div>
+                            {(selectedGeneratedResumes.length > 0 || selectedSavedResumes.length > 0) && (
+                              <select className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700" value="" onChange={(e) => {
                               const value = e.target.value;
                               const generated = selectedGeneratedResumes.find((draft) => draft.id === value);
                               if (generated) { setActiveResume(generated.resume); setActiveValidation(generated.validation); return; }
-                              const v = (resumeVersionsByJobID.get(selectedJobID) || []).find((rv) => `version-${rv.id}` === value);
+                              const v = selectedSavedResumes.find((rv) => `version-${rv.id}` === value);
                               if (v) { setActiveResume(normalizeResumeJSON(v.resume_json)); setActiveValidation(normalizeValidationResult(v.validation_result)); }
                             }}>
-                              <option value="">Switch resume...</option>
+                              <option value="">Switch version...</option>
                               {selectedGeneratedResumes.map((draft) => <option key={draft.id} value={draft.id}>Draft — {formatDateTime(draft.created_at)}</option>)}
-                              {(resumeVersionsByJobID.get(selectedJobID) || []).map((v) => <option key={v.id} value={`version-${v.id}`}>Saved resume — {formatDateTime(v.created_at)}</option>)}
+                              {selectedSavedResumes.map((v) => <option key={v.id} value={`version-${v.id}`}>Saved — {formatDateTime(v.created_at)}</option>)}
                             </select>
-                          )}
-                          <PipelineButton label="Regenerate" onClick={generateResume} />
-                          {activeResume && !editingResume && (
-                            <SecondaryButton label="Edit" onClick={startEditingResume} variant="blue" />
-                          )}
-                          <SecondaryButton label="Save resume" onClick={saveActiveResumeVersion} disabled={!activeResume} variant="green" />
-                          <SecondaryButton label="PDF" onClick={renderPDF} icon={<FilePlus2 size={13} />} />
-                          <SecondaryButton label="Applied" onClick={() => markApplicationStatus('applied')} disabled={!selectedJobID} variant="green" />
+                            )}
+                          </div>
+                          {resumeSaveNotice && <p className="mt-3 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-800">{resumeSaveNotice}</p>}
+                          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                            <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+                              <p className="text-xs font-bold text-slate-800">Review draft</p>
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <PipelineButton label="Regenerate" onClick={generateResume} disabled={busyAction !== ''} />
+                                {activeResume && !editingResume && <SecondaryButton label="Edit" onClick={startEditingResume} variant="blue" disabled={busyAction !== ''} />}
+                                <SecondaryButton label={activeResumeSaved ? 'Saved' : 'Save version'} onClick={saveActiveResumeVersion} disabled={!activeResume || activeResumeSaved || busyAction !== ''} variant="green" />
+                              </div>
+                            </div>
+                            <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-3">
+                              <p className="text-xs font-bold text-emerald-950">Finish application</p>
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <SecondaryButton label="Render PDF" onClick={renderPDF} icon={<FilePlus2 size={13} />} disabled={!activeResume || activeResumeDraftOnly || busyAction !== ''} variant="green" />
+                                <SecondaryButton label="Mark ready" onClick={() => markApplicationStatus('ready_to_apply')} disabled={!selectedJobID || activeResumeDraftOnly || busyAction !== ''} variant="blue" />
+                                <SecondaryButton label="Mark applied" onClick={() => markApplicationStatus('applied')} disabled={!selectedJobID || activeResumeDraftOnly || busyAction !== ''} variant="green" />
+                              </div>
+                            </div>
+                          </div>
                         </div>
                       </>
                     )}
@@ -1778,6 +1933,52 @@ function runAgenticPipeline() {
                     </Panel>
                   </div>
 </div>
+              )}
+
+              {pipelineStep === 'tracker' && (
+                <div className="mx-auto max-w-4xl space-y-4">
+                  <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/70">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-emerald-600">Application tracker</p>
+                        <h3 className="mt-1 text-xl font-bold text-slate-950">{selectedJob.title || 'Untitled role'}</h3>
+                        <p className="mt-1 text-sm text-slate-500">{selectedJob.company || 'No company'} · keep resume versions, PDF state, and application notes together.</p>
+                      </div>
+                      <StatusBadge text={APP_STATUS_LABELS[selectedJobApplication?.status || applicationStatusDraft] || applicationStatusDraft} color={selectedJobApplication?.status === 'applied' ? 'green' : 'blue'} />
+                    </div>
+                    <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                      <MiniMetric label="Saved resumes" value={selectedSavedResumes.length} />
+                      <MiniMetric label="Draft resumes" value={selectedGeneratedResumes.length} />
+                      <MiniMetric label="Selected bullets" value={selectedJobDrafts.filter((draft) => draft.selected_for_resume).length} />
+                    </div>
+                  </div>
+
+                  <Panel icon={<FileText size={14} />} title="Resume delivery" compact>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <SecondaryButton label="Open resume" onClick={() => setPipelineStep('resume')} variant="blue" />
+                      <SecondaryButton label="Save current version" onClick={saveActiveResumeVersion} disabled={!activeResume || activeResumeSaved || busyAction !== ''} variant="green" />
+                      <SecondaryButton label="Render PDF" onClick={renderPDF} icon={<FilePlus2 size={13} />} disabled={!activeResume || activeResumeDraftOnly || busyAction !== ''} variant="green" />
+                    </div>
+                    <p className="mt-3 text-xs text-slate-500">PDF rendering is enabled after a resume version is saved. Unsaved drafts stay editable in the Resume step.</p>
+                  </Panel>
+
+                  <Panel icon={<BriefcaseBusiness size={14} />} title="Application status" compact>
+                    <div className="mt-2 grid gap-3 md:grid-cols-[220px_1fr_auto] md:items-end">
+                      <div>
+                        <label className="mb-1 block text-xs font-medium text-slate-500">Status</label>
+                        <select value={applicationStatusDraft} onChange={(event) => setApplicationStatusDraft(event.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300">
+                          {Object.entries(APP_STATUS_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                        </select>
+                      </div>
+                      <TextInput label="Notes" value={applicationNotes} onChange={setApplicationNotes} />
+                      <IconButton label="Save status" onClick={() => saveApplication()} disabled={!selectedJobID}><Save size={14} /></IconButton>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <SecondaryButton label="Mark ready" onClick={() => markApplicationStatus('ready_to_apply')} disabled={!selectedJobID || busyAction !== ''} variant="blue" />
+                      <SecondaryButton label="Mark applied" onClick={() => markApplicationStatus('applied')} disabled={!selectedJobID || busyAction !== ''} variant="green" />
+                    </div>
+                  </Panel>
+                </div>
               )}
             </div>
           </div>
@@ -2071,7 +2272,7 @@ function SecondaryButton({label, onClick, icon, disabled, variant}: {label: stri
   );
 }
 
-function PipelineButton({label, onClick, tone}: {label: string; onClick: () => void; tone?: 'primary'}) {
+function PipelineButton({label, onClick, tone, disabled}: {label: string; onClick: () => void; tone?: 'primary'; disabled?: boolean}) {
   const classes = tone === 'primary'
     ? 'border-slate-950 bg-slate-950 text-white shadow-slate-300/80 hover:bg-slate-800 hover:shadow-md'
     : 'border-slate-200 bg-white text-slate-800 shadow-slate-200/70 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950 hover:shadow-md';
@@ -2079,7 +2280,8 @@ function PipelineButton({label, onClick, tone}: {label: string; onClick: () => v
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex min-w-20 items-center justify-center rounded-xl border px-4 py-2 text-xs font-bold shadow-sm transition-all hover:-translate-y-0.5 active:translate-y-0 active:shadow-sm ${classes}`}
+      disabled={disabled}
+      className={`inline-flex min-w-20 items-center justify-center rounded-xl border px-4 py-2 text-xs font-bold shadow-sm transition-all hover:-translate-y-0.5 active:translate-y-0 active:shadow-sm disabled:pointer-events-none disabled:opacity-40 ${classes}`}
     >
       {label}
     </button>

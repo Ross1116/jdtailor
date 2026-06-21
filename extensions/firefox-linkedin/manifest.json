@@ -1,0 +1,22 @@
+{
+  "manifest_version": 2,
+  "name": "JD Tailor LinkedIn Import",
+  "version": "0.1.0",
+  "description": "Imports the visible LinkedIn job description into JD Tailor.",
+  "permissions": [
+    "activeTab",
+    "http://127.0.0.1:38616/*",
+    "https://www.linkedin.com/*"
+  ],
+  "browser_action": {
+    "default_title": "Import JD to JD Tailor",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.linkedin.com/jobs/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

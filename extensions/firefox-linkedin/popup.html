@@ -1,0 +1,18 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <style>
+      body { width: 280px; margin: 0; padding: 14px; font: 13px system-ui, sans-serif; color: #0f172a; }
+      button { width: 100%; border: 0; border-radius: 10px; background: #0f172a; color: white; padding: 10px 12px; font-weight: 700; cursor: pointer; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      p { margin: 10px 0 0; color: #64748b; line-height: 1.4; }
+      .status { min-height: 18px; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <button id="import">Import visible job</button>
+    <p class="status" id="status">Open a LinkedIn job page, then click import.</p>
+    <script src="popup.js"></script>
+  </body>
+</html>

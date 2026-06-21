@@ -517,6 +517,30 @@ export namespace main {
 	        this.updated_at = source["updated_at"];
 	    }
 	}
+	export class ExtensionJobDraft {
+	    company: string;
+	    title: string;
+	    url: string;
+	    raw_text: string;
+	    source: string;
+	    warnings: string[];
+	    received_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ExtensionJobDraft(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.company = source["company"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	        this.raw_text = source["raw_text"];
+	        this.source = source["source"];
+	        this.warnings = source["warnings"];
+	        this.received_at = source["received_at"];
+	    }
+	}
 	export class ExtractEvidenceFactsInput {
 	    source_id: number;
 	    section_id: number;
@@ -549,6 +573,40 @@ export namespace main {
 	        this.has_claims = source["has_claims"];
 	        this.all_approved = source["all_approved"];
 	        this.issues = source["issues"];
+	    }
+	}
+	export class FetchJobDescriptionInput {
+	    url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FetchJobDescriptionInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.url = source["url"];
+	    }
+	}
+	export class FetchJobDescriptionResult {
+	    company: string;
+	    title: string;
+	    url: string;
+	    raw_text: string;
+	    source: string;
+	    warnings: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new FetchJobDescriptionResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.company = source["company"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	        this.raw_text = source["raw_text"];
+	        this.source = source["source"];
+	        this.warnings = source["warnings"];
 	    }
 	}
 	export class FitNeedAnalysis {

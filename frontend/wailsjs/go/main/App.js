@@ -78,6 +78,10 @@ export function ExtractEvidenceFacts(arg1) {
   return window['go']['main']['App']['ExtractEvidenceFacts'](arg1);
 }
 
+export function FetchJobDescription(arg1) {
+  return window['go']['main']['App']['FetchJobDescription'](arg1);
+}
+
 export function GenerateApplicationStrategy(arg1) {
   return window['go']['main']['App']['GenerateApplicationStrategy'](arg1);
 }
@@ -124,6 +128,10 @@ export function GetHealth() {
 
 export function GetJobAnalysis(arg1) {
   return window['go']['main']['App']['GetJobAnalysis'](arg1);
+}
+
+export function GetPendingExtensionJobDraft() {
+  return window['go']['main']['App']['GetPendingExtensionJobDraft']();
 }
 
 export function GetRecentEvents() {

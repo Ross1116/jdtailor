@@ -6,6 +6,7 @@ import {
   CreateCandidateSource as WailsCreateCandidateSource,
   CreateBlockedClaim as WailsCreateBlockedClaim,
   CreateJobDescription as WailsCreateJobDescription,
+  FetchJobDescription as WailsFetchJobDescription,
   DeleteCandidateSource as WailsDeleteCandidateSource,
   DeleteAllCandidateClaims as WailsDeleteAllCandidateClaims,
   DeleteAllEvidenceFacts as WailsDeleteAllEvidenceFacts,
@@ -28,6 +29,7 @@ import {
   GetFitAnalysis as WailsGetFitAnalysis,
   GetHealth as WailsGetHealth,
   GetJobAnalysis as WailsGetJobAnalysis,
+  GetPendingExtensionJobDraft as WailsGetPendingExtensionJobDraft,
   GetRecentEvents as WailsGetRecentEvents,
   GetSettings as WailsGetSettings,
   GetToolStatus as WailsGetToolStatus,
@@ -165,6 +167,19 @@ export type JobDescription = {
   created_at: string;
   updated_at: string;
 };
+
+export type FetchJobDescriptionInput = {url: string};
+
+export type FetchJobDescriptionResult = {
+  company: string;
+  title: string;
+  url: string;
+  raw_text: string;
+  source: string;
+  warnings: string[];
+};
+
+export type ExtensionJobDraft = FetchJobDescriptionResult & {received_at: string};
 
 export type JobAgentWorkflowInput = {
   job: {company: string; title: string; url: string; raw_text: string};
@@ -1229,6 +1244,42 @@ export async function CreateJobDescription(input: {company: string; title: strin
   mockJobs = [job, ...mockJobs];
   mockEvents.unshift(mockEvent('info', 'mock job saved'));
   return job;
+}
+
+export async function FetchJobDescription(input: FetchJobDescriptionInput) {
+  if (hasWailsBackend()) {
+    return WailsFetchJobDescription(input);
+  }
+  const url = input.url.trim();
+  const rawText = normalizePastedText(`Company: Example Systems
+Title: Senior Frontend Engineer
+
+Example Systems is hiring a senior frontend engineer to build accessible, high-performance application workflows for customer operations teams.
+
+Responsibilities
+- Build React and TypeScript interfaces that simplify complex job and resume workflows.
+- Collaborate with backend engineers, product, and design to ship reliable features.
+- Improve observability, test coverage, and frontend performance.
+
+Requirements
+- 5+ years building production web applications.
+- Strong TypeScript, React, API integration, testing, and accessibility experience.
+- Clear communication and pragmatic delivery habits.`);
+  return {
+    company: 'Example Systems',
+    title: 'Senior Frontend Engineer',
+    url,
+    raw_text: rawText,
+    source: 'mock',
+    warnings: ['Mock fetch result. Run the Wails app to fetch real posting pages.'],
+  } as FetchJobDescriptionResult;
+}
+
+export async function GetPendingExtensionJobDraft() {
+  if (hasWailsBackend()) {
+    return WailsGetPendingExtensionJobDraft();
+  }
+  return null as ExtensionJobDraft | null;
 }
 
 export async function UpdateJobDescription(input: {id: number; company: string; title: string; url: string; raw_text: string}) {

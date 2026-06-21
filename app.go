@@ -2,12 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
+	"time"
 )
 
 const appVersion = "0.1.0"
@@ -18,6 +24,9 @@ type App struct {
 	store               *Store
 	contextAgentMu      sync.Mutex
 	contextAgentWorkers map[int64]context.CancelFunc
+	extensionServer     *http.Server
+	extensionMu         sync.Mutex
+	pendingExtensionJob *ExtensionJobDraft
 }
 
 func NewApp() *App {
@@ -38,6 +47,7 @@ func (a *App) startup(ctx context.Context) {
 	if err := a.store.LogEvent("info", "app started"); err != nil {
 		a.store.Logger().Error("failed to record app start", "error", err)
 	}
+	a.startExtensionBridge()
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -53,6 +63,114 @@ func (a *App) shutdown(ctx context.Context) {
 			println("shutdown error:", err.Error())
 		}
 	}
+	if a.extensionServer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = a.extensionServer.Shutdown(ctx)
+	}
+}
+
+type ExtensionJobDraft struct {
+	Company    string   `json:"company"`
+	Title      string   `json:"title"`
+	URL        string   `json:"url"`
+	RawText    string   `json:"raw_text"`
+	Source     string   `json:"source"`
+	Warnings   []string `json:"warnings"`
+	ReceivedAt string   `json:"received_at"`
+}
+
+func (a *App) startExtensionBridge() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		setExtensionHeaders(w)
+		if r.Method == http.MethodOptions {
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	mux.HandleFunc("/job", a.handleExtensionJob)
+	server := &http.Server{Addr: "127.0.0.1:38616", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	a.extensionServer = server
+	ln, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		if a.store != nil {
+			a.store.Logger().Warn("extension bridge unavailable", "error", err)
+		}
+		return
+	}
+	go func() {
+		if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && a.store != nil {
+			a.store.Logger().Warn("extension bridge stopped", "error", err)
+		}
+	}()
+}
+
+func (a *App) handleExtensionJob(w http.ResponseWriter, r *http.Request) {
+	setExtensionHeaders(w)
+	if r.Method == http.MethodOptions {
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	defer r.Body.Close()
+	var input ExtensionJobDraft
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, jobFetchMaxText+10000)).Decode(&input); err != nil {
+		http.Error(w, "invalid job payload", http.StatusBadRequest)
+		return
+	}
+	input.RawText = normalizePastedText(input.RawText)
+	if len(input.RawText) < jobFetchMinText {
+		http.Error(w, "job description text is too short", http.StatusBadRequest)
+		return
+	}
+	if len(input.RawText) > jobFetchMaxText {
+		input.RawText = strings.TrimSpace(input.RawText[:jobFetchMaxText])
+		input.Warnings = append(input.Warnings, "Imported text was truncated to 50000 characters.")
+	}
+	details := inferJobDetails(input.RawText)
+	if strings.TrimSpace(input.Company) == "" {
+		input.Company = details.Company
+	}
+	if strings.TrimSpace(input.Title) == "" {
+		input.Title = details.Title
+	}
+	input.Company = strings.TrimSpace(input.Company)
+	input.Title = strings.TrimSpace(input.Title)
+	input.URL = strings.TrimSpace(input.URL)
+	input.Source = firstNonEmptyScrape(input.Source, "firefox_extension")
+	input.ReceivedAt = time.Now().UTC().Format(time.RFC3339)
+	a.extensionMu.Lock()
+	a.pendingExtensionJob = &input
+	a.extensionMu.Unlock()
+	if a.store != nil {
+		_ = a.store.LogEvent("info", fmt.Sprintf("job imported from %s", input.Source))
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+func setExtensionHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Content-Type", "application/json")
+}
+
+func (a *App) GetPendingExtensionJobDraft() (*ExtensionJobDraft, error) {
+	a.extensionMu.Lock()
+	defer a.extensionMu.Unlock()
+	if a.pendingExtensionJob == nil {
+		return nil, nil
+	}
+	job := *a.pendingExtensionJob
+	a.pendingExtensionJob = nil
+	return &job, nil
 }
 
 func (a *App) GetHealth() (Health, error) {
@@ -387,6 +505,13 @@ func (a *App) CreateJobDescription(input CreateJobDescriptionInput) (JobDescript
 		return JobDescription{}, err
 	}
 	return a.store.CreateJobDescription(input)
+}
+
+func (a *App) FetchJobDescription(input FetchJobDescriptionInput) (FetchJobDescriptionResult, error) {
+	if err := a.ensureStore(); err != nil {
+		return FetchJobDescriptionResult{}, err
+	}
+	return a.store.FetchJobDescription(a.ctx, input, nil)
 }
 
 func (a *App) UpdateJobDescription(input UpdateJobDescriptionInput) (JobDescription, error) {
