@@ -145,19 +145,13 @@ func (s *Store) RunJobAgentWorkflow(ctx context.Context, input JobAgentWorkflowI
 			stage("resume", "Resume assembler", "failed", "no selected bullets available")
 			return result, errors.New("no selected bullets available for resume generation")
 		}
-		stage("resume", "Resume assembler", "running", "assembling in-memory resume draft")
+		stage("resume", "Resume assembler", "running", "assembling and polishing an in-memory resume draft")
 		result.Resume, err = s.GenerateResumeJSON(ctx, GenerateResumeJSONInput{JobID: job.ID, SelectedBulletIDs: selectedIDs})
 		if err != nil {
 			stage("resume", "Resume assembler", "failed", err.Error())
 			return result, err
 		}
-		stage("human", "Human editor", "running", "polishing resume language")
-		if edited, editErr := s.HumanizeTailoredResume(ctx, client, job, result.Analysis, result.Resume); editErr == nil {
-			result.Resume = edited
-			stage("human", "Human editor", "ok", "language polished")
-		} else {
-			stage("human", "Human editor", "warning", "kept deterministic draft: "+editErr.Error())
-		}
+		stage("human", "Human editor", "ok", "language reviewed in the resume assembler")
 		result.Validation, err = s.ValidateResumeJSON(result.Resume, job.ID)
 		if err != nil {
 			stage("validate", "Resume validator", "failed", err.Error())

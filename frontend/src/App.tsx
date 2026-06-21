@@ -245,12 +245,24 @@ const emptyProfile: CandidateProfile = {
 
 const APP_STATUS_LABELS: Record<string, string> = {
   draft: 'Draft',
-  ready_to_apply: 'Ready',
   applied: 'Applied',
   interviewing: 'Interviewing',
   rejected: 'Rejected',
   offer: 'Offer',
+  ready_to_apply: 'Draft',
 };
+
+const APP_STATUS_OPTIONS = [
+  ['draft', 'Draft'],
+  ['interviewing', 'Interviewing'],
+  ['applied', 'Applied'],
+  ['rejected', 'Rejected'],
+  ['offer', 'Offer'],
+] as const;
+
+function normalizeApplicationStatus(status: string) {
+  return status === 'ready_to_apply' ? 'draft' : status || 'draft';
+}
 
 function App() {
   const [activeView, setActiveView] = useState<View>('dashboard');
@@ -675,17 +687,15 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
     setResumeSaveNotice('Edits saved as a new draft. Save a version when it is ready to use.');
   }
 
-  async function saveActiveResumeVersion() {
-    if (!activeResume || !selectedJobID) return;
-    await runAction('save-resume-version', async () => {
-      const validation = activeValidation ?? normalizeValidationResult((await ValidateResumeJSON(activeResume, selectedJobID)) as ValidationResult | null | undefined);
-      const version = (await SaveResumeVersion({
-        job_id: selectedJobID, resume_json: activeResume, tex_source: '', pdf_path: '', validation_result: validation,
-      })) as ResumeVersion;
-      setResumeVersions((prev) => [normalizeResumeVersion(version), ...prev.filter((v) => v.id !== version.id)]);
-      setApplicationStatusDraft((prev) => prev === 'draft' ? 'ready_to_apply' : prev);
-      setResumeSaveNotice('Resume version saved. You can render a PDF or mark the application ready/applied.');
-    });
+  async function persistActiveResumeVersion() {
+    if (!activeResume || !selectedJobID) return null;
+    const validation = activeValidation ?? normalizeValidationResult((await ValidateResumeJSON(activeResume, selectedJobID)) as ValidationResult | null | undefined);
+    const version = (await SaveResumeVersion({
+      job_id: selectedJobID, resume_json: activeResume, tex_source: '', pdf_path: '', validation_result: validation,
+    })) as ResumeVersion;
+    setResumeVersions((prev) => [normalizeResumeVersion(version), ...prev.filter((v) => v.id !== version.id)]);
+    setResumeSaveNotice('Resume version saved. You can render a PDF or update tracking status.');
+    return version;
   }
 
   function updateEditingField(field: string, value: string) {
@@ -781,17 +791,25 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
     URL.revokeObjectURL(url);
   }
 
-  async function renderPDF() {
-    if (!activeResume) return;
-    await runAction('render-pdf', async () => {
-      const result = (await RenderResumePDF(activeResume)) as RenderPDFResult;
-      if (!result.success && result.error) {
-        setError(result.error);
-      } else if (result.success && result.pdf_path) {
-        setPDFSuccess({ path: result.pdf_path, jobTitle: selectedJob?.title || 'Resume', jobID: selectedJobID });
-        await OpenFolder(result.pdf_path);
+  async function saveAndRenderPDF() {
+    if (!activeResume || !selectedJobID) return;
+    await runAction('save-render-pdf', async () => {
+      if (!activeResumeSaved) {
+        await persistActiveResumeVersion();
       }
+      await renderActiveResumePDF();
     });
+  }
+
+  async function renderActiveResumePDF() {
+    if (!activeResume) return;
+    const result = (await RenderResumePDF(activeResume)) as RenderPDFResult;
+    if (!result.success && result.error) {
+      setError(result.error);
+    } else if (result.success && result.pdf_path) {
+      setPDFSuccess({ path: result.pdf_path, jobTitle: selectedJob?.title || 'Resume', jobID: selectedJobID });
+      await OpenFolder(result.pdf_path);
+    }
   }
 
   async function saveApplication(statusOverride?: string, jobIDOverride?: number) {
@@ -801,13 +819,13 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
       const jobID = targetJobID;
       const existingApp = applications.find((a) => a.job_id === jobID);
       const app = {
-        id: existingApp?.id || 0, job_id: jobID, status: statusOverride || applicationStatusDraft || existingApp?.status || 'draft',
+        id: existingApp?.id || 0, job_id: jobID, status: normalizeApplicationStatus(statusOverride || applicationStatusDraft || existingApp?.status || 'draft'),
         fit_score: fitAnalysis?.overall_score || existingApp?.fit_score || 0, resume_version_id: resumeVersionsByJobID.get(jobID)?.[0]?.id || existingApp?.resume_version_id || 0,
         cover_letter_version_id: 0, notes: applicationNotes,
       } as Application;
       const saved = (await SaveApplication(app)) as Application;
       setSelectedApplicationID(saved.id);
-      setApplicationStatusDraft(saved.status);
+      setApplicationStatusDraft(normalizeApplicationStatus(saved.status));
       const na = (await ListApplications()) as Application[];
       setApplications(na);
     });
@@ -817,7 +835,7 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
     const existingApp = applications.find((app) => app.job_id === jobID);
     if (existingApp) {
       await updateApplicationStatus(existingApp.id, status);
-      if (jobID === selectedJobID) setApplicationStatusDraft(status);
+      if (jobID === selectedJobID) setApplicationStatusDraft(normalizeApplicationStatus(status));
       return;
     }
     await saveApplication(status, jobID);
@@ -827,6 +845,7 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
     await runAction(`upd-app-${id}`, async () => {
       const u = (await UpdateApplicationStatus(id, status)) as Application;
       setApplications((prev) => prev.map((a) => a.id === id ? u : a));
+      setApplicationStatusDraft(normalizeApplicationStatus(u.status));
     });
   }
 
@@ -936,7 +955,7 @@ async function saveNewJob(event: FormEvent<HTMLFormElement>) {
     setJobDraft({company: job.company, title: job.title, url: job.url, raw_text: job.raw_text});
     const existingApp = jobAppsMap.get(job.id);
     setApplicationNotes(existingApp?.notes || '');
-    setApplicationStatusDraft(existingApp?.status || 'draft');
+    setApplicationStatusDraft(normalizeApplicationStatus(existingApp?.status || 'draft'));
     const generated = generatedResumeDrafts.find((draft) => draft.job_id === job.id);
     const jobVersions = resumeVersionsByJobID.get(job.id) || [];
     if (generated) {
@@ -1266,7 +1285,7 @@ function runAgenticPipeline() {
               <option value="all">All jobs</option>
               <option value="active">Active jobs</option>
               <option value="no_resume">Needs resume</option>
-              {Object.entries(APP_STATUS_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+              {APP_STATUS_OPTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
             </select>
           </div>
 
@@ -1294,7 +1313,7 @@ function runAgenticPipeline() {
                             <p className="truncate text-xs text-slate-500">{job.company || 'No company'}</p>
                           </div>
                           <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${workflowToneClass(wf?.tone)}`}>
-                            {app ? APP_STATUS_LABELS[app.status] || app.status : latestVer ? 'Saved' : wf?.label || `${prog.pct}%`}
+                            {app ? APP_STATUS_LABELS[normalizeApplicationStatus(app.status)] || normalizeApplicationStatus(app.status) : latestVer ? 'Saved' : wf?.label || `${prog.pct}%`}
                           </span>
                         </div>
                       </button>
@@ -1352,12 +1371,6 @@ function runAgenticPipeline() {
             </div>
             {pdfSuccess.jobID > 0 && (
               <>
-                <button
-                  onClick={() => markApplicationStatus('ready_to_apply', pdfSuccess.jobID)}
-                  className="shrink-0 rounded-xl border border-green-300 bg-white px-3 py-2 text-xs font-bold text-green-800 shadow-sm transition hover:-translate-y-0.5 hover:bg-green-50 hover:shadow-md"
-                >
-                  Mark Ready
-                </button>
                 <button
                   onClick={() => markApplicationStatus('applied', pdfSuccess.jobID)}
                   className="shrink-0 rounded-xl bg-green-700 px-3 py-2 text-xs font-bold text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-green-800 hover:shadow-md"
@@ -1440,7 +1453,7 @@ function runAgenticPipeline() {
                                onClick={(e) => e.stopPropagation()}
                                onChange={(e) => { e.stopPropagation(); updateApplicationStatus(app.id, e.target.value); }}
                              >
-                               {Object.entries(APP_STATUS_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+                                {APP_STATUS_OPTIONS.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
                              </select>
                            ) : (
                              <span className="rounded-md border border-dashed border-slate-200 px-2 py-1.5 text-xs font-medium text-slate-400">No application</span>
@@ -1535,7 +1548,7 @@ function runAgenticPipeline() {
                     <div className="flex flex-wrap items-center gap-2">
                       <p className="truncate text-sm font-semibold text-slate-950">{selectedJob.title || 'Untitled'}</p>
                       {selectedJobWorkflow && <StatusBadge text={selectedJobWorkflow.label} color={selectedJobWorkflow.tone} />}
-                      {selectedJobApplication?.status && <StatusBadge text={APP_STATUS_LABELS[selectedJobApplication.status] || selectedJobApplication.status} color="green" />}
+                      {selectedJobApplication?.status && <StatusBadge text={APP_STATUS_LABELS[normalizeApplicationStatus(selectedJobApplication.status)] || normalizeApplicationStatus(selectedJobApplication.status)} color={normalizeApplicationStatus(selectedJobApplication.status) === 'draft' ? 'slate' : 'green'} />}
                     </div>
                     <p className="truncate text-xs text-slate-500">{selectedJob.company || 'No company'} · {selectedJobWorkflow?.pct || 18}% workflow</p>
                   </div>
@@ -1884,15 +1897,13 @@ function runAgenticPipeline() {
                               <div className="mt-3 flex flex-wrap gap-2">
                                 <PipelineButton label="Regenerate" onClick={generateResume} disabled={busyAction !== ''} />
                                 {activeResume && !editingResume && <SecondaryButton label="Edit" onClick={startEditingResume} variant="blue" disabled={busyAction !== ''} />}
-                                <SecondaryButton label={activeResumeSaved ? 'Saved' : 'Save version'} onClick={saveActiveResumeVersion} disabled={!activeResume || activeResumeSaved || busyAction !== ''} variant="green" />
                               </div>
                             </div>
                             <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-3">
                               <p className="text-xs font-bold text-emerald-950">Finish application</p>
                               <div className="mt-3 flex flex-wrap gap-2">
-                                <SecondaryButton label="Render PDF" onClick={renderPDF} icon={<FilePlus2 size={13} />} disabled={!activeResume || activeResumeDraftOnly || busyAction !== ''} variant="green" />
-                                <SecondaryButton label="Mark ready" onClick={() => markApplicationStatus('ready_to_apply')} disabled={!selectedJobID || activeResumeDraftOnly || busyAction !== ''} variant="blue" />
-                                <SecondaryButton label="Mark applied" onClick={() => markApplicationStatus('applied')} disabled={!selectedJobID || activeResumeDraftOnly || busyAction !== ''} variant="green" />
+                                <SecondaryButton label={activeResumeSaved ? 'Render PDF' : 'Save & render PDF'} onClick={saveAndRenderPDF} icon={<FilePlus2 size={13} />} disabled={!activeResume || busyAction !== ''} variant="green" />
+                                <SecondaryButton label="Mark applied" onClick={() => markApplicationStatus('applied')} disabled={!selectedJobID || busyAction !== ''} variant="green" />
                               </div>
                             </div>
                           </div>
@@ -1924,7 +1935,7 @@ function runAgenticPipeline() {
                         <div>
                           <label className="mb-1 block text-xs font-medium text-slate-500">Status</label>
                           <select value={applicationStatusDraft} onChange={(event) => setApplicationStatusDraft(event.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300">
-                            {Object.entries(APP_STATUS_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                            {APP_STATUS_OPTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
                           </select>
                         </div>
                         <TextInput label="Notes" value={applicationNotes} onChange={setApplicationNotes} />
@@ -1944,7 +1955,7 @@ function runAgenticPipeline() {
                         <h3 className="mt-1 text-xl font-bold text-slate-950">{selectedJob.title || 'Untitled role'}</h3>
                         <p className="mt-1 text-sm text-slate-500">{selectedJob.company || 'No company'} · keep resume versions, PDF state, and application notes together.</p>
                       </div>
-                      <StatusBadge text={APP_STATUS_LABELS[selectedJobApplication?.status || applicationStatusDraft] || applicationStatusDraft} color={selectedJobApplication?.status === 'applied' ? 'green' : 'blue'} />
+                      <StatusBadge text={APP_STATUS_LABELS[normalizeApplicationStatus(selectedJobApplication?.status || applicationStatusDraft)] || normalizeApplicationStatus(selectedJobApplication?.status || applicationStatusDraft)} color={normalizeApplicationStatus(selectedJobApplication?.status || applicationStatusDraft) === 'draft' ? 'slate' : 'blue'} />
                     </div>
                     <div className="mt-5 grid gap-3 sm:grid-cols-3">
                       <MiniMetric label="Saved resumes" value={selectedSavedResumes.length} />
@@ -1956,10 +1967,9 @@ function runAgenticPipeline() {
                   <Panel icon={<FileText size={14} />} title="Resume delivery" compact>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       <SecondaryButton label="Open resume" onClick={() => setPipelineStep('resume')} variant="blue" />
-                      <SecondaryButton label="Save current version" onClick={saveActiveResumeVersion} disabled={!activeResume || activeResumeSaved || busyAction !== ''} variant="green" />
-                      <SecondaryButton label="Render PDF" onClick={renderPDF} icon={<FilePlus2 size={13} />} disabled={!activeResume || activeResumeDraftOnly || busyAction !== ''} variant="green" />
+                      <SecondaryButton label={activeResumeSaved ? 'Render PDF' : 'Save & render PDF'} onClick={saveAndRenderPDF} disabled={!activeResume || busyAction !== ''} icon={<FilePlus2 size={13} />} variant="green" />
                     </div>
-                    <p className="mt-3 text-xs text-slate-500">PDF rendering is enabled after a resume version is saved. Unsaved drafts stay editable in the Resume step.</p>
+                    <p className="mt-3 text-xs text-slate-500">If the current resume is still a draft, the app saves a version first and then renders the PDF.</p>
                   </Panel>
 
                   <Panel icon={<BriefcaseBusiness size={14} />} title="Application status" compact>
@@ -1967,14 +1977,13 @@ function runAgenticPipeline() {
                       <div>
                         <label className="mb-1 block text-xs font-medium text-slate-500">Status</label>
                         <select value={applicationStatusDraft} onChange={(event) => setApplicationStatusDraft(event.target.value)} className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 outline-none focus:border-slate-300">
-                          {Object.entries(APP_STATUS_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+                          {APP_STATUS_OPTIONS.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
                         </select>
                       </div>
                       <TextInput label="Notes" value={applicationNotes} onChange={setApplicationNotes} />
                       <IconButton label="Save status" onClick={() => saveApplication()} disabled={!selectedJobID}><Save size={14} /></IconButton>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2">
-                      <SecondaryButton label="Mark ready" onClick={() => markApplicationStatus('ready_to_apply')} disabled={!selectedJobID || busyAction !== ''} variant="blue" />
                       <SecondaryButton label="Mark applied" onClick={() => markApplicationStatus('applied')} disabled={!selectedJobID || busyAction !== ''} variant="green" />
                     </div>
                   </Panel>
@@ -2158,8 +2167,9 @@ function MiniMetric({label, value}: {label: string; value: React.ReactNode}) {
 
 function buildJobWorkflowState(job: JobDescription, app: Application | undefined, versions: ResumeVersion[], drafts: TailoredBulletDraft[], requirements: JobRequirement[]): JobWorkflowState {
   const selectedBullets = drafts.filter((draft) => draft.selected_for_resume).length;
-  if (app && app.status !== 'draft') return {pct: 100, stage: 'tracker', label: APP_STATUS_LABELS[app.status] || app.status, tone: 'green', selectedBullets, totalBullets: drafts.length};
-  if (app) return {pct: 90, stage: 'tracker', label: 'Ready', tone: 'blue', selectedBullets, totalBullets: drafts.length};
+  const appStatus = normalizeApplicationStatus(app?.status || '');
+  if (app && appStatus !== 'draft') return {pct: 100, stage: 'tracker', label: APP_STATUS_LABELS[appStatus] || appStatus, tone: 'green', selectedBullets, totalBullets: drafts.length};
+  if (app) return {pct: 90, stage: 'tracker', label: 'Tracking', tone: 'blue', selectedBullets, totalBullets: drafts.length};
   if (versions.length > 0) return {pct: 82, stage: 'resume', label: 'Saved resume', tone: 'green', selectedBullets, totalBullets: drafts.length};
   if (selectedBullets > 0) return {pct: 68, stage: 'resume', label: 'Bullets selected', tone: 'blue', selectedBullets, totalBullets: drafts.length};
   if (drafts.length > 0) return {pct: 56, stage: 'resume', label: 'Resume ready', tone: 'amber', selectedBullets, totalBullets: drafts.length};
