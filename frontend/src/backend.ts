@@ -69,6 +69,7 @@ import {
   GenerateResumeJSON as WailsGenerateResumeJSON,
   ValidateResumeJSON as WailsValidateResumeJSON,
   RenderResumePDF as WailsRenderResumePDF,
+  RenderResumeVersionPDF as WailsRenderResumeVersionPDF,
   SaveResumeVersion as WailsSaveResumeVersion,
   GetResumeVersion as WailsGetResumeVersion,
   ListResumeVersions as WailsListResumeVersions,
@@ -76,6 +77,7 @@ import {
   GetApplication as WailsGetApplication,
   ListApplications as WailsListApplications,
   UpdateApplicationStatus as WailsUpdateApplicationStatus,
+  UpdateApplicationResumeVersion as WailsUpdateApplicationResumeVersion,
   LogCorrection as WailsLogCorrection,
   ListCorrections as WailsListCorrections,
 } from '../wailsjs/go/main/App';
@@ -564,8 +566,15 @@ export type CorrectionLog = {
   id: number;
   application_id: number;
   resume_version_id: number;
+  entity_type: string;
+  field_path: string;
+  section: string;
+  entry_index: number;
+  item_index: number;
   original_bullet_text: string;
   corrected_bullet_text: string;
+  original_text: string;
+  corrected_text: string;
   claim_ids: number[];
   reason: string;
   created_at: string;
@@ -3129,7 +3138,20 @@ export async function RenderResumePDF(resume: ResumeJSON) {
     return WailsRenderResumePDF(resume as any);
   }
   mockEvents.unshift(mockEvent('info', 'mock PDF rendered'));
-  return { success: true, tex_path: 'mock://resume.tex', pdf_path: 'mock://resume.pdf', error: '' };
+  return { success: true, tex_path: 'mock://resume.tex', pdf_path: 'mock://resume.pdf', output_dir: 'mock://', error: '' };
+}
+
+export async function RenderResumeVersionPDF(versionID: number) {
+  if (hasWailsBackend()) {
+    return WailsRenderResumeVersionPDF(versionID);
+  }
+  const version = mockResumeVersions.find((v) => v.id === versionID);
+  if (!version) throw new Error('resume version not found');
+  const render_result = { success: true, tex_path: `mock://resume-version-${versionID}.tex`, pdf_path: `mock://resume-version-${versionID}.pdf`, output_dir: `mock://resume-version-${versionID}`, error: '' };
+  const updated: ResumeVersion = { ...version, tex_source: '% mock tex', pdf_path: render_result.pdf_path };
+  mockResumeVersions = mockResumeVersions.map((v) => v.id === versionID ? updated : v);
+  mockEvents.unshift(mockEvent('info', 'mock resume version PDF rendered'));
+  return { render_result, version: updated };
 }
 
 export async function SaveResumeVersion(input: any) {
@@ -3203,7 +3225,7 @@ export async function UpdateApplicationStatus(id: number, status: string) {
 
 export async function UpdateApplicationResumeVersion(id: number, resumeVersionID: number) {
   if (hasWailsBackend()) {
-    return (window as any).go.main.App.UpdateApplicationResumeVersion(id, resumeVersionID);
+    return WailsUpdateApplicationResumeVersion(id, resumeVersionID);
   }
   const timestamp = now();
   mockApplications = mockApplications.map((a) => a.id === id ? { ...a, resume_version_id: resumeVersionID, updated_at: timestamp } : a);

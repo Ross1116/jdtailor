@@ -987,7 +987,8 @@ Return at most %d drafts.
 - Prefer one bullet per evidence packet; skip packets that do not produce a strong human resume insight.
 - A bullet does not need to perfectly satisfy a high-priority requirement if it is still one of the strongest same-origin resume bullets.
 - Do not create one bullet per requirement. Create only the strongest bullets for this origin.
-- Prefer story diversity over exact JD mirroring: one product/platform bullet, one security/reliability/quality bullet, one automation/frontend/architecture bullet when evidence supports those lanes.
+- Prefer story diversity over exact JD mirroring: one product/platform delivery bullet, one reliability/security/quality bullet, one automation/AI/frontend/product-surface bullet when evidence supports those lanes.
+- Do not spend multiple bullets on backend entity modeling, API surface area, or scheduling logic unless they clearly describe different value lanes.
 
 # ATS optimization
 - This resume is for this JD only. Do not reuse generic bullets if a supported JD-specific phrasing would be more targeted.
@@ -1005,7 +1006,8 @@ Return at most %d drafts.
 - Use JD keywords only as prioritization and wording cues; the bullet must be built from candidate claim/fact atoms.
 - Each bullet should make clear what real value was created: reliability, traceability, validation, delivery breadth, reduced manual work, safer access, faster debugging, or another supported outcome.
 - Do not stuff unrelated facts together. If atoms do not naturally support one insight, write a narrower bullet.
-- Do not repeat the same primary technology, artifact, or topic across drafts. If one draft mentions FastAPI/PostgreSQL/backend APIs, other drafts should focus on different evidenced value such as auditability, access control, maintainability, AI workflow, frontend work, or architecture.
+- Do not repeat the same primary technology, artifact, or topic across drafts. If one draft mentions FastAPI/PostgreSQL/backend APIs, other drafts should focus on different evidenced value such as reliability checks, auditability, access control, AI workflow, frontend/product surface, debugging, deployment safety, or architecture tradeoffs.
+- For one role, the draft set should paint the complete picture: what was shipped, how it was made reliable/safe, and what differentiated the work for this JD.
 - Write like a practical engineer, not a marketing page.
 - Avoid inflated resume cliches.
 - Avoid generic tool-list bullets.
@@ -1453,23 +1455,51 @@ func autoSelectCanAddDiverse(draft TailoredBulletDraft, originCounts map[string]
 	key := originKey(draft.OriginHeading, draft.OriginType)
 	count := originCounts[key]
 	typ := normalizeOriginPart(draft.OriginType)
-	if typ == "experience" && count < 3 {
+	if typ == "experience" && count == 0 {
 		return true
 	}
-	if typ == "project" && count < 2 {
+	if typ == "project" && count == 0 {
 		return true
 	}
 	theme := normalizeValueTheme(draft.ValueTheme)
 	if theme == "" || originThemeCounts[key][theme] {
 		return false
 	}
-	if draft.JDRelevanceScore < 0.12 {
+	if themeLaneAlreadyCovered(theme, originThemeCounts[key]) {
 		return false
 	}
-	if originHighReqCounts[key][draft.RequirementID] {
+	if draft.JDRelevanceScore < 0.05 && count > 0 {
 		return false
 	}
 	return true
+}
+
+func themeLaneAlreadyCovered(theme string, covered map[string]bool) bool {
+	lane := valueThemeLane(theme)
+	if lane == "" {
+		return false
+	}
+	for existing := range covered {
+		if valueThemeLane(existing) == lane {
+			return true
+		}
+	}
+	return false
+}
+
+func valueThemeLane(theme string) string {
+	switch normalizeValueTheme(theme) {
+	case "product_platform_delivery", "technical_design", "engineering_delivery":
+		return "core_build"
+	case "reliability_quality", "security_traceability":
+		return "quality_trust"
+	case "automation_ai":
+		return "automation_ai"
+	case "frontend_product":
+		return "product_surface"
+	default:
+		return ""
+	}
 }
 
 func trackSelectionDiversity(draft TailoredBulletDraft, originThemeCounts map[string]map[string]bool, originHighReqCounts map[string]map[int64]bool) {
@@ -2804,6 +2834,9 @@ func styleRiskFlags(text string) []string {
 	}
 	if strings.Contains(text, "*") || strings.Contains(text, "•") {
 		flags = append(flags, "style_formatting")
+	}
+	if strings.Contains(text, "—") || strings.Contains(text, "–") {
+		flags = append(flags, "style_ai_punctuation")
 	}
 	words := strings.Fields(text)
 	if len(words) > 34 {

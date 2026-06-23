@@ -740,6 +740,16 @@ func (s *Store) migrate(ctx context.Context) error {
 				);
 			`,
 		},
+		{
+			version: 15,
+			sql: `
+				ALTER TABLE correction_logs ADD COLUMN entity_type TEXT NOT NULL DEFAULT 'resume_bullet';
+				ALTER TABLE correction_logs ADD COLUMN field_path TEXT NOT NULL DEFAULT '';
+				ALTER TABLE correction_logs ADD COLUMN section TEXT NOT NULL DEFAULT '';
+				ALTER TABLE correction_logs ADD COLUMN entry_index INTEGER NOT NULL DEFAULT -1;
+				ALTER TABLE correction_logs ADD COLUMN item_index INTEGER NOT NULL DEFAULT -1;
+			`,
+		},
 	}
 
 	for _, migration := range migrations {

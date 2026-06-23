@@ -379,8 +379,15 @@ export namespace main {
 	    id: number;
 	    application_id: number;
 	    resume_version_id: number;
+	    entity_type: string;
+	    field_path: string;
+	    section: string;
+	    entry_index: number;
+	    item_index: number;
 	    original_bullet_text: string;
 	    corrected_bullet_text: string;
+	    original_text: string;
+	    corrected_text: string;
 	    claim_ids: number[];
 	    reason: string;
 	    created_at: string;
@@ -394,8 +401,15 @@ export namespace main {
 	        this.id = source["id"];
 	        this.application_id = source["application_id"];
 	        this.resume_version_id = source["resume_version_id"];
+	        this.entity_type = source["entity_type"];
+	        this.field_path = source["field_path"];
+	        this.section = source["section"];
+	        this.entry_index = source["entry_index"];
+	        this.item_index = source["item_index"];
 	        this.original_bullet_text = source["original_bullet_text"];
 	        this.corrected_bullet_text = source["corrected_bullet_text"];
+	        this.original_text = source["original_text"];
+	        this.corrected_text = source["corrected_text"];
 	        this.claim_ids = source["claim_ids"];
 	        this.reason = source["reason"];
 	        this.created_at = source["created_at"];
@@ -1311,6 +1325,80 @@ export namespace main {
 	        this.error = source["error"];
 	    }
 	}
+	export class ResumeVersion {
+	    id: number;
+	    job_id: number;
+	    resume_json: ResumeJSON;
+	    tex_source: string;
+	    pdf_path: string;
+	    validation_result: ValidationResult;
+	    created_at: string;
+
+	    static createFrom(source: any = {}) {
+	        return new ResumeVersion(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.job_id = source["job_id"];
+	        this.resume_json = this.convertValues(source["resume_json"], ResumeJSON);
+	        this.tex_source = source["tex_source"];
+	        this.pdf_path = source["pdf_path"];
+	        this.validation_result = this.convertValues(source["validation_result"], ValidationResult);
+	        this.created_at = source["created_at"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class RenderResumeVersionPDFResult {
+	    render_result: RenderPDFResult;
+	    version: ResumeVersion;
+
+	    static createFrom(source: any = {}) {
+	        return new RenderResumeVersionPDFResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.render_result = this.convertValues(source["render_result"], RenderPDFResult);
+	        this.version = this.convertValues(source["version"], ResumeVersion);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class ResumeContextClaim {
 	    id: number;
 	    label: string;
@@ -1452,48 +1540,7 @@ export namespace main {
 	
 	
 	
-	export class ResumeVersion {
-	    id: number;
-	    job_id: number;
-	    resume_json: ResumeJSON;
-	    tex_source: string;
-	    pdf_path: string;
-	    validation_result: ValidationResult;
-	    created_at: string;
 	
-	    static createFrom(source: any = {}) {
-	        return new ResumeVersion(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.job_id = source["job_id"];
-	        this.resume_json = this.convertValues(source["resume_json"], ResumeJSON);
-	        this.tex_source = source["tex_source"];
-	        this.pdf_path = source["pdf_path"];
-	        this.validation_result = this.convertValues(source["validation_result"], ValidationResult);
-	        this.created_at = source["created_at"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
 	export class SaveAPIKeyInput {
 	    api_key: string;
 	    provider: string;
@@ -1789,4 +1836,3 @@ export namespace main {
 	}
 
 }
-

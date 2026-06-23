@@ -5,8 +5,6 @@ import {
   Bot,
   BriefcaseBusiness,
   CheckCircle2,
-  ChevronDown,
-  ChevronRight,
   Clipboard,
   Cpu,
   Database,
@@ -37,6 +35,7 @@ import {
   Eye,
   Pencil,
 } from 'lucide-react';
+import {CheckInput, CollapsibleSection, EmptyState, IconButton, MiniMetric, Panel, PipelineButton, SecondaryButton, SelectInput, StatusBadge, TextArea, TextInput} from './components/common';
 import {
   AnalyzeJobDescription,
   ApplicationStrategy,
@@ -127,7 +126,7 @@ import {
   GenerateResumeJSON,
   RunJobAgentWorkflow,
   ValidateResumeJSON,
-  RenderResumePDF,
+  RenderResumeVersionPDF,
   OpenFolder,
   SaveResumeVersion,
   ListResumeVersions,
@@ -186,7 +185,13 @@ type RenderPDFResult = {
   success: boolean;
   tex_path: string;
   pdf_path: string;
+  output_dir: string;
   error: string;
+};
+
+type RenderResumeVersionPDFResult = {
+  render_result: RenderPDFResult;
+  version: ResumeVersion;
 };
 
 type AppEvent = {
@@ -369,8 +374,10 @@ function App() {
 
   const selectedSavedResumes = useMemo(() => resumeVersionsByJobID.get(selectedJobID) || [], [resumeVersionsByJobID, selectedJobID]);
   const activeResumeFingerprint = useMemo(() => activeResume ? JSON.stringify(activeResume) : '', [activeResume]);
-  const activeResumeSaved = useMemo(() => activeResumeFingerprint !== '' && selectedSavedResumes.some((version) => JSON.stringify(normalizeResumeJSON(version.resume_json)) === activeResumeFingerprint), [activeResumeFingerprint, selectedSavedResumes]);
+  const activeResumeVersion = useMemo(() => activeResumeFingerprint !== '' ? selectedSavedResumes.find((version) => JSON.stringify(normalizeResumeJSON(version.resume_json)) === activeResumeFingerprint) || null : null, [activeResumeFingerprint, selectedSavedResumes]);
+  const activeResumeSaved = Boolean(activeResumeVersion);
   const activeResumeDraftOnly = Boolean(activeResume && !activeResumeSaved);
+  const activeResumePDFPath = activeResumeVersion?.pdf_path || '';
 
   const jobWorkflowByID = useMemo(() => {
     const map = new Map<number, JobWorkflowState>();
@@ -677,6 +684,8 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
 
   async function saveEditedResume() {
     if (!editingResume) return;
+    const previousResume = activeResume ? JSON.parse(JSON.stringify(activeResume)) as ResumeJSON : null;
+    const previousVersionID = activeResumeVersion?.id || 0;
     const cleaned = normalizeResumeJSON(editingResume);
     setActiveResume(cleaned);
     setEditingResume(null);
@@ -684,6 +693,9 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
     setActiveValidation(validation);
     const generated: GeneratedResumeDraft = {id: `draft-${Date.now()}`, job_id: selectedJobID, resume: cleaned, validation, created_at: new Date().toISOString()};
     setGeneratedResumeDrafts((prev) => [generated, ...prev]);
+    if (previousResume) {
+      await logResumeEditCorrections(previousResume, cleaned, previousVersionID);
+    }
     setResumeSaveNotice('Edits saved as a new draft. Save a version when it is ready to use.');
   }
 
@@ -694,8 +706,41 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
       job_id: selectedJobID, resume_json: activeResume, tex_source: '', pdf_path: '', validation_result: validation,
     })) as ResumeVersion;
     setResumeVersions((prev) => [normalizeResumeVersion(version), ...prev.filter((v) => v.id !== version.id)]);
+    setActiveValidation(validation);
     setResumeSaveNotice('Resume version saved. You can render a PDF or update tracking status.');
     return version;
+  }
+
+  async function ensureApplicationForCorrectionLogging(resumeVersionID: number) {
+    if (!selectedJobID) return null;
+    const existingApp = applications.find((app) => app.job_id === selectedJobID);
+    if (existingApp) return existingApp;
+    const saved = (await SaveApplication({
+      id: 0,
+      job_id: selectedJobID,
+      status: normalizeApplicationStatus(applicationStatusDraft || 'draft'),
+      fit_score: fitAnalysis?.overall_score || 0,
+      resume_version_id: resumeVersionID,
+      cover_letter_version_id: 0,
+      notes: applicationNotes,
+      created_at: '',
+      updated_at: '',
+    })) as Application;
+    setSelectedApplicationID(saved.id);
+    setApplicationStatusDraft(normalizeApplicationStatus(saved.status));
+    setApplications((prev) => [saved, ...prev.filter((app) => app.id !== saved.id)]);
+    return saved;
+  }
+
+  async function logResumeEditCorrections(previous: ResumeJSON, edited: ResumeJSON, resumeVersionID: number) {
+    const corrections = buildResumeEditCorrections(previous, edited, resumeVersionID);
+    if (corrections.length === 0) return;
+    const app = await ensureApplicationForCorrectionLogging(resumeVersionID);
+    if (!app) return;
+    for (const correction of corrections) {
+      await LogCorrection({ ...correction, application_id: app.id });
+    }
+    await ListCorrections(app.id).catch(() => []);
   }
 
   function updateEditingField(field: string, value: string) {
@@ -794,21 +839,33 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
   async function saveAndRenderPDF() {
     if (!activeResume || !selectedJobID) return;
     await runAction('save-render-pdf', async () => {
-      if (!activeResumeSaved) {
-        await persistActiveResumeVersion();
+      const version = activeResumeVersion || await persistActiveResumeVersion();
+      if (version) {
+        await renderActiveResumePDF(version.id);
       }
-      await renderActiveResumePDF();
     });
   }
 
-  async function renderActiveResumePDF() {
-    if (!activeResume) return;
-    const result = (await RenderResumePDF(activeResume)) as RenderPDFResult;
+  async function renderActiveResumePDF(versionID: number) {
+    const renderVersionResult = (await RenderResumeVersionPDF(versionID)) as RenderResumeVersionPDFResult;
+    const result = renderVersionResult.render_result;
     if (!result.success && result.error) {
       setError(result.error);
-    } else if (result.success && result.pdf_path) {
-      setPDFSuccess({ path: result.pdf_path, jobTitle: selectedJob?.title || 'Resume', jobID: selectedJobID });
-      await OpenFolder(result.pdf_path);
+      return;
+    }
+    const updatedVersion = normalizeResumeVersion(renderVersionResult.version);
+    setResumeVersions((prev) => [updatedVersion, ...prev.filter((v) => v.id !== updatedVersion.id)]);
+    setActiveResume(normalizeResumeJSON(updatedVersion.resume_json));
+    setActiveValidation(normalizeValidationResult(updatedVersion.validation_result));
+    const path = updatedVersion.pdf_path || result.pdf_path;
+    if (selectedApplicationID) {
+      const updatedApp = (await UpdateApplicationResumeVersion(selectedApplicationID, updatedVersion.id)) as Application;
+      setApplications((prev) => [updatedApp, ...prev.filter((app) => app.id !== updatedApp.id)]);
+    }
+    if (result.success && path) {
+      setPDFSuccess({ path, jobTitle: selectedJob?.title || 'Resume', jobID: selectedJobID });
+      setResumeSaveNotice('PDF rendered and saved on the resume version.');
+      await OpenFolder(path);
     }
   }
 
@@ -1872,9 +1929,10 @@ function runAgenticPipeline() {
                               <div className="mt-1 flex flex-wrap items-center gap-1.5">
                                 {activeResumeSaved && <StatusBadge text="Saved version" color="green" />}
                                 {activeResumeDraftOnly && <StatusBadge text="Draft only" color="amber" />}
+                                {activeResumePDFPath && <StatusBadge text="PDF ready" color="green" />}
                                 {activeValidation && <StatusBadge text={activeValidation.passed ? 'Validated' : 'Needs fixes'} color={activeValidation.passed ? 'green' : 'red'} />}
                               </div>
-                              <p className="mt-1 text-xs text-slate-500">Save a version before rendering a PDF or marking the job ready to apply.</p>
+                              <p className="mt-1 text-xs text-slate-500">Final PDF delivery renders from a saved resume version.</p>
                             </div>
                             {(selectedGeneratedResumes.length > 0 || selectedSavedResumes.length > 0) && (
                               <select className="rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700" value="" onChange={(e) => {
@@ -1902,7 +1960,8 @@ function runAgenticPipeline() {
                             <div className="rounded-xl border border-emerald-100 bg-emerald-50/60 p-3">
                               <p className="text-xs font-bold text-emerald-950">Finish application</p>
                               <div className="mt-3 flex flex-wrap gap-2">
-                                <SecondaryButton label={activeResumeSaved ? 'Render PDF' : 'Save & render PDF'} onClick={saveAndRenderPDF} icon={<FilePlus2 size={13} />} disabled={!activeResume || busyAction !== ''} variant="green" />
+                                <SecondaryButton label={resumePDFActionLabel(activeResumeDraftOnly, activeResumePDFPath)} onClick={saveAndRenderPDF} icon={<FilePlus2 size={13} />} disabled={!activeResume || busyAction !== ''} variant="green" />
+                                {activeResumePDFPath && <SecondaryButton label="Open PDF folder" onClick={() => OpenFolder(activeResumePDFPath)} disabled={busyAction !== ''} variant="green" />}
                                 <SecondaryButton label="Mark applied" onClick={() => markApplicationStatus('applied')} disabled={!selectedJobID || busyAction !== ''} variant="green" />
                               </div>
                             </div>
@@ -1967,9 +2026,10 @@ function runAgenticPipeline() {
                   <Panel icon={<FileText size={14} />} title="Resume delivery" compact>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       <SecondaryButton label="Open resume" onClick={() => setPipelineStep('resume')} variant="blue" />
-                      <SecondaryButton label={activeResumeSaved ? 'Render PDF' : 'Save & render PDF'} onClick={saveAndRenderPDF} disabled={!activeResume || busyAction !== ''} icon={<FilePlus2 size={13} />} variant="green" />
+                      <SecondaryButton label={resumePDFActionLabel(activeResumeDraftOnly, activeResumePDFPath)} onClick={saveAndRenderPDF} disabled={!activeResume || busyAction !== ''} icon={<FilePlus2 size={13} />} variant="green" />
+                      {activeResumePDFPath && <SecondaryButton label="Open PDF folder" onClick={() => OpenFolder(activeResumePDFPath)} disabled={busyAction !== ''} variant="green" />}
                     </div>
-                    <p className="mt-3 text-xs text-slate-500">If the current resume is still a draft, the app saves a version first and then renders the PDF.</p>
+                    <p className="mt-3 text-xs text-slate-500">Draft resumes are saved before PDF render; saved versions can be rendered again or opened from the persisted PDF path.</p>
                   </Panel>
 
                   <Panel icon={<BriefcaseBusiness size={14} />} title="Application status" compact>
@@ -2133,34 +2193,12 @@ function runAgenticPipeline() {
   );
 }
 
-function CollapsibleSection({label, children, defaultOpen = false}: {label: string; children: React.ReactNode; defaultOpen?: boolean}) {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div className="border-l-2 border-slate-200 pl-3">
-      <button className="flex items-center gap-1 text-xs font-semibold text-slate-700 hover:text-slate-900" onClick={() => setOpen(!open)}>
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        {label}
-      </button>
-      {open && <div className="mt-2">{children}</div>}
-    </div>
-  );
-}
-
 function TrackerStat({label, value, detail}: {label: string; value: number; detail: string}) {
   return (
     <div className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
       <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{label}</p>
       <p className="mt-1 text-2xl font-bold text-slate-950">{value}</p>
       <p className="text-xs text-slate-500">{detail}</p>
-    </div>
-  );
-}
-
-function MiniMetric({label, value}: {label: string; value: React.ReactNode}) {
-  return (
-    <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
-      <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">{label}</p>
-      <p className="mt-0.5 text-sm font-bold text-slate-900">{value}</p>
     </div>
   );
 }
@@ -2253,116 +2291,9 @@ function TestLLMBanner() {
   );
 }
 
-function Panel({icon, title, subtitle, children, compact, summary}: {icon?: React.ReactNode; title: string; subtitle?: string; children?: React.ReactNode; compact?: boolean; summary?: string}) {
-  return (
-    <div className="rounded-lg border border-slate-200 bg-white">
-      <div className={`flex items-center gap-2 ${compact ? 'px-4 py-2.5' : 'px-4 py-3'}`}>
-        {icon && <span className="text-slate-500">{icon}</span>}
-        <span className={`font-semibold text-slate-950 ${compact ? 'text-xs' : 'text-sm'}`}>{title}</span>
-        {subtitle && <span className="text-xs text-slate-400">{subtitle}</span>}
-      </div>
-      {summary && <p className="border-t border-slate-100 px-4 py-2 text-xs text-slate-500">{summary}</p>}
-      {children && <div className={`border-t border-slate-100 ${compact ? 'px-4 py-2.5' : 'px-4 py-3'}`}>{children}</div>}
-    </div>
-  );
-}
-
-function SecondaryButton({label, onClick, icon, disabled, variant}: {label: string; onClick: () => void; icon?: React.ReactNode; disabled?: boolean; variant?: 'default' | 'blue' | 'green' | 'amber' | 'red'}) {
-  const variants = {
-    default: 'border-slate-200 text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950',
-    blue: 'border-blue-200 text-blue-700 hover:border-blue-300 hover:bg-blue-50',
-    green: 'border-emerald-200 text-emerald-700 hover:border-emerald-300 hover:bg-emerald-50',
-    amber: 'border-amber-200 text-amber-700 hover:border-amber-300 hover:bg-amber-50',
-    red: 'border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50',
-  };
-  return (
-    <button onClick={onClick} disabled={disabled} className={`inline-flex items-center justify-center gap-1.5 rounded-xl border bg-white px-3.5 py-2 text-xs font-bold shadow-sm shadow-slate-200/60 transition hover:-translate-y-0.5 hover:shadow-md active:translate-y-0 active:shadow-sm disabled:pointer-events-none disabled:opacity-40 ${variants[variant ?? 'default']}`}>
-      {icon}{label}
-    </button>
-  );
-}
-
-function PipelineButton({label, onClick, tone, disabled}: {label: string; onClick: () => void; tone?: 'primary'; disabled?: boolean}) {
-  const classes = tone === 'primary'
-    ? 'border-slate-950 bg-slate-950 text-white shadow-slate-300/80 hover:bg-slate-800 hover:shadow-md'
-    : 'border-slate-200 bg-white text-slate-800 shadow-slate-200/70 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950 hover:shadow-md';
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={`inline-flex min-w-20 items-center justify-center rounded-xl border px-4 py-2 text-xs font-bold shadow-sm transition-all hover:-translate-y-0.5 active:translate-y-0 active:shadow-sm disabled:pointer-events-none disabled:opacity-40 ${classes}`}
-    >
-      {label}
-    </button>
-  );
-}
-
-function IconButton({label, onClick, children, submit, full, disabled}: {label: string; onClick?: () => void; children?: React.ReactNode; submit?: boolean; full?: boolean; disabled?: boolean}) {
-  return (
-    <button onClick={onClick} disabled={disabled || submit} type={submit ? 'submit' : 'button'}
-      className={`inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-950 bg-slate-950 px-3.5 py-2 text-xs font-bold text-white shadow-sm shadow-slate-300/80 transition-all hover:-translate-y-0.5 hover:bg-slate-800 hover:shadow-md active:translate-y-0 active:shadow-sm disabled:pointer-events-none disabled:opacity-40 ${full ? 'flex-1 justify-center' : ''}`}>
-      {children}{label}
-    </button>
-  );
-}
-
 function StatusPill({state, text}: {state: string; text: string}) {
   const color = state === 'ready' ? 'bg-green-100 text-green-700' : state === 'error' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700';
   return <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${color}`}>{text}</span>;
-}
-
-function StatusBadge({text, color}: {text: string; color?: 'slate' | 'green' | 'blue' | 'amber' | 'red'}) {
-  const colors = {
-    slate: 'bg-slate-100 text-slate-600',
-    green: 'bg-green-100 text-green-700',
-    blue: 'bg-blue-100 text-blue-700',
-    amber: 'bg-amber-100 text-amber-700',
-    red: 'bg-red-100 text-red-700',
-  };
-  return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${colors[color ?? 'slate']}`}>{text}</span>;
-}
-
-function TextInput({label, value, onChange}: {label: string; value: string; onChange: (v: string) => void}) {
-  return (
-    <div>
-      <label className="mb-1 block text-xs font-medium text-slate-500">{label}</label>
-      <input type="text" value={value} onChange={(e) => onChange(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-950 focus:border-slate-400 focus:outline-none" />
-    </div>
-  );
-}
-
-function TextArea({label, value, onChange, rows}: {label: string; value: string; onChange: (v: string) => void; rows?: number}) {
-  return (
-    <div>
-      <label className="mb-1 block text-xs font-medium text-slate-500">{label}</label>
-      <textarea value={value} onChange={(e) => onChange(e.target.value)} rows={rows || 4} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-950 focus:border-slate-400 focus:outline-none" />
-    </div>
-  );
-}
-
-function SelectInput({label, value, onChange, options}: {label: string; value: string; onChange: (v: string) => void; options: [string, string][]}) {
-  return (
-    <div>
-      <label className="mb-1 block text-xs font-medium text-slate-500">{label}</label>
-      <select value={value} onChange={(e) => onChange(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-950 focus:border-slate-400 focus:outline-none">
-        {options.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
-      </select>
-    </div>
-  );
-}
-
-function CheckInput({checked, label, onChange}: {checked: boolean; label: string; onChange: (v: boolean) => void}) {
-  return (
-    <label className="flex items-center gap-2 text-xs text-slate-700">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} className="rounded border-slate-300" />
-      {label}
-    </label>
-  );
-}
-
-function EmptyState({text}: {text: string}) {
-  return <div className="rounded-lg border border-dashed border-slate-200 py-8 text-center text-xs text-slate-400">{text}</div>;
 }
 
 function WorkBanner({busyAction, items, onStopAgent}: {busyAction: string; items: WorkItem[]; onStopAgent: (id: number) => void}) {
@@ -2418,6 +2349,12 @@ function contextStageLabel(stage: string) {
 
 function workItemForAction(name: string) {
   return {key: name, title: name.replace(/-/g, ' '), detail: 'Running', progress: 50};
+}
+
+function resumePDFActionLabel(isDraftOnly: boolean, pdfPath: string) {
+  if (isDraftOnly) return 'Save version before PDF';
+  if (pdfPath) return 'Re-render PDF';
+  return 'Render PDF';
 }
 
 function applyJobDraftInference(prev: JobDraft, nextDraft: JobDraft) {
@@ -2574,6 +2511,109 @@ function normalizeResumeVersion(v: ResumeVersion): ResumeVersion {
 
 function normalizeResumeVersions(v: ResumeVersion[] | null | undefined): ResumeVersion[] {
   return (v ?? []).map(normalizeResumeVersion);
+}
+
+function buildResumeEditCorrections(previous: ResumeJSON, edited: ResumeJSON, resumeVersionID: number): CorrectionLog[] {
+  const corrections: CorrectionLog[] = [];
+  const addCorrection = (input: Partial<CorrectionLog> & {field_path: string; original_text: string; corrected_text: string}) => {
+    if (input.original_text === input.corrected_text) return;
+    corrections.push({
+      id: 0,
+      application_id: 0,
+      resume_version_id: resumeVersionID,
+      entity_type: input.entity_type || 'resume_field',
+      field_path: input.field_path,
+      section: input.section || '',
+      entry_index: input.entry_index ?? -1,
+      item_index: input.item_index ?? -1,
+      original_bullet_text: input.entity_type === 'resume_bullet' ? input.original_text : '',
+      corrected_bullet_text: input.entity_type === 'resume_bullet' ? input.corrected_text : '',
+      original_text: input.original_text,
+      corrected_text: input.corrected_text,
+      claim_ids: input.claim_ids || [],
+      reason: input.reason || 'resume edit',
+      created_at: '',
+    });
+  };
+
+  addCorrection({entity_type: 'resume_summary', field_path: 'summary', original_text: previous.summary || '', corrected_text: edited.summary || '', reason: 'summary edit'});
+
+  const maxSkillCount = Math.max(previous.skills.length, edited.skills.length);
+  for (let i = 0; i < maxSkillCount; i++) {
+    const before = previous.skills[i];
+    const after = edited.skills[i];
+    addCorrection({entity_type: 'resume_skill', field_path: `skills[${i}].category`, section: 'skills', entry_index: i, original_text: before?.category || '', corrected_text: after?.category || '', reason: 'skill category edit'});
+    addCorrection({entity_type: 'resume_skill', field_path: `skills[${i}].items`, section: 'skills', entry_index: i, original_text: (before?.items || []).join(', '), corrected_text: (after?.items || []).join(', '), reason: 'skill items edit'});
+  }
+
+  diffResumeEntries('experience', previous.experience, edited.experience, addCorrection);
+  diffResumeEntries('projects', previous.projects, edited.projects, addCorrection);
+  diffEducationEntries(previous.education, edited.education, addCorrection);
+
+  return corrections;
+}
+
+function diffResumeEntries(
+  section: 'experience' | 'projects',
+  previous: ResumeJSON['experience'],
+  edited: ResumeJSON['experience'],
+  addCorrection: (input: Partial<CorrectionLog> & {field_path: string; original_text: string; corrected_text: string}) => void,
+) {
+  const fields: Array<keyof ResumeJSON['experience'][number]> = ['company', 'title', 'location', 'start_date', 'end_date', 'url'];
+  const maxEntryCount = Math.max(previous.length, edited.length);
+  for (let entryIndex = 0; entryIndex < maxEntryCount; entryIndex++) {
+    const before = previous[entryIndex];
+    const after = edited[entryIndex];
+    for (const field of fields) {
+      addCorrection({
+        entity_type: 'resume_entry',
+        field_path: `${section}[${entryIndex}].${field}`,
+        section,
+        entry_index: entryIndex,
+        original_text: String(before?.[field] || ''),
+        corrected_text: String(after?.[field] || ''),
+        reason: `${section} entry edit`,
+      });
+    }
+    const maxBulletCount = Math.max(before?.bullets?.length || 0, after?.bullets?.length || 0);
+    for (let bulletIndex = 0; bulletIndex < maxBulletCount; bulletIndex++) {
+      addCorrection({
+        entity_type: 'resume_bullet',
+        field_path: `${section}[${entryIndex}].bullets[${bulletIndex}]`,
+        section,
+        entry_index: entryIndex,
+        item_index: bulletIndex,
+        original_text: before?.bullets?.[bulletIndex] || '',
+        corrected_text: after?.bullets?.[bulletIndex] || '',
+        claim_ids: before?.claim_ids || [],
+        reason: 'bullet edit',
+      });
+    }
+  }
+}
+
+function diffEducationEntries(
+  previous: ResumeJSON['education'],
+  edited: ResumeJSON['education'],
+  addCorrection: (input: Partial<CorrectionLog> & {field_path: string; original_text: string; corrected_text: string}) => void,
+) {
+  const fields: Array<keyof ResumeJSON['education'][number]> = ['organization', 'degree', 'location', 'end_date'];
+  const maxEntryCount = Math.max(previous.length, edited.length);
+  for (let entryIndex = 0; entryIndex < maxEntryCount; entryIndex++) {
+    const before = previous[entryIndex];
+    const after = edited[entryIndex];
+    for (const field of fields) {
+      addCorrection({
+        entity_type: 'resume_entry',
+        field_path: `education[${entryIndex}].${field}`,
+        section: 'education',
+        entry_index: entryIndex,
+        original_text: String(before?.[field] || ''),
+        corrected_text: String(after?.[field] || ''),
+        reason: 'education entry edit',
+      });
+    }
+  }
 }
 
 function formatDate(iso: string): string {

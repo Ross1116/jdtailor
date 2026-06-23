@@ -242,6 +242,10 @@ export function RenderResumePDF(arg1) {
   return window['go']['main']['App']['RenderResumePDF'](arg1);
 }
 
+export function RenderResumeVersionPDF(arg1) {
+  return window['go']['main']['App']['RenderResumeVersionPDF'](arg1);
+}
+
 export function RenderSamplePDF() {
   return window['go']['main']['App']['RenderSamplePDF']();
 }

@@ -83,6 +83,11 @@ type ResumeVersion struct {
 	CreatedAt        string           `json:"created_at"`
 }
 
+type RenderResumeVersionPDFResult struct {
+	RenderResult RenderPDFResult `json:"render_result"`
+	Version      ResumeVersion   `json:"version"`
+}
+
 type Application struct {
 	ID                   int64  `json:"id"`
 	JobID                int64  `json:"job_id"`
@@ -99,8 +104,15 @@ type CorrectionLog struct {
 	ID                  int64   `json:"id"`
 	ApplicationID       int64   `json:"application_id"`
 	ResumeVersionID     int64   `json:"resume_version_id"`
+	EntityType          string  `json:"entity_type"`
+	FieldPath           string  `json:"field_path"`
+	Section             string  `json:"section"`
+	EntryIndex          int     `json:"entry_index"`
+	ItemIndex           int     `json:"item_index"`
 	OriginalBulletText  string  `json:"original_bullet_text"`
 	CorrectedBulletText string  `json:"corrected_bullet_text"`
+	OriginalText        string  `json:"original_text"`
+	CorrectedText       string  `json:"corrected_text"`
 	ClaimIDs            []int64 `json:"claim_ids"`
 	Reason              string  `json:"reason"`
 	CreatedAt           string  `json:"created_at"`
@@ -177,6 +189,9 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 
 	if len(selectedDrafts) == 0 {
 		return ResumeJSON{}, errors.New("no selected bullet drafts for resume generation")
+	}
+	if len(input.SelectedBulletIDs) == 0 {
+		selectedDrafts = balanceSelectedResumeDrafts(selectedDrafts)
 	}
 
 	claimIDs := map[int64]bool{}
@@ -405,6 +420,79 @@ func sortResumeEntriesBySourceOrder(entries []ResumeEntry, sections []SourceSect
 	})
 }
 
+func balanceSelectedResumeDrafts(drafts []TailoredBulletDraft) []TailoredBulletDraft {
+	byOrigin := map[string][]TailoredBulletDraft{}
+	originOrder := []string{}
+	for _, draft := range drafts {
+		key := originKey(draft.OriginHeading, draft.OriginType)
+		if _, ok := byOrigin[key]; !ok {
+			originOrder = append(originOrder, key)
+		}
+		byOrigin[key] = append(byOrigin[key], draft)
+	}
+	balanced := []TailoredBulletDraft{}
+	for _, key := range originOrder {
+		items := byOrigin[key]
+		sort.SliceStable(items, func(i, j int) bool {
+			if items[i].SelectionScore == items[j].SelectionScore {
+				return valueThemeOrder(items[i].ValueTheme) < valueThemeOrder(items[j].ValueTheme)
+			}
+			return items[i].SelectionScore > items[j].SelectionScore
+		})
+		budget := bulletBudgetForSectionType(items[0].OriginType)
+		coveredThemes := map[string]bool{}
+		selected := []TailoredBulletDraft{}
+		for _, draft := range items {
+			if len(selected) >= budget {
+				break
+			}
+			if len(selected) > 0 && (coveredThemes[normalizeValueTheme(draft.ValueTheme)] || themeLaneAlreadyCovered(draft.ValueTheme, coveredThemes)) {
+				continue
+			}
+			if resumeDraftStoryDuplicate(draft, selected) {
+				continue
+			}
+			selected = append(selected, draft)
+			coveredThemes[normalizeValueTheme(draft.ValueTheme)] = true
+		}
+		for _, draft := range items {
+			if len(selected) >= budget {
+				break
+			}
+			if containsDraftID(selected, draft.ID) || resumeDraftStoryDuplicate(draft, selected) {
+				continue
+			}
+			selected = append(selected, draft)
+		}
+		balanced = append(balanced, selected...)
+	}
+	return balanced
+}
+
+func resumeDraftStoryDuplicate(draft TailoredBulletDraft, selected []TailoredBulletDraft) bool {
+	for _, existing := range selected {
+		if normalizeValueTheme(draft.ValueTheme) == normalizeValueTheme(existing.ValueTheme) {
+			return true
+		}
+		if themeLaneAlreadyCovered(draft.ValueTheme, map[string]bool{normalizeValueTheme(existing.ValueTheme): true}) && jaccardScore(similarityTokens(draft.DraftText), similarityTokens(existing.DraftText)) >= 0.24 {
+			return true
+		}
+		if storyFamiliesTooSimilar(bulletStoryFamilies(draft.DraftText), bulletStoryFamilies(existing.DraftText)) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsDraftID(drafts []TailoredBulletDraft, id int64) bool {
+	for _, draft := range drafts {
+		if draft.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func resumeEntrySourceOrder(entry ResumeEntry, order map[string]int) int {
 	keys := []string{entry.Company, entry.Title, entry.Company + "|" + entry.Title}
 	for _, key := range keys {
@@ -435,7 +523,7 @@ func applyHumanToneReview(entries []ResumeEntry) {
 }
 
 func humanizeResumeBullet(text string) string {
-	text = strings.TrimSpace(text)
+	text = normalizeHumanResumeText(text)
 	if text == "" {
 		return text
 	}
@@ -458,8 +546,7 @@ func humanizeResumeBullet(text string) string {
 	for _, replacement := range replacements {
 		text = strings.ReplaceAll(text, replacement.from, replacement.to)
 	}
-	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
-	return strings.TrimSpace(text)
+	return normalizeHumanResumeText(text)
 }
 
 func optimizeResumeForATS(job JobDescription, analysis JobAnalysis, strategy ApplicationStrategy, resume ResumeJSON) ResumeJSON {
@@ -832,12 +919,13 @@ func buildResumeSummary(job JobDescription, analysis JobAnalysis, strategy Appli
 	duration := humanExperienceDuration(profile, sections)
 
 	if techStr == "" {
-		return polishResumeSummary(role + duration + " with a practical focus on " + focus + ". " + recentWork + ".")
+		return polishResumeSummary(role + duration + " building " + focus + ". " + recentWork + ".")
 	}
-	return polishResumeSummary(role + duration + " with a practical focus on " + focus + ". Comfortable working across " + techStr + ", with experience turning product requirements into reliable backend features.")
+	return polishResumeSummary(role + duration + " building " + focus + ". " + recentWork + ", using " + humanSummaryTechPhrase(techs) + ".")
 }
 
 func polishResumeSummary(summary string) string {
+	summary = normalizeHumanResumeText(summary)
 	replacements := []struct{ from, to string }{
 		{"product_platform_delivery", "product delivery"},
 		{"backend_api_delivery", "backend API delivery"},
@@ -850,9 +938,61 @@ func polishResumeSummary(summary string) string {
 	}
 	summary = regexp.MustCompile(`\s+across\s+\d+\s+professional contexts`).ReplaceAllString(summary, "")
 	summary = regexp.MustCompile(`(?i)\s+for\s+software engineer\s*-\s*ai/ml`).ReplaceAllString(summary, "")
+	summary = regexp.MustCompile(`(?i)\bwith\s+a\s+practical\s+focus\s+on\b`).ReplaceAllString(summary, "building")
+	summary = regexp.MustCompile(`(?i)\bcomfortable\s+working\s+across\b`).ReplaceAllString(summary, "using")
+	summary = regexp.MustCompile(`(?i)\bwith\s+experience\s+turning\b`).ReplaceAllString(summary, "and turning")
+	summary = regexp.MustCompile(`(?i)\bexperience\s+with\s+a\s+practical\s+focus\s+on\s+experience\s+building\s+and\s+operating\b`).ReplaceAllString(summary, "building and operating")
+	summary = regexp.MustCompile(`(?i)\bexperience\s+building\s+experience\s+building\s+and\s+operating\b`).ReplaceAllString(summary, "building and operating")
+	summary = regexp.MustCompile(`(?i)\bexperience\s+building\s+and\s+operating\b`).ReplaceAllString(summary, "building and operating")
 	summary = regexp.MustCompile(`(?i)recent work includes shipping backend product features\.?`).ReplaceAllString(summary, "Experience includes building backend APIs, improving reliability, and turning product requirements into shipped features.")
-	summary = strings.ReplaceAll(summary, "  ", " ")
-	return strings.TrimSpace(summary)
+	return normalizeHumanResumeText(summary)
+}
+
+func normalizeHumanResumeText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return text
+	}
+	replacements := []struct{ from, to string }{
+		{" — ", ": "},
+		{" – ", ": "},
+		{"—", ": "},
+		{"–", "-"},
+		{"Leveraged", "Used"},
+		{"leveraged", "used"},
+		{"Utilized", "Used"},
+		{"utilized", "used"},
+		{"Spearheaded", "Led"},
+		{"spearheaded", "led"},
+		{"Empowered", "Enabled"},
+		{"empowered", "enabled"},
+		{"Cutting-edge", "Modern"},
+		{"cutting-edge", "modern"},
+		{"Seamless", "Reliable"},
+		{"seamless", "reliable"},
+		{"Dynamic", "Practical"},
+		{"dynamic", "practical"},
+		{"Transformative", "Useful"},
+		{"transformative", "useful"},
+		{"game-changer", "improvement"},
+		{"business outcomes", "delivery outcomes"},
+		{"enhance efficiency", "improve efficiency"},
+		{"drive growth", "support growth"},
+		{"unlock", "support"},
+		{"in-depth", "detailed"},
+		{"deep dive", "review"},
+	}
+	for _, replacement := range replacements {
+		text = strings.ReplaceAll(text, replacement.from, replacement.to)
+	}
+	text = regexp.MustCompile(`(?i)\bas a result\b`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`(?i)\bin order to\b`).ReplaceAllString(text, "to")
+	text = regexp.MustCompile(`(?i)\bit is important to\b`).ReplaceAllString(text, "")
+	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
+	text = strings.ReplaceAll(text, " :", ":")
+	text = strings.ReplaceAll(text, " ,", ",")
+	text = strings.ReplaceAll(text, " .", ".")
+	return strings.TrimSpace(text)
 }
 
 func humanizeValueTheme(theme string) string {
@@ -879,6 +1019,10 @@ func humanizeRequirementPhrase(text string) string {
 	}
 	text = strings.TrimPrefix(text, "Responsible for ")
 	text = strings.TrimPrefix(text, "responsible for ")
+	text = strings.TrimPrefix(text, "Experience building and operating ")
+	text = strings.TrimPrefix(text, "experience building and operating ")
+	text = strings.TrimPrefix(text, "Experience with ")
+	text = strings.TrimPrefix(text, "experience with ")
 	if len(text) > 90 {
 		text = text[:90]
 		if idx := strings.LastIndex(text, " "); idx > 40 {
@@ -886,6 +1030,14 @@ func humanizeRequirementPhrase(text string) string {
 		}
 	}
 	return strings.ToLower(text[:1]) + text[1:]
+}
+
+func humanSummaryTechPhrase(techs []string) string {
+	items := normalizeStringList(limitStrings(techs, 4))
+	if len(items) == 0 {
+		return "the tools needed for production delivery"
+	}
+	return joinHumanList(items)
 }
 
 func humanSummaryRole(roleTitle string, capabilities []string, techs []string) string {
@@ -1129,16 +1281,45 @@ func (s *Store) ValidateResumeJSON(resume ResumeJSON, jobID int64) (ValidationRe
 		}
 
 		lower := strings.ToLower(bullet)
-		evidence := strings.ToLower(supportedBulletEvidence(bullet, claimsByID))
-		for _, term := range []string{"aws", "serverless", "container", "containers", "kubernetes", "health-tech", "healthcare", "medical", "compliance", "enterprise", "scalable"} {
-			if strings.Contains(lower, term) && !strings.Contains(evidence, term) {
-				check.Issues = append(check.Issues, "unsupported term: "+term)
+		evidence := strings.ToLower(supportedBulletEvidence(bulletValidation.claimIDs, claimsByID))
+		linkedSensitiveTerms := linkedSensitiveTerms(lower)
+		for _, claimID := range bulletValidation.claimIDs {
+			claim, ok := claimsByID[claimID]
+			if !ok {
+				check.Issues = append(check.Issues, fmt.Sprintf("linked claim %d not found", claimID))
+				if len(linkedSensitiveTerms) > 0 {
+					check.AllApproved = false
+				}
+				continue
+			}
+			switch claim.Status {
+			case claimStatusApproved:
+			case claimStatusApprovedRestricted:
+				check.Issues = append(check.Issues, fmt.Sprintf("linked claim %d is approved with restrictions; verify context", claimID))
+			case claimStatusRejected, claimStatusBlocked:
+				check.Issues = append(check.Issues, fmt.Sprintf("linked claim %d is %s and cannot support resume text", claimID, claim.Status))
+				check.AllApproved = false
+			default:
+				check.Issues = append(check.Issues, fmt.Sprintf("linked claim %d is %s, not approved", claimID, firstNonEmpty(claim.Status, "unreviewed")))
+				if len(linkedSensitiveTerms) > 0 {
+					check.AllApproved = false
+				}
+			}
+		}
+		for _, term := range linkedSensitiveTerms {
+			if !strings.Contains(evidence, term) {
+				check.Issues = append(check.Issues, "unsupported sensitive term: "+term)
 				check.AllApproved = false
 			}
 		}
 
-		if check.AllApproved && !check.HasClaims {
-			check.Issues = append(check.Issues, "no linked claims; verify content is evidence-backed")
+		if !check.HasClaims {
+			if len(linkedSensitiveTerms) > 0 {
+				check.Issues = append(check.Issues, "sensitive terms require linked approved evidence: "+strings.Join(linkedSensitiveTerms, ", "))
+				check.AllApproved = false
+			} else {
+				check.Issues = append(check.Issues, "no linked claims; verify content is evidence-backed")
+			}
 		}
 
 		allChecks = append(allChecks, check)
@@ -1333,9 +1514,13 @@ func extractJSONObject(text string) string {
 	return text
 }
 
-func supportedBulletEvidence(bullet string, claimsByID map[int64]CandidateClaim) string {
+func supportedBulletEvidence(claimIDs []int64, claimsByID map[int64]CandidateClaim) string {
 	parts := []string{}
-	for _, claim := range claimsByID {
+	for _, claimID := range claimIDs {
+		claim, ok := claimsByID[claimID]
+		if !ok || (claim.Status != claimStatusApproved && claim.Status != claimStatusApprovedRestricted) {
+			continue
+		}
 		parts = append(parts,
 			claim.ClaimText,
 			strings.Join(claim.Actions, " "),
@@ -1352,7 +1537,40 @@ func supportedBulletEvidence(bullet string, claimsByID map[int64]CandidateClaim)
 	return strings.Join(parts, " ")
 }
 
+func linkedSensitiveTerms(lower string) []string {
+	terms := []string{}
+	for _, term := range []string{"aws", "serverless", "container", "containers", "kubernetes", "health-tech", "healthcare", "medical", "compliance", "enterprise", "scalable"} {
+		if strings.Contains(lower, term) {
+			terms = append(terms, term)
+		}
+	}
+	return terms
+}
+
 func (s *Store) RenderResumePDF(ctx context.Context, resume ResumeJSON) (RenderPDFResult, error) {
+	return s.renderResumePDF(ctx, resume, fmt.Sprintf("resume-%s", renderTimestamp()))
+}
+
+func (s *Store) RenderResumeVersionPDF(ctx context.Context, versionID int64) (RenderResumeVersionPDFResult, error) {
+	version, err := s.GetResumeVersion(versionID)
+	if err != nil {
+		return RenderResumeVersionPDFResult{}, err
+	}
+	renderResult, err := s.renderResumePDF(ctx, version.ResumeJSON, fmt.Sprintf("resume-version-%d-%s", versionID, renderTimestamp()))
+	if err != nil {
+		return RenderResumeVersionPDFResult{}, err
+	}
+	if !renderResult.Success {
+		return RenderResumeVersionPDFResult{RenderResult: renderResult, Version: version}, nil
+	}
+	updated, err := s.UpdateResumeVersionRenderMetadata(version.ID, readRenderedTex(renderResult.TexPath), renderResult.PDFPath)
+	if err != nil {
+		return RenderResumeVersionPDFResult{}, err
+	}
+	return RenderResumeVersionPDFResult{RenderResult: renderResult, Version: updated}, nil
+}
+
+func (s *Store) renderResumePDF(ctx context.Context, resume ResumeJSON, outputDirName string) (RenderPDFResult, error) {
 	texContent, err := renderResumeTemplate(resume)
 	if err != nil {
 		return RenderPDFResult{}, err
@@ -1365,7 +1583,7 @@ func (s *Store) RenderResumePDF(ctx context.Context, resume ResumeJSON) (RenderP
 	}
 	pdfName := firstName + "_Resume"
 
-	outputDir := filepath.Join(s.generatedPath, fmt.Sprintf("resume-%d", time.Now().Unix()))
+	outputDir := filepath.Join(s.generatedPath, outputDirName)
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return RenderPDFResult{}, err
 	}
@@ -1409,6 +1627,18 @@ func (s *Store) RenderResumePDF(ctx context.Context, resume ResumeJSON) (RenderP
 		OutputDir: outputDir,
 		Error:     pdfResult.Error,
 	}, nil
+}
+
+func renderTimestamp() string {
+	return time.Now().UTC().Format("20060102T150405.000000000Z")
+}
+
+func readRenderedTex(path string) string {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(content)
 }
 
 func resumeFirstName(headline string) string {
@@ -1555,6 +1785,23 @@ func (s *Store) SaveResumeVersion(version ResumeVersion) (ResumeVersion, error) 
 	return version, nil
 }
 
+func (s *Store) UpdateResumeVersionRenderMetadata(id int64, texSource string, pdfPath string) (ResumeVersion, error) {
+	if id <= 0 {
+		return ResumeVersion{}, fmt.Errorf("invalid resume version id %d", id)
+	}
+	_, err := s.db.ExecContext(
+		context.Background(),
+		`UPDATE resume_versions SET tex_source = ?, pdf_path = ? WHERE id = ?`,
+		texSource,
+		pdfPath,
+		id,
+	)
+	if err != nil {
+		return ResumeVersion{}, err
+	}
+	return s.GetResumeVersion(id)
+}
+
 func (s *Store) GetResumeVersion(id int64) (ResumeVersion, error) {
 	var version ResumeVersion
 	var resumeJSONStr, validationStr string
@@ -1567,8 +1814,12 @@ func (s *Store) GetResumeVersion(id int64) (ResumeVersion, error) {
 	if err != nil {
 		return ResumeVersion{}, err
 	}
-	json.Unmarshal([]byte(resumeJSONStr), &version.ResumeJSON)
-	json.Unmarshal([]byte(validationStr), &version.ValidationResult)
+	if err := json.Unmarshal([]byte(resumeJSONStr), &version.ResumeJSON); err != nil {
+		return ResumeVersion{}, fmt.Errorf("decode resume_json: %w", err)
+	}
+	if err := json.Unmarshal([]byte(validationStr), &version.ValidationResult); err != nil {
+		return ResumeVersion{}, fmt.Errorf("decode validation_result: %w", err)
+	}
 	return version, nil
 }
 
@@ -1591,8 +1842,12 @@ func (s *Store) ListResumeVersions(jobID int64) ([]ResumeVersion, error) {
 		if err := rows.Scan(&version.ID, &version.JobID, &resumeJSONStr, &version.TexSource, &version.PDFPath, &validationStr, &version.CreatedAt); err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(resumeJSONStr), &version.ResumeJSON)
-		json.Unmarshal([]byte(validationStr), &version.ValidationResult)
+		if err := json.Unmarshal([]byte(resumeJSONStr), &version.ResumeJSON); err != nil {
+			return nil, fmt.Errorf("decode resume_json for version %d: %w", version.ID, err)
+		}
+		if err := json.Unmarshal([]byte(validationStr), &version.ValidationResult); err != nil {
+			return nil, fmt.Errorf("decode validation_result for version %d: %w", version.ID, err)
+		}
 		versions = append(versions, version)
 	}
 	return versions, rows.Err()
@@ -1689,14 +1944,20 @@ func (s *Store) UpdateApplicationResumeVersion(id int64, resumeVersionID int64) 
 func (s *Store) LogCorrection(correction CorrectionLog) (CorrectionLog, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	claimJSON, _ := encodeInt64List(correction.ClaimIDs)
+	correction = normalizeCorrectionLog(correction)
 	result, err := s.db.ExecContext(
 		context.Background(),
-		`INSERT INTO correction_logs (application_id, resume_version_id, original_text, corrected_text, claim_ids, reason, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO correction_logs (application_id, resume_version_id, entity_type, field_path, section, entry_index, item_index, original_text, corrected_text, claim_ids_json, reason, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		correction.ApplicationID,
 		correction.ResumeVersionID,
-		correction.OriginalBulletText,
-		correction.CorrectedBulletText,
+		correction.EntityType,
+		correction.FieldPath,
+		correction.Section,
+		correction.EntryIndex,
+		correction.ItemIndex,
+		correction.OriginalText,
+		correction.CorrectedText,
 		claimJSON,
 		strings.TrimSpace(correction.Reason),
 		now,
@@ -1713,7 +1974,7 @@ func (s *Store) LogCorrection(correction CorrectionLog) (CorrectionLog, error) {
 func (s *Store) ListCorrections(applicationID int64) ([]CorrectionLog, error) {
 	rows, err := s.db.QueryContext(
 		context.Background(),
-		`SELECT id, application_id, resume_version_id, original_text, corrected_text, claim_ids, reason, created_at
+		`SELECT id, application_id, resume_version_id, entity_type, field_path, section, entry_index, item_index, original_text, corrected_text, claim_ids_json, reason, created_at
 		FROM correction_logs WHERE application_id = ? ORDER BY created_at DESC`,
 		applicationID,
 	)
@@ -1726,13 +1987,32 @@ func (s *Store) ListCorrections(applicationID int64) ([]CorrectionLog, error) {
 	for rows.Next() {
 		var c CorrectionLog
 		var claimJSON string
-		if err := rows.Scan(&c.ID, &c.ApplicationID, &c.ResumeVersionID, &c.OriginalBulletText, &c.CorrectedBulletText, &claimJSON, &c.Reason, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.ApplicationID, &c.ResumeVersionID, &c.EntityType, &c.FieldPath, &c.Section, &c.EntryIndex, &c.ItemIndex, &c.OriginalText, &c.CorrectedText, &claimJSON, &c.Reason, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		c.ClaimIDs = decodeInt64List(claimJSON)
+		c = normalizeCorrectionLog(c)
 		corrections = append(corrections, c)
 	}
 	return corrections, rows.Err()
+}
+
+func normalizeCorrectionLog(c CorrectionLog) CorrectionLog {
+	c.EntityType = firstNonEmpty(strings.TrimSpace(c.EntityType), "resume_bullet")
+	c.FieldPath = strings.TrimSpace(c.FieldPath)
+	c.Section = strings.TrimSpace(c.Section)
+	if c.EntryIndex == 0 && c.FieldPath == "" && c.Section == "" {
+		c.EntryIndex = -1
+	}
+	if c.ItemIndex == 0 && c.FieldPath == "" && c.Section == "" {
+		c.ItemIndex = -1
+	}
+	c.OriginalText = firstNonEmpty(c.OriginalText, c.OriginalBulletText)
+	c.CorrectedText = firstNonEmpty(c.CorrectedText, c.CorrectedBulletText)
+	c.OriginalBulletText = firstNonEmpty(c.OriginalBulletText, c.OriginalText)
+	c.CorrectedBulletText = firstNonEmpty(c.CorrectedBulletText, c.CorrectedText)
+	c.Reason = strings.TrimSpace(c.Reason)
+	return c
 }
 
 func normalizeAppStatus(status string) string {

@@ -759,6 +759,13 @@ func (a *App) RenderResumePDF(resume ResumeJSON) (RenderPDFResult, error) {
 	return a.store.RenderResumePDF(a.ctx, resume)
 }
 
+func (a *App) RenderResumeVersionPDF(versionID int64) (RenderResumeVersionPDFResult, error) {
+	if err := a.ensureStore(); err != nil {
+		return RenderResumeVersionPDFResult{}, err
+	}
+	return a.store.RenderResumeVersionPDF(a.ctx, versionID)
+}
+
 func (a *App) OpenFolder(path string) error {
 	if path == "" {
 		return errors.New("path is required")

@@ -122,6 +122,8 @@ export function ParseJobDescription(arg1:number):Promise<Array<main.JobRequireme
 
 export function RenderResumePDF(arg1:main.ResumeJSON):Promise<main.RenderPDFResult>;
 
+export function RenderResumeVersionPDF(arg1:number):Promise<main.RenderResumeVersionPDFResult>;
+
 export function RenderSamplePDF():Promise<main.RenderPDFResult>;
 
 export function RunJobAgentWorkflow(arg1:main.JobAgentWorkflowInput):Promise<main.JobAgentWorkflowResult>;

@@ -6,7 +6,16 @@ Local-first job application workflow tool.
 
 - Phase 1 - Bootstrap: complete
 - Phase 2 - Candidate Context Builder: complete
-- Phase 3 - Resume Core: complete
+- Phase 3 - Resume Core: reliable delivery path in progress
+
+Current capabilities:
+
+- LLM calls use the configured local settings, with OpenRouter as the default provider/model path.
+- PDF rendering uses repo-local Tectonic and final delivery renders saved resume versions.
+- Browser extension import can queue job drafts for review inside the app.
+- Resume versions persist JSON, validation, TeX source, and rendered PDF path.
+- Application tracker links jobs, saved resume versions, PDF state, notes, and statuses.
+- Correction logging records summary, skills, entry, and bullet edits against applications.
 
 ## Phase 1 Bootstrap
 

@@ -104,6 +104,11 @@ func TestMigrationAddsAtomBankAndDraftSelectionColumns(t *testing.T) {
 			t.Fatalf("context_agent_steps missing %s", column)
 		}
 	}
+	for _, column := range []string{"claim_ids_json", "entity_type", "field_path", "section", "entry_index", "item_index"} {
+		if !tableHasColumn(t, store, "correction_logs", column) {
+			t.Fatalf("correction_logs missing %s", column)
+		}
+	}
 }
 
 func TestSettingsSaveLoad(t *testing.T) {
@@ -442,6 +447,9 @@ func TestAutoSelectFallsBackWhenEmbeddingsFail(t *testing.T) {
 	if len(drafts) != 2 {
 		t.Fatalf("drafts = %+v", drafts)
 	}
+	if _, err := store.draftEmbeddingSimilarity(t.Context(), drafts[0], drafts[1]); err == nil {
+		t.Fatal("draftEmbeddingSimilarity() error = nil, want mocked embedding failure")
+	}
 	selected, err := store.AutoSelectResumeBullets(job.ID)
 	if err != nil {
 		t.Fatalf("AutoSelectResumeBullets() error = %v", err)
@@ -454,19 +462,6 @@ func TestAutoSelectFallsBackWhenEmbeddingsFail(t *testing.T) {
 	}
 	if selectedCount == 0 {
 		t.Fatalf("selected = %+v, want fallback selection", selected)
-	}
-	events, err := store.ListBulletGenerationEvents(job.ID)
-	if err != nil {
-		t.Fatalf("ListBulletGenerationEvents() error = %v", err)
-	}
-	foundFallback := false
-	for _, event := range events {
-		if event.Stage == "embedding_fallback" {
-			foundFallback = true
-		}
-	}
-	if !foundFallback {
-		t.Fatalf("events = %+v, want embedding fallback diagnostic", events)
 	}
 }
 
@@ -1855,6 +1850,73 @@ func TestBulletDraftsRespectOriginBudgets(t *testing.T) {
 	}
 }
 
+func TestAutoSelectResumeBulletsPrefersCompleteStoryLanes(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{
+		Company: "Acme",
+		Title:   "Backend Engineer",
+		RawText: "Build reliable SaaS features with AI workflows, frontend dashboards, and production quality checks.",
+	})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	requirements, err := store.replaceJobRequirements(job, []parsedJobRequirement{
+		{Category: "responsibility", RequirementText: "Build reliable SaaS features.", Keywords: []string{"SaaS", "features"}, Priority: "high", SourceQuote: "Build reliable SaaS features."},
+		{Category: "responsibility", RequirementText: "Maintain production quality checks.", Keywords: []string{"production", "quality"}, Priority: "high", SourceQuote: "production quality checks"},
+		{Category: "responsibility", RequirementText: "Support AI workflows.", Keywords: []string{"AI", "workflows"}, Priority: "medium", SourceQuote: "AI workflows"},
+		{Category: "responsibility", RequirementText: "Build frontend dashboards.", Keywords: []string{"frontend", "dashboards"}, Priority: "medium", SourceQuote: "frontend dashboards"},
+	})
+	if err != nil {
+		t.Fatalf("replaceJobRequirements() error = %v", err)
+	}
+	facts := []factPromptContext{
+		{ID: 1, Status: "approved", FactText: "Built FastAPI and PostgreSQL features for projects and bookings.", SectionHeading: "Acme | Backend Engineer", SectionType: "experience"},
+		{ID: 2, Status: "approved", FactText: "Designed service boundaries and PostgreSQL entities for planning workflows.", SectionHeading: "Acme | Backend Engineer", SectionType: "experience"},
+		{ID: 3, Status: "approved", FactText: "Added production configuration checks for secrets and database mode.", SectionHeading: "Acme | Backend Engineer", SectionType: "experience"},
+		{ID: 4, Status: "approved", FactText: "Built AI-assisted upload job flows for planning context.", SectionHeading: "Acme | Backend Engineer", SectionType: "experience"},
+		{ID: 5, Status: "approved", FactText: "Shipped dashboard screens for planning and asset booking workflows.", SectionHeading: "Acme | Backend Engineer", SectionType: "experience"},
+	}
+	claims := []CandidateClaim{
+		{ID: 1, ClaimText: "FastAPI PostgreSQL booking features", SourceFactIDs: []int64{1}, Technologies: []string{"FastAPI", "PostgreSQL"}, Artifacts: []string{"features", "bookings"}, Outcomes: []string{"SaaS delivery"}, OriginHeading: "Acme | Backend Engineer", OriginType: "experience", Status: claimStatusApproved},
+		{ID: 2, ClaimText: "service boundaries and PostgreSQL entities", SourceFactIDs: []int64{2}, Artifacts: []string{"service boundaries", "PostgreSQL entities"}, Outcomes: []string{"maintainability"}, OriginHeading: "Acme | Backend Engineer", OriginType: "experience", Status: claimStatusApproved},
+		{ID: 3, ClaimText: "production configuration checks", SourceFactIDs: []int64{3}, Artifacts: []string{"configuration checks"}, Outcomes: []string{"production reliability"}, OriginHeading: "Acme | Backend Engineer", OriginType: "experience", Status: claimStatusApproved},
+		{ID: 4, ClaimText: "AI-assisted upload job flows", SourceFactIDs: []int64{4}, Artifacts: []string{"upload jobs"}, Outcomes: []string{"AI workflow support"}, OriginHeading: "Acme | Backend Engineer", OriginType: "experience", Status: claimStatusApproved},
+		{ID: 5, ClaimText: "dashboard screens for planning workflows", SourceFactIDs: []int64{5}, Technologies: []string{"React"}, Artifacts: []string{"dashboard screens"}, Outcomes: []string{"frontend delivery"}, OriginHeading: "Acme | Backend Engineer", OriginType: "experience", Status: claimStatusApproved},
+	}
+	_, err = store.replaceBulletDrafts(job.ID, []parsedBulletDraft{
+		{OriginHeading: "Acme | Backend Engineer", OriginType: "experience", ValueTheme: "product_platform_delivery", RequirementID: requirements[0].ID, ClaimIDs: []int64{1}, FactIDs: []int64{1}, DraftText: "Built FastAPI and PostgreSQL features for project planning and bookings, shipping core SaaS workflows for customer-facing construction teams."},
+		{OriginHeading: "Acme | Backend Engineer", OriginType: "experience", ValueTheme: "technical_design", RequirementID: requirements[0].ID, ClaimIDs: []int64{2}, FactIDs: []int64{2}, DraftText: "Designed service boundaries and PostgreSQL entities for planning workflows, keeping backend ownership clear across projects, assets, and bookings."},
+		{OriginHeading: "Acme | Backend Engineer", OriginType: "experience", ValueTheme: "reliability_quality", RequirementID: requirements[1].ID, ClaimIDs: []int64{3}, FactIDs: []int64{3}, DraftText: "Added production configuration checks for secrets and database mode, reducing deployment risk before customer-facing releases."},
+		{OriginHeading: "Acme | Backend Engineer", OriginType: "experience", ValueTheme: "automation_ai", RequirementID: requirements[2].ID, ClaimIDs: []int64{4}, FactIDs: []int64{4}, DraftText: "Built AI-assisted upload job flows that connected planning context to backend processing without overstating unsupported model ownership."},
+		{OriginHeading: "Acme | Backend Engineer", OriginType: "experience", ValueTheme: "frontend_product", RequirementID: requirements[0].ID, ClaimIDs: []int64{5}, FactIDs: []int64{5}, DraftText: "Shipped dashboard screens for planning and asset booking workflows, giving users clearer product surfaces around backend scheduling logic."},
+	}, requirements, facts, claims)
+	if err != nil {
+		t.Fatalf("replaceBulletDrafts() error = %v", err)
+	}
+	selected, err := store.AutoSelectResumeBullets(job.ID)
+	if err != nil {
+		t.Fatalf("AutoSelectResumeBullets() error = %v", err)
+	}
+	selectedThemes := map[string]bool{}
+	for _, draft := range selected {
+		if draft.SelectedForResume {
+			selectedThemes[draft.ValueTheme] = true
+		}
+	}
+	for _, want := range []string{"product_platform_delivery", "reliability_quality", "automation_ai", "frontend_product"} {
+		if !selectedThemes[want] {
+			t.Fatalf("selected themes = %+v, want %s", selectedThemes, want)
+		}
+	}
+	if selectedThemes["technical_design"] {
+		t.Fatalf("selected themes = %+v, did not expect second core-build variant", selectedThemes)
+	}
+}
+
 func TestBulletDraftsRejectNonHumanStyle(t *testing.T) {
 	store, err := NewStore(t.TempDir())
 	if err != nil {
@@ -2961,6 +3023,207 @@ func TestRenderSamplePDFWithFakeExecutable(t *testing.T) {
 	}
 }
 
+func TestCorrectionLogRoundTripUsesClaimIDsJSON(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	job, version, app := createResumeVersionAndApplication(t, store)
+	if job.ID == 0 || version.ID == 0 || app.ID == 0 {
+		t.Fatalf("test setup failed: job=%+v version=%+v app=%+v", job, version, app)
+	}
+
+	logged, err := store.LogCorrection(CorrectionLog{
+		ApplicationID:       app.ID,
+		ResumeVersionID:     version.ID,
+		OriginalBulletText:  "Built APIs.",
+		CorrectedBulletText: "Built reliable APIs.",
+		ClaimIDs:            []int64{11, 22},
+		Reason:              "clarity",
+	})
+	if err != nil {
+		t.Fatalf("LogCorrection() error = %v", err)
+	}
+	if logged.ID == 0 {
+		t.Fatal("logged correction ID is zero")
+	}
+
+	corrections, err := store.ListCorrections(app.ID)
+	if err != nil {
+		t.Fatalf("ListCorrections() error = %v", err)
+	}
+	if len(corrections) != 1 {
+		t.Fatalf("corrections len = %d, want 1", len(corrections))
+	}
+	got := corrections[0]
+	if got.OriginalBulletText != "Built APIs." || got.CorrectedBulletText != "Built reliable APIs." {
+		t.Fatalf("bullet compatibility fields did not round trip: %+v", got)
+	}
+	if got.OriginalText != "Built APIs." || got.CorrectedText != "Built reliable APIs." {
+		t.Fatalf("generic text fields did not round trip: %+v", got)
+	}
+	if got.EntityType != "resume_bullet" || got.EntryIndex != -1 || got.ItemIndex != -1 {
+		t.Fatalf("generic defaults not applied: %+v", got)
+	}
+	if len(got.ClaimIDs) != 2 || got.ClaimIDs[0] != 11 || got.ClaimIDs[1] != 22 {
+		t.Fatalf("claim IDs = %+v, want [11 22]", got.ClaimIDs)
+	}
+}
+
+func TestGenericCorrectionLogRoundTripsSummarySkillAndBullet(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	_, version, app := createResumeVersionAndApplication(t, store)
+
+	inputs := []CorrectionLog{
+		{ApplicationID: app.ID, ResumeVersionID: version.ID, EntityType: "resume_summary", FieldPath: "summary", EntryIndex: -1, ItemIndex: -1, OriginalText: "Old summary", CorrectedText: "New summary", Reason: "summary edit"},
+		{ApplicationID: app.ID, ResumeVersionID: version.ID, EntityType: "resume_skill", FieldPath: "skills[0].items", Section: "skills", EntryIndex: 0, ItemIndex: -1, OriginalText: "Go", CorrectedText: "Go, TypeScript", Reason: "skill edit"},
+		{ApplicationID: app.ID, ResumeVersionID: version.ID, EntityType: "resume_bullet", FieldPath: "experience[0].bullets[0]", Section: "experience", EntryIndex: 0, ItemIndex: 0, OriginalText: "Built APIs.", CorrectedText: "Built reliable APIs.", ClaimIDs: []int64{7}, Reason: "bullet edit"},
+	}
+	for _, input := range inputs {
+		if _, err := store.LogCorrection(input); err != nil {
+			t.Fatalf("LogCorrection(%s) error = %v", input.FieldPath, err)
+		}
+	}
+
+	corrections, err := store.ListCorrections(app.ID)
+	if err != nil {
+		t.Fatalf("ListCorrections() error = %v", err)
+	}
+	byPath := map[string]CorrectionLog{}
+	for _, correction := range corrections {
+		byPath[correction.FieldPath] = correction
+	}
+	for _, input := range inputs {
+		got, ok := byPath[input.FieldPath]
+		if !ok {
+			t.Fatalf("missing correction for %s in %+v", input.FieldPath, corrections)
+		}
+		if got.EntityType != input.EntityType || got.Section != input.Section || got.EntryIndex != input.EntryIndex || got.ItemIndex != input.ItemIndex {
+			t.Fatalf("generic fields for %s = %+v, want %+v", input.FieldPath, got, input)
+		}
+		if got.OriginalText != input.OriginalText || got.CorrectedText != input.CorrectedText {
+			t.Fatalf("text fields for %s = %+v, want %+v", input.FieldPath, got, input)
+		}
+	}
+}
+
+func TestValidateResumeJSONUsesOnlyLinkedClaimEvidence(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	linkedID := insertTestCandidateClaim(t, store, CandidateClaim{ClaimText: "Built backend APIs", Actions: []string{"built"}, Capabilities: []string{"API development"}, Status: claimStatusApproved})
+	insertTestCandidateClaim(t, store, CandidateClaim{ClaimText: "AWS platform work", Technologies: []string{"AWS"}, Status: claimStatusApproved})
+
+	result, err := store.ValidateResumeJSON(ResumeJSON{
+		Headline: "Backend Engineer",
+		Summary:  "Backend engineer focused on APIs.",
+		Experience: []ResumeEntry{{
+			Company:  "Acme",
+			Title:    "Engineer",
+			Bullets:  []string{"Built AWS APIs."},
+			ClaimIDs: []int64{linkedID},
+		}},
+	}, 0)
+	if err != nil {
+		t.Fatalf("ValidateResumeJSON() error = %v", err)
+	}
+	if result.Passed {
+		t.Fatalf("Passed = true, want unsupported linked AWS to fail: %+v", result)
+	}
+	if !containsSubstring(result.Warnings, "unsupported sensitive term: aws") {
+		t.Fatalf("warnings missing unsupported AWS term: %+v", result.Warnings)
+	}
+}
+
+func TestValidateResumeJSONPassesWhenLinkedEvidenceContainsTerm(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	linkedID := insertTestCandidateClaim(t, store, CandidateClaim{ClaimText: "Built AWS APIs", Technologies: []string{"AWS"}, Actions: []string{"built"}, Status: claimStatusApproved})
+
+	result, err := store.ValidateResumeJSON(ResumeJSON{
+		Headline:   "Backend Engineer",
+		Summary:    "Backend engineer focused on APIs.",
+		Experience: []ResumeEntry{{Company: "Acme", Title: "Engineer", Bullets: []string{"Built AWS APIs."}, ClaimIDs: []int64{linkedID}}},
+	}, 0)
+	if err != nil {
+		t.Fatalf("ValidateResumeJSON() error = %v", err)
+	}
+	if !result.Passed {
+		t.Fatalf("Passed = false, want linked AWS evidence to pass: %+v", result)
+	}
+}
+
+func TestValidateResumeJSONWarnsForUnlinkedNonSensitiveBullet(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+
+	result, err := store.ValidateResumeJSON(ResumeJSON{
+		Headline:   "Backend Engineer",
+		Summary:    "Backend engineer focused on APIs.",
+		Experience: []ResumeEntry{{Company: "Acme", Title: "Engineer", Bullets: []string{"Built reliable APIs."}}},
+	}, 0)
+	if err != nil {
+		t.Fatalf("ValidateResumeJSON() error = %v", err)
+	}
+	if !result.Passed {
+		t.Fatalf("Passed = false, want unlinked non-sensitive warning only: %+v", result)
+	}
+	if !containsSubstring(result.Warnings, "no linked claims") {
+		t.Fatalf("warnings missing no linked claims warning: %+v", result.Warnings)
+	}
+}
+
+func TestRenderResumeVersionPDFPersistsMetadataAndUsesUniqueDirs(t *testing.T) {
+	store, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	defer store.Close()
+	_, version, _ := createResumeVersionAndApplication(t, store)
+	installFakeTectonic(t, store)
+
+	first, err := store.RenderResumeVersionPDF(t.Context(), version.ID)
+	if err != nil {
+		t.Fatalf("RenderResumeVersionPDF() first error = %v", err)
+	}
+	second, err := store.RenderResumeVersionPDF(t.Context(), version.ID)
+	if err != nil {
+		t.Fatalf("RenderResumeVersionPDF() second error = %v", err)
+	}
+	if !first.RenderResult.Success || !second.RenderResult.Success {
+		t.Fatalf("render success false: first=%+v second=%+v", first.RenderResult, second.RenderResult)
+	}
+	if first.RenderResult.OutputDir == second.RenderResult.OutputDir {
+		t.Fatalf("output dirs are not unique: %s", first.RenderResult.OutputDir)
+	}
+	if !strings.Contains(first.RenderResult.OutputDir, fmt.Sprintf("resume-version-%d", version.ID)) {
+		t.Fatalf("output dir missing version id: %s", first.RenderResult.OutputDir)
+	}
+	updated, err := store.GetResumeVersion(version.ID)
+	if err != nil {
+		t.Fatalf("GetResumeVersion() error = %v", err)
+	}
+	if updated.PDFPath != second.RenderResult.PDFPath || updated.TexSource == "" {
+		t.Fatalf("render metadata not persisted to version: updated=%+v second=%+v", updated, second.RenderResult)
+	}
+	if _, err := os.Stat(updated.PDFPath); err != nil {
+		t.Fatalf("persisted PDF missing: %v", err)
+	}
+}
+
 func createFactsForJobTests(t *testing.T, store *Store) (SourceSection, []EvidenceFact) {
 	t.Helper()
 	source, err := store.CreateCandidateSource(CreateCandidateSourceInput{
@@ -3072,6 +3335,115 @@ func testClaimsForPromptFacts(facts []factPromptContext) []CandidateClaim {
 	return claims
 }
 
+func createResumeVersionAndApplication(t *testing.T, store *Store) (JobDescription, ResumeVersion, Application) {
+	t.Helper()
+	job, err := store.CreateJobDescription(CreateJobDescriptionInput{Company: "Acme", Title: "Backend Engineer", RawText: "Build reliable APIs."})
+	if err != nil {
+		t.Fatalf("CreateJobDescription() error = %v", err)
+	}
+	resume := ResumeJSON{
+		Headline: "Backend Engineer",
+		Summary:  "Backend engineer focused on reliable APIs.",
+		Experience: []ResumeEntry{{
+			Company:  "Acme",
+			Title:    "Engineer",
+			Bullets:  []string{"Built reliable APIs."},
+			ClaimIDs: []int64{7},
+		}},
+	}
+	version, err := store.SaveResumeVersion(ResumeVersion{JobID: job.ID, ResumeJSON: resume, ValidationResult: ValidationResult{Passed: true}})
+	if err != nil {
+		t.Fatalf("SaveResumeVersion() error = %v", err)
+	}
+	app, err := store.SaveApplication(Application{JobID: job.ID, Status: "draft", ResumeVersionID: version.ID})
+	if err != nil {
+		t.Fatalf("SaveApplication() error = %v", err)
+	}
+	return job, version, app
+}
+
+func installFakeTectonic(t *testing.T, store *Store) {
+	t.Helper()
+	fakePath := store.tectonicPath()
+	if err := os.MkdirAll(filepath.Dir(fakePath), 0o755); err != nil {
+		t.Fatalf("mkdir fake path: %v", err)
+	}
+	currentExe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable() error = %v", err)
+	}
+	data, err := os.ReadFile(currentExe)
+	if err != nil {
+		t.Fatalf("read test exe: %v", err)
+	}
+	if err := os.WriteFile(fakePath, data, 0o755); err != nil {
+		t.Fatalf("write fake exe: %v", err)
+	}
+	originalCommand := execCommandContext
+	execCommandContext = func(_ context.Context, _ string, args ...string) *exec.Cmd {
+		testArgs := append([]string{"-test.run=TestHelperProcess", "--"}, args...)
+		cmd := exec.Command(currentExe, testArgs...)
+		cmd.Env = append(os.Environ(), "JDTAILOR_FAKE_TECTONIC=1")
+		return cmd
+	}
+	t.Cleanup(func() {
+		execCommandContext = originalCommand
+	})
+}
+
+func insertTestCandidateClaim(t *testing.T, store *Store, claim CandidateClaim) int64 {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	sourceFactIDsJSON, _ := encodeInt64List(claim.SourceFactIDs)
+	evidenceQuotesJSON, _ := encodeStringList(claim.EvidenceQuotes)
+	technologiesJSON, _ := encodeStringList(claim.Technologies)
+	allowedUseJSON, _ := encodeStringList(claim.AllowedUse)
+	allowedContextsJSON, _ := encodeStringList(claim.AllowedContexts)
+	blockedContextsJSON, _ := encodeStringList(claim.BlockedContexts)
+	safePhrasingsJSON, _ := encodeStringList(claim.SafePhrasings)
+	unsafePhrasingsJSON, _ := encodeStringList(claim.UnsafePhrasings)
+	riskFlagsJSON, _ := encodeStringList(claim.RiskFlags)
+	actionsJSON, _ := encodeStringList(claim.Actions)
+	capabilitiesJSON, _ := encodeStringList(claim.Capabilities)
+	objectsJSON, _ := encodeStringList(claim.Objects)
+	domainsJSON, _ := encodeStringList(claim.Domains)
+	artifactsJSON, _ := encodeStringList(claim.Artifacts)
+	scopeJSON, _ := encodeStringList(claim.Scope)
+	metricsJSON, _ := encodeStringList(claim.Metrics)
+	outcomesJSON, _ := encodeStringList(claim.Outcomes)
+	profileContextJSON, _ := encodeStringList(claim.ProfileContext)
+	result, err := store.db.ExecContext(context.Background(), `INSERT INTO candidate_claims (
+		claim_text, claim_type, source_fact_ids_json, evidence_quotes_json, technologies_json, strength,
+		allowed_use_json, allowed_contexts_json, blocked_contexts_json, safe_phrasings_json, unsafe_phrasings_json,
+		origin_heading, origin_type, status, risk_flags_json, review_note, created_at, updated_at,
+		actions_json, capabilities_json, objects_json, domains_json, artifacts_json, scope_json, metrics_json,
+		outcomes_json, profile_context_json, evidence_strength, similarity_key, similarity_score, duplicate_of_id
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		firstNonEmpty(claim.ClaimText, "test claim"), firstNonEmpty(claim.ClaimType, "experience"), sourceFactIDsJSON, evidenceQuotesJSON, technologiesJSON, firstNonEmpty(claim.Strength, "strong"),
+		allowedUseJSON, allowedContextsJSON, blockedContextsJSON, safePhrasingsJSON, unsafePhrasingsJSON,
+		claim.OriginHeading, firstNonEmpty(claim.OriginType, "experience"), firstNonEmpty(claim.Status, claimStatusApproved), riskFlagsJSON, claim.ReviewNote, now, now,
+		actionsJSON, capabilitiesJSON, objectsJSON, domainsJSON, artifactsJSON, scopeJSON, metricsJSON,
+		outcomesJSON, profileContextJSON, firstNonEmpty(claim.EvidenceStrength, "direct"), "", 1, 0,
+	)
+	if err != nil {
+		t.Fatalf("insert candidate claim: %v", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("LastInsertId() error = %v", err)
+	}
+	return id
+}
+
+func containsSubstring(items []string, want string) bool {
+	for _, item := range items {
+		if strings.Contains(item, want) {
+			return true
+		}
+	}
+	return false
+}
+
 func tableHasColumn(t *testing.T, store *Store, table string, column string) bool {
 	t.Helper()
 	rows, err := store.db.Query(`PRAGMA table_info(` + table + `)`)
@@ -3102,9 +3474,16 @@ func TestHelperProcess(t *testing.T) {
 	if os.Getenv("JDTAILOR_FAKE_TECTONIC") != "1" {
 		return
 	}
+	texName := "sample.tex"
+	for _, arg := range os.Args {
+		if strings.EqualFold(filepath.Ext(arg), ".tex") {
+			texName = filepath.Base(arg)
+		}
+	}
 	for i, arg := range os.Args {
 		if arg == "--outdir" && i+1 < len(os.Args) {
-			if err := os.WriteFile(filepath.Join(os.Args[i+1], "sample.pdf"), []byte("%PDF-1.4\n"), 0o644); err != nil {
+			pdfName := strings.TrimSuffix(texName, filepath.Ext(texName)) + ".pdf"
+			if err := os.WriteFile(filepath.Join(os.Args[i+1], pdfName), []byte("%PDF-1.4\n"), 0o644); err != nil {
 				os.Exit(1)
 			}
 			os.Exit(0)

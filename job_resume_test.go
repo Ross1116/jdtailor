@@ -102,14 +102,35 @@ func TestSortResumeEntriesBySourceOrderPreservesTimeline(t *testing.T) {
 }
 
 func TestHumanizeResumeBulletRemovesOverSpecificTone(t *testing.T) {
-	got := humanizeResumeBullet("Containerized backend workflows with Python 3.11 and leveraged integration workflows for deployment.")
-	for _, unwanted := range []string{"Python 3.11", "leveraged", "workflows"} {
+	got := humanizeResumeBullet("Containerized backend workflows with Python 3.11 — leveraged cutting-edge integration workflows for deployment.")
+	for _, unwanted := range []string{"Python 3.11", "leveraged", "workflows", "—", "cutting-edge"} {
 		if strings.Contains(strings.ToLower(got), strings.ToLower(unwanted)) {
 			t.Fatalf("bullet contains %q: %s", unwanted, got)
 		}
 	}
 	if !strings.Contains(got, "Python") || !strings.Contains(got, "backend logic") || !strings.Contains(got, "integrations") {
 		t.Fatalf("bullet not humanized: %s", got)
+	}
+}
+
+func TestNormalizeHumanResumeTextRemovesAIStylePunctuationAndFiller(t *testing.T) {
+	got := polishResumeSummary("Dynamic software engineer — leveraged cutting-edge systems in order to enhance efficiency and drive growth.")
+	for _, unwanted := range []string{"—", "leveraged", "cutting-edge", "in order to", "enhance efficiency", "drive growth", "Dynamic"} {
+		if strings.Contains(strings.ToLower(got), strings.ToLower(unwanted)) {
+			t.Fatalf("summary contains %q: %s", unwanted, got)
+		}
+	}
+}
+
+func TestPolishResumeSummaryRemovesGenericAISummaryShape(t *testing.T) {
+	got := polishResumeSummary("Backend software engineer with 3+ years of experience with a practical focus on experience building and operating customer-facing software in modern engineering. Comfortable working across Docker, Next.js, AWS, Bash, Elastic Stack, Elasticsearch, with experience turning product requirements into reliable backend features.")
+	for _, unwanted := range []string{"practical focus", "comfortable working across", "experience with a practical focus", "with experience turning", "experience building and operating"} {
+		if strings.Contains(strings.ToLower(got), strings.ToLower(unwanted)) {
+			t.Fatalf("summary contains %q: %s", unwanted, got)
+		}
+	}
+	if !strings.Contains(got, "building and operating customer-facing software") {
+		t.Fatalf("summary lost human work focus: %s", got)
 	}
 }
 
