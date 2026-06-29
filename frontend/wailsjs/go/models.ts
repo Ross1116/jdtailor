@@ -1331,11 +1331,11 @@ export namespace main {
 	    pdf_path: string;
 	    validation_result: ValidationResult;
 	    created_at: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new ResumeVersion(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
@@ -1346,7 +1346,7 @@ export namespace main {
 	        this.validation_result = this.convertValues(source["validation_result"], ValidationResult);
 	        this.created_at = source["created_at"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -1368,17 +1368,17 @@ export namespace main {
 	export class RenderResumeVersionPDFResult {
 	    render_result: RenderPDFResult;
 	    version: ResumeVersion;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new RenderResumeVersionPDFResult(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.render_result = this.convertValues(source["render_result"], RenderPDFResult);
 	        this.version = this.convertValues(source["version"], ResumeVersion);
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -1834,3 +1834,4 @@ export namespace main {
 	}
 
 }
+
