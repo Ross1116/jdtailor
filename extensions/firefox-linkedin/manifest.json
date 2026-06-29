@@ -3,6 +3,12 @@
   "name": "JD Tailor LinkedIn Import",
   "version": "0.1.0",
   "description": "Imports the visible LinkedIn job description into JD Tailor.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "linkedin-import@jdtailor.local",
+      "strict_min_version": "109.0"
+    }
+  },
   "permissions": [
     "activeTab",
     "http://127.0.0.1:38616/*",

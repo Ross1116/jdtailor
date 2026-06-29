@@ -1,21 +1,46 @@
 const button = document.getElementById('import');
 const statusEl = document.getElementById('status');
+const extensionAPI = typeof browser !== 'undefined' ? browser : (typeof chrome !== 'undefined' ? chrome : null);
 
 function setStatus(message) {
   statusEl.textContent = message;
 }
 
 async function extractFromTab(tabID) {
-  await browser.tabs.executeScript(tabID, {file: 'content.js'});
-  const results = await browser.tabs.executeScript(tabID, {code: 'window.__jdTailorExtractLinkedInJob ? window.__jdTailorExtractLinkedInJob() : {error: "Extractor did not load."}'});
+  await executeScript(tabID, {file: 'content.js'});
+  const results = await executeScript(tabID, {code: 'window.__jdTailorExtractLinkedInJob ? window.__jdTailorExtractLinkedInJob() : {error: "Extractor did not load."}'});
   return results?.[0];
+}
+
+function queryTabs(queryInfo) {
+  if (!extensionAPI) return Promise.reject(new Error('Browser extension API is unavailable.'));
+  if (typeof browser !== 'undefined') return extensionAPI.tabs.query(queryInfo);
+  return new Promise((resolve, reject) => {
+    extensionAPI.tabs.query(queryInfo, (tabs) => {
+      const error = extensionAPI.runtime.lastError;
+      if (error) reject(new Error(error.message));
+      else resolve(tabs);
+    });
+  });
+}
+
+function executeScript(tabID, details) {
+  if (!extensionAPI) return Promise.reject(new Error('Browser extension API is unavailable.'));
+  if (typeof browser !== 'undefined') return extensionAPI.tabs.executeScript(tabID, details);
+  return new Promise((resolve, reject) => {
+    extensionAPI.tabs.executeScript(tabID, details, (results) => {
+      const error = extensionAPI.runtime.lastError;
+      if (error) reject(new Error(error.message));
+      else resolve(results);
+    });
+  });
 }
 
 button.addEventListener('click', async () => {
   button.disabled = true;
   setStatus('Extracting job...');
   try {
-    const tabs = await browser.tabs.query({active: true, currentWindow: true});
+    const tabs = await queryTabs({active: true, currentWindow: true});
     const tab = tabs[0];
     if (!tab?.id || !tab.url?.includes('linkedin.com/jobs')) {
       throw new Error('Open a LinkedIn job page first.');

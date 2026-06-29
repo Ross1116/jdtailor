@@ -14,3 +14,8 @@ frontend/package.json.md5
 frontend/dist/*
 !frontend/dist/gitkeep
 build/bin/
+
+# Browser extension packages/signing output
+extensions/**/*.zip
+extensions/**/*.xpi
+extensions/**/web-ext-artifacts/

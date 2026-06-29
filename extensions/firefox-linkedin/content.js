@@ -3,6 +3,8 @@ function textFrom(selector) {
   return node?.textContent?.trim() || '';
 }
 
+var __jdTailorExtensionAPI = typeof browser !== 'undefined' ? browser : (typeof chrome !== 'undefined' ? chrome : null);
+
 function firstText(selectors, root = document) {
   for (const selector of selectors) {
     const node = root.querySelector(selector);
@@ -190,9 +192,9 @@ function extractJobDescription() {
 
 window.__jdTailorExtractLinkedInJob = extractJobDescription;
 
-if (!window.__jdTailorLinkedInListenerInstalled) {
+if (__jdTailorExtensionAPI && !window.__jdTailorLinkedInListenerInstalled) {
   window.__jdTailorLinkedInListenerInstalled = true;
-  browser.runtime.onMessage.addListener((message) => {
+  __jdTailorExtensionAPI.runtime.onMessage.addListener((message) => {
     if (message?.type !== 'extract-linkedin-job') return undefined;
     const result = extractJobDescription();
     if (!result.raw_text || result.raw_text.length < 200) {
