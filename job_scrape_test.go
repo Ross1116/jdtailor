@@ -5,14 +5,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
+var allowPrivateJobFetchMu sync.Mutex
+
 func allowPrivateJobFetch(t *testing.T) {
 	t.Helper()
+	allowPrivateJobFetchMu.Lock()
 	old := allowPrivateJobFetchForTests
 	allowPrivateJobFetchForTests = true
-	t.Cleanup(func() { allowPrivateJobFetchForTests = old })
+	t.Cleanup(func() {
+		allowPrivateJobFetchForTests = old
+		allowPrivateJobFetchMu.Unlock()
+	})
 }
 
 func TestFetchJobDescriptionExtractsStaticHTML(t *testing.T) {

@@ -995,7 +995,7 @@ Return at most %d drafts.
 - This resume is for this JD only. Do not reuse generic bullets if a supported JD-specific phrasing would be more targeted.
 - Include 1 to 3 supported ATS terms per bullet when they fit naturally.
 - Prefer exact JD nouns over synonyms when evidence supports them, e.g. if the JD says "REST APIs", use "REST APIs" instead of only "backend services".
-- Do not add unsupported ATS terms. If unsupported, mention the omission in Missing/unsupported.
+- Do not add unsupported ATS terms. If unsupported, mention the omission in the rationale's Missing/unsupported section.
 - Avoid repeating the same ATS keyword across all bullets; distribute coverage across different supported requirements.
 - Priority ATS terms for this origin: %s
 
@@ -2755,7 +2755,7 @@ func atsCoverageBonus(draft parsedBulletDraft, req JobRequirement, claimIDs []in
 	supportedButMissing := 0
 	for _, term := range terms {
 		term = strings.ToLower(strings.TrimSpace(term))
-		if len(term) < 3 {
+		if len(term) < 3 && !knownShortATSTerm(term) {
 			continue
 		}
 		inDraft := containsNormalizedTerm(draftText, term)
@@ -2772,6 +2772,15 @@ func atsCoverageBonus(draft parsedBulletDraft, req JobRequirement, claimIDs []in
 		bonus = 0.16
 	}
 	return bonus
+}
+
+func knownShortATSTerm(term string) bool {
+	switch strings.ToLower(strings.TrimSpace(term)) {
+	case "go", "js", "ts", "c#", "c++":
+		return true
+	default:
+		return false
+	}
 }
 
 func importantRequirementTerms(text string) []string {
@@ -2793,7 +2802,7 @@ func importantRequirementTerms(text string) []string {
 
 func extractKnownTechPhrases(text string) []string {
 	lower := strings.ToLower(text)
-	candidates := []string{"rest api", "rest apis", "microservices", "postgresql", "mysql", "sqlite", "react", "typescript", "javascript", "python", "golang", "go", "docker", "kubernetes", "aws", "ci/cd", "github actions", "openai", "llm", "rag", "embeddings", "fastapi", "gin", "node.js", "redis", "elasticsearch", "oauth", "jwt", "rbac"}
+	candidates := []string{"rest api", "rest apis", "microservices", "postgresql", "mysql", "sqlite", "react", "typescript", "javascript", "python", "golang", "go", "js", "ts", "c#", "c++", "docker", "kubernetes", "aws", "ci/cd", "github actions", "openai", "llm", "rag", "embeddings", "fastapi", "gin", "node.js", "redis", "elasticsearch", "oauth", "jwt", "rbac"}
 	found := []string{}
 	for _, candidate := range candidates {
 		if containsNormalizedTerm(lower, candidate) {
