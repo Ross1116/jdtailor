@@ -156,9 +156,32 @@ func TestNormalizeHumanEditCleansSummaryAndPreservesOrder(t *testing.T) {
 	if got.Experience[0].Company != "Sitespace" || got.Experience[1].Company != "TCS" {
 		t.Fatalf("experience order/details changed: %+v", got.Experience)
 	}
+	for i := range original.Experience {
+		if got.Experience[i].Title != original.Experience[i].Title {
+			t.Fatalf("entry %d title = %q, want %q", i, got.Experience[i].Title, original.Experience[i].Title)
+		}
+		if !equalInt64Slices(got.Experience[i].ClaimIDs, original.Experience[i].ClaimIDs) {
+			t.Fatalf("entry %d claim IDs = %+v, want %+v", i, got.Experience[i].ClaimIDs, original.Experience[i].ClaimIDs)
+		}
+		if !equalInt64Slices(got.Experience[i].BulletIDs, original.Experience[i].BulletIDs) {
+			t.Fatalf("entry %d bullet IDs = %+v, want %+v", i, got.Experience[i].BulletIDs, original.Experience[i].BulletIDs)
+		}
+	}
 	for _, unwanted := range []string{"for Software Engineer - AI/ML", "Recent work includes", "Leveraged", "Python 3.11", "workflows"} {
 		if strings.Contains(strings.ToLower(got.Summary+" "+strings.Join(got.Experience[0].Bullets, " ")+" "+strings.Join(got.Experience[1].Bullets, " ")), strings.ToLower(unwanted)) {
 			t.Fatalf("normalized resume contains %q: %+v", unwanted, got)
 		}
 	}
+}
+
+func equalInt64Slices(a []int64, b []int64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

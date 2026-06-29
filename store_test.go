@@ -1873,6 +1873,16 @@ func TestAutoSelectResumeBulletsPrefersCompleteStoryLanes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replaceJobRequirements() error = %v", err)
 	}
+	frontendRequirementID := int64(0)
+	for _, req := range requirements {
+		if req.RequirementText == "Build frontend dashboards." {
+			frontendRequirementID = req.ID
+			break
+		}
+	}
+	if frontendRequirementID == 0 {
+		t.Fatalf("frontend requirement missing: %+v", requirements)
+	}
 	facts := []factPromptContext{
 		{ID: 1, Status: "approved", FactText: "Built FastAPI and PostgreSQL features for projects and bookings.", SectionHeading: "Acme | Backend Engineer", SectionType: "experience"},
 		{ID: 2, Status: "approved", FactText: "Designed service boundaries and PostgreSQL entities for planning workflows.", SectionHeading: "Acme | Backend Engineer", SectionType: "experience"},
@@ -1892,7 +1902,7 @@ func TestAutoSelectResumeBulletsPrefersCompleteStoryLanes(t *testing.T) {
 		{OriginHeading: "Acme | Backend Engineer", OriginType: "experience", ValueTheme: "technical_design", RequirementID: requirements[0].ID, ClaimIDs: []int64{2}, FactIDs: []int64{2}, DraftText: "Designed service boundaries and PostgreSQL entities for planning workflows, keeping backend ownership clear across projects, assets, and bookings."},
 		{OriginHeading: "Acme | Backend Engineer", OriginType: "experience", ValueTheme: "reliability_quality", RequirementID: requirements[1].ID, ClaimIDs: []int64{3}, FactIDs: []int64{3}, DraftText: "Added production configuration checks for secrets and database mode, reducing deployment risk before customer-facing releases."},
 		{OriginHeading: "Acme | Backend Engineer", OriginType: "experience", ValueTheme: "automation_ai", RequirementID: requirements[2].ID, ClaimIDs: []int64{4}, FactIDs: []int64{4}, DraftText: "Built AI-assisted upload job flows that connected planning context to backend processing without overstating unsupported model ownership."},
-		{OriginHeading: "Acme | Backend Engineer", OriginType: "experience", ValueTheme: "frontend_product", RequirementID: requirements[0].ID, ClaimIDs: []int64{5}, FactIDs: []int64{5}, DraftText: "Shipped dashboard screens for planning and asset booking workflows, giving users clearer product surfaces around backend scheduling logic."},
+		{OriginHeading: "Acme | Backend Engineer", OriginType: "experience", ValueTheme: "frontend_product", RequirementID: frontendRequirementID, ClaimIDs: []int64{5}, FactIDs: []int64{5}, DraftText: "Shipped dashboard screens for planning and asset booking workflows, giving users clearer product surfaces around backend scheduling logic."},
 	}, requirements, facts, claims)
 	if err != nil {
 		t.Fatalf("replaceBulletDrafts() error = %v", err)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -21,6 +22,8 @@ const (
 	jobFetchMaxText   = 50000
 )
 
+var allowPrivateJobFetchForTests bool
+
 type FetchJobDescriptionInput struct {
 	URL string `json:"url"`
 }
@@ -35,12 +38,34 @@ type FetchJobDescriptionResult struct {
 }
 
 func (s *Store) FetchJobDescription(ctx context.Context, input FetchJobDescriptionInput, client *http.Client) (FetchJobDescriptionResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	jobURL, err := normalizeJobFetchURL(input.URL)
 	if err != nil {
 		return FetchJobDescriptionResult{}, err
 	}
+	if err := validateJobFetchDestination(jobURL); err != nil {
+		return FetchJobDescriptionResult{}, err
+	}
 	if client == nil {
 		client = &http.Client{Timeout: 20 * time.Second}
+	} else {
+		copied := *client
+		client = &copied
+	}
+	originalCheckRedirect := client.CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := validateJobFetchDestination(req.URL.String()); err != nil {
+			return err
+		}
+		if originalCheckRedirect != nil {
+			return originalCheckRedirect(req, via)
+		}
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jobURL, nil)
 	if err != nil {
@@ -95,6 +120,43 @@ func (s *Store) FetchJobDescription(ctx context.Context, input FetchJobDescripti
 		title = details.Title
 	}
 	return FetchJobDescriptionResult{Company: company, Title: title, URL: jobURL, RawText: text, Source: extracted.Source, Warnings: extracted.Warnings}, nil
+}
+
+func validateJobFetchDestination(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return errors.New("invalid job posting URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("job posting URL must use http or https")
+	}
+	host := u.Hostname()
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("resolve job posting host: %w", err)
+	}
+	if len(ips) == 0 {
+		return errors.New("job posting host did not resolve")
+	}
+	for _, ip := range ips {
+		if blockedJobFetchIP(ip) && !allowPrivateJobFetchForTests {
+			return fmt.Errorf("job posting host resolves to a blocked address: %s", ip.String())
+		}
+	}
+	return nil
+}
+
+func blockedJobFetchIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0] == 169 && ip4[1] == 254
+	}
+	return false
 }
 
 func normalizeJobFetchURL(raw string) (string, error) {

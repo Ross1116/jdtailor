@@ -11,13 +11,12 @@ import (
 const maxAgenticJDLength = 50000
 
 type JobAgentWorkflowInput struct {
-	Job                 CreateJobDescriptionInput `json:"job"`
-	JobID               int64                     `json:"job_id"`
-	AutoSelectBullets   bool                      `json:"auto_select_bullets"`
-	BuildResume         bool                      `json:"build_resume"`
-	MinSelectedBullets  int                       `json:"min_selected_bullets"`
-	MaxSelectedBullets  int                       `json:"max_selected_bullets"`
-	RequireResumeReview bool                      `json:"require_resume_review"`
+	Job                CreateJobDescriptionInput `json:"job"`
+	JobID              int64                     `json:"job_id"`
+	AutoSelectBullets  bool                      `json:"auto_select_bullets"`
+	BuildResume        bool                      `json:"build_resume"`
+	MinSelectedBullets int                       `json:"min_selected_bullets"`
+	MaxSelectedBullets int                       `json:"max_selected_bullets"`
 }
 
 type JobAgentWorkflowStage struct {
@@ -63,7 +62,30 @@ func (s *Store) RunJobAgentWorkflow(ctx context.Context, input JobAgentWorkflowI
 	var job JobDescription
 	var err error
 	if input.JobID > 0 {
-		job, err = s.UpdateJobDescription(UpdateJobDescriptionInput{ID: input.JobID, Company: input.Job.Company, Title: input.Job.Title, URL: input.Job.URL, RawText: input.Job.RawText})
+		job, err = s.getJobDescription(input.JobID)
+		if err == nil {
+			updated := UpdateJobDescriptionInput{ID: job.ID, Company: job.Company, Title: job.Title, URL: job.URL, RawText: job.RawText}
+			changed := false
+			if strings.TrimSpace(input.Job.Company) != "" {
+				updated.Company = input.Job.Company
+				changed = true
+			}
+			if strings.TrimSpace(input.Job.Title) != "" {
+				updated.Title = input.Job.Title
+				changed = true
+			}
+			if strings.TrimSpace(input.Job.URL) != "" {
+				updated.URL = input.Job.URL
+				changed = true
+			}
+			if strings.TrimSpace(input.Job.RawText) != "" {
+				updated.RawText = input.Job.RawText
+				changed = true
+			}
+			if changed {
+				job, err = s.UpdateJobDescription(updated)
+			}
+		}
 	} else {
 		job, err = s.CreateJobDescription(input.Job)
 	}
@@ -178,7 +200,6 @@ func normalizeJobAgentWorkflowInput(input JobAgentWorkflowInput) JobAgentWorkflo
 	if input.MaxSelectedBullets <= 0 {
 		input.MaxSelectedBullets = 10
 	}
-	input.RequireResumeReview = true
 	return input
 }
 
@@ -211,13 +232,13 @@ func buildTailoredResumeFitAnalysis(jobID int64, requirements []JobRequirement, 
 		terms := requirementResumeTerms(req)
 		matched := 0
 		for _, term := range terms {
-			if strings.Contains(resumeText, term) {
+			if containsNormalizedTerm(resumeText, term) {
 				matched++
 			}
 		}
 		strength := "missing"
 		gap := "high"
-		if len(terms) == 0 || matched >= maxResumeFitInt(1, len(terms)/2) {
+		if len(terms) > 0 && matched >= maxResumeFitInt(1, len(terms)/2) {
 			strength = "strong"
 			gap = "none"
 			if req.Priority == "required" {
@@ -270,14 +291,14 @@ func requirementResumeTerms(req JobRequirement) []string {
 	terms := []string{}
 	for _, kw := range req.Keywords {
 		kw = strings.ToLower(strings.TrimSpace(kw))
-		if len(kw) > 2 {
+		if len(kw) > 1 {
 			terms = append(terms, kw)
 		}
 	}
 	if len(terms) == 0 {
 		for _, word := range strings.Fields(strings.ToLower(req.RequirementText)) {
 			word = strings.Trim(word, ".,;:()[]{}")
-			if len(word) > 4 && !commonResumeFitWord(word) {
+			if len(word) > 1 && !commonResumeFitWord(word) {
 				terms = append(terms, word)
 			}
 		}

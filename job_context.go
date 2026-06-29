@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type JobDescription struct {
@@ -1767,7 +1768,7 @@ func sanitizeParsedJobMatch(match parsedJobMatch, req JobRequirement, fact factP
 	}
 	overlap := []string{}
 	for _, term := range jobMatchTerms(req.RequirementText, req.Keywords) {
-		if strings.Contains(evidenceText, term) {
+		if containsNormalizedTerm(evidenceText, term) {
 			overlap = append(overlap, term)
 		}
 	}
@@ -2198,7 +2199,7 @@ func unsupportedTermsInBullet(text string, claimIDs []int64, claimsByID map[int6
 	lower := strings.ToLower(text)
 	support := strings.ToLower(supportedDraftVocabulary(claimIDs, claimsByID, factIDs, factsByID))
 	for _, term := range []string{"aws", "serverless", "container", "containers", "kubernetes", "health-tech", "healthcare", "medical", "regulated", "compliance", "enterprise", "scalable"} {
-		if strings.Contains(lower, term) && !strings.Contains(support, term) {
+		if containsNormalizedTerm(lower, term) && !containsNormalizedTerm(support, term) {
 			return true
 		}
 	}
@@ -2707,6 +2708,33 @@ func atsKeywordGuidance(requirements []JobRequirement) string {
 	return strings.Join(limitStrings(terms, 18), ", ")
 }
 
+func containsNormalizedTerm(text string, term string) bool {
+	text = strings.ToLower(text)
+	term = strings.ToLower(strings.TrimSpace(term))
+	if term == "" || len(term) > len(text) {
+		return false
+	}
+	for start := 0; start <= len(text)-len(term); {
+		idx := strings.Index(text[start:], term)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		beforeOK := idx == 0 || !isTermChar(rune(text[idx-1]))
+		after := idx + len(term)
+		afterOK := after == len(text) || !isTermChar(rune(text[after]))
+		if beforeOK && afterOK {
+			return true
+		}
+		start = idx + 1
+	}
+	return false
+}
+
+func isTermChar(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
 func atsCoverageBonus(draft parsedBulletDraft, req JobRequirement, claimIDs []int64, claimsByID map[int64]CandidateClaim) float64 {
 	terms := append([]string{}, req.Keywords...)
 	terms = append(terms, importantRequirementTerms(req.RequirementText)...)
@@ -2715,9 +2743,12 @@ func atsCoverageBonus(draft parsedBulletDraft, req JobRequirement, claimIDs []in
 		return 0
 	}
 	draftText := strings.ToLower(draft.DraftText + " " + draft.ValueTheme)
-	evidenceText := strings.ToLower(draft.Rationale)
+	evidenceText := ""
 	for _, claimID := range claimIDs {
-		claim := claimsByID[claimID]
+		claim, ok := claimsByID[claimID]
+		if !ok {
+			continue
+		}
 		evidenceText += " " + strings.Join(claim.Technologies, " ") + " " + strings.Join(claim.Capabilities, " ") + " " + strings.Join(claim.Objects, " ") + " " + strings.Join(claim.Artifacts, " ") + " " + strings.Join(claim.Outcomes, " ")
 	}
 	covered := 0
@@ -2727,8 +2758,8 @@ func atsCoverageBonus(draft parsedBulletDraft, req JobRequirement, claimIDs []in
 		if len(term) < 3 {
 			continue
 		}
-		inDraft := strings.Contains(draftText, term)
-		inEvidence := strings.Contains(evidenceText, term)
+		inDraft := containsNormalizedTerm(draftText, term)
+		inEvidence := containsNormalizedTerm(evidenceText, term)
 		if inDraft && inEvidence {
 			covered++
 		} else if inEvidence {
@@ -2765,7 +2796,7 @@ func extractKnownTechPhrases(text string) []string {
 	candidates := []string{"rest api", "rest apis", "microservices", "postgresql", "mysql", "sqlite", "react", "typescript", "javascript", "python", "golang", "go", "docker", "kubernetes", "aws", "ci/cd", "github actions", "openai", "llm", "rag", "embeddings", "fastapi", "gin", "node.js", "redis", "elasticsearch", "oauth", "jwt", "rbac"}
 	found := []string{}
 	for _, candidate := range candidates {
-		if strings.Contains(lower, candidate) {
+		if containsNormalizedTerm(lower, candidate) {
 			found = append(found, candidate)
 		}
 	}
@@ -3461,7 +3492,7 @@ func fallbackJobMatches(requirements []JobRequirement, facts []factPromptContext
 			}, " "))
 			overlap := []string{}
 			for _, term := range reqTerms {
-				if strings.Contains(factText, term) {
+				if containsNormalizedTerm(factText, term) {
 					overlap = append(overlap, term)
 				}
 			}
@@ -3537,7 +3568,7 @@ func fallbackJobMatchesFromClaims(requirements []JobRequirement, claims []claimP
 			claimText := strings.ToLower(claimSearchText(claim))
 			overlap := []string{}
 			for _, term := range reqTerms {
-				if strings.Contains(claimText, term) {
+				if containsNormalizedTerm(claimText, term) {
 					overlap = append(overlap, term)
 				}
 			}
@@ -3629,7 +3660,7 @@ func jobMatchOverlapAllowed(req JobRequirement, overlap []string, evidenceText s
 	evidence := strings.ToLower(evidenceText)
 	requiredHits := 0
 	for _, term := range required {
-		if containsString(meaningful, term) || strings.Contains(evidence, term) {
+		if containsString(meaningful, term) || containsNormalizedTerm(evidence, term) {
 			requiredHits++
 		}
 	}
@@ -3806,7 +3837,7 @@ func adjacentJobMatchScore(req JobRequirement, overlap []string, evidenceText st
 	evidence := strings.ToLower(evidenceText)
 	requiredHits := 0
 	for _, term := range required {
-		if containsString(meaningful, term) || strings.Contains(evidence, term) {
+		if containsString(meaningful, term) || containsNormalizedTerm(evidence, term) {
 			requiredHits++
 		}
 	}
@@ -3830,7 +3861,7 @@ func jobMatchScore(req JobRequirement, overlap []string, evidenceText string, ba
 		hits := 0
 		evidence := strings.ToLower(evidenceText)
 		for _, term := range required {
-			if containsString(meaningful, term) || strings.Contains(evidence, term) {
+			if containsString(meaningful, term) || containsNormalizedTerm(evidence, term) {
 				hits++
 			}
 		}
@@ -3869,16 +3900,16 @@ func requirementRequiredMatchTerms(req JobRequirement) []string {
 		{"code review", "code reviews", "code quality", "unit testing", "integration testing", "coding standards"},
 		{"firmware", "hardware", "edge"},
 	}
-	if strings.Contains(lower, "specific technologies") ||
-		strings.Contains(lower, "advantageous but not mandatory") ||
-		strings.Contains(lower, "not mandatory") ||
-		strings.Contains(lower, "our stack") {
+	if containsNormalizedTerm(lower, "specific technologies") ||
+		containsNormalizedTerm(lower, "advantageous but not mandatory") ||
+		containsNormalizedTerm(lower, "not mandatory") ||
+		containsNormalizedTerm(lower, "our stack") {
 		groups = append([][]string{{"go", "rust", "c#", ".net", "c++", "iac", "iot", "aws"}}, groups...)
 	}
 	for _, group := range groups {
 		matches := []string{}
 		for _, term := range group {
-			if strings.Contains(lower, term) {
+			if containsNormalizedTerm(lower, term) {
 				matches = append(matches, term)
 			}
 		}
@@ -4043,7 +4074,7 @@ func selectFactsForRequirements(requirements []JobRequirement, facts []factPromp
 		}, " "))
 		score := 0
 		for _, term := range terms {
-			if strings.Contains(text, term) && !weakJobMatchTerm(term) {
+			if containsNormalizedTerm(text, term) && !weakJobMatchTerm(term) {
 				score += 3
 			}
 		}
@@ -4172,7 +4203,7 @@ func selectClaimsForRequirements(requirements []JobRequirement, claims []claimPr
 		text := strings.ToLower(claimSearchText(claim))
 		score := 0
 		for _, term := range terms {
-			if strings.Contains(text, term) && !weakJobMatchTerm(term) {
+			if containsNormalizedTerm(text, term) && !weakJobMatchTerm(term) {
 				score += 3
 			}
 		}

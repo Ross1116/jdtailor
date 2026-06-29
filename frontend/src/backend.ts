@@ -190,7 +190,6 @@ export type JobAgentWorkflowInput = {
   build_resume: boolean;
   min_selected_bullets: number;
   max_selected_bullets: number;
-  require_resume_review: boolean;
 };
 
 export type JobAgentWorkflowStage = {

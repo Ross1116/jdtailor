@@ -83,7 +83,10 @@ type ExtensionJobDraft struct {
 func (a *App) startExtensionBridge() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		setExtensionHeaders(w)
+		if !setExtensionHeaders(w, r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		if r.Method == http.MethodOptions {
 			return
 		}
@@ -94,7 +97,7 @@ func (a *App) startExtensionBridge() {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
 	mux.HandleFunc("/job", a.handleExtensionJob)
-	server := &http.Server{Addr: "127.0.0.1:38616", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Addr: "127.0.0.1:38616", Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
 	a.extensionServer = server
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {
@@ -111,7 +114,10 @@ func (a *App) startExtensionBridge() {
 }
 
 func (a *App) handleExtensionJob(w http.ResponseWriter, r *http.Request) {
-	setExtensionHeaders(w)
+	if !setExtensionHeaders(w, r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	if r.Method == http.MethodOptions {
 		return
 	}
@@ -155,11 +161,24 @@ func (a *App) handleExtensionJob(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
-func setExtensionHeaders(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+func setExtensionHeaders(w http.ResponseWriter, r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if !trustedExtensionOrigin(origin) {
+		return false
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Vary", "Origin")
 	w.Header().Set("Content-Type", "application/json")
+	return true
+}
+
+func trustedExtensionOrigin(origin string) bool {
+	if origin == "" || strings.ContainsAny(origin, " \t\r\n") {
+		return false
+	}
+	return strings.HasPrefix(origin, "moz-extension://") || strings.HasPrefix(origin, "chrome-extension://") || strings.HasPrefix(origin, "safari-web-extension://")
 }
 
 func (a *App) GetPendingExtensionJobDraft() (*ExtensionJobDraft, error) {

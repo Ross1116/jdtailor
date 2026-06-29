@@ -8,7 +8,15 @@ import (
 	"testing"
 )
 
+func allowPrivateJobFetch(t *testing.T) {
+	t.Helper()
+	old := allowPrivateJobFetchForTests
+	allowPrivateJobFetchForTests = true
+	t.Cleanup(func() { allowPrivateJobFetchForTests = old })
+}
+
 func TestFetchJobDescriptionExtractsStaticHTML(t *testing.T) {
+	allowPrivateJobFetch(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write([]byte(`<!doctype html><html><head><title>Senior Go Engineer at Acme Labs</title><meta property="og:site_name" content="Acme Labs"></head><body><nav>Home Jobs Login</nav><main class="job-description"><h1>Senior Go Engineer</h1><p>Company: Acme Labs</p><p>We are hiring a backend engineer to build resilient APIs and distributed services.</p><h2>Responsibilities</h2><ul><li>Design Go services for high-volume customer workflows.</li><li>Collaborate with product teams to ship secure, observable platforms.</li></ul><h2>Requirements</h2><ul><li>5+ years building production backend systems.</li><li>Strong SQL, cloud, and API design experience.</li></ul></main><script>secret tracking noise</script></body></html>`))
@@ -34,6 +42,7 @@ func TestFetchJobDescriptionExtractsStaticHTML(t *testing.T) {
 }
 
 func TestFetchJobDescriptionAcceptsPlainText(t *testing.T) {
+	allowPrivateJobFetch(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte(`Company: Plain Co
@@ -58,6 +67,7 @@ Requirements include Go, SQL, Kubernetes, API design, incident response, and pra
 }
 
 func TestFetchJobDescriptionRejectsNon2xx(t *testing.T) {
+	allowPrivateJobFetch(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", http.StatusForbidden)
 	}))
@@ -70,6 +80,7 @@ func TestFetchJobDescriptionRejectsNon2xx(t *testing.T) {
 }
 
 func TestFetchJobDescriptionRejectsOversizedBody(t *testing.T) {
+	allowPrivateJobFetch(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte(strings.Repeat("a", jobFetchBodyLimit+2)))
@@ -89,6 +100,13 @@ func TestFetchJobDescriptionRejectsInvalidURL(t *testing.T) {
 	}
 }
 
+func TestFetchJobDescriptionRejectsLoopbackDestination(t *testing.T) {
+	_, err := (&Store{}).FetchJobDescription(context.Background(), FetchJobDescriptionInput{URL: "http://127.0.0.1/job"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "blocked address") {
+		t.Fatalf("error = %v, want blocked address", err)
+	}
+}
+
 func TestNormalizeJobFetchURLRewritesLinkedInSearchCurrentJobID(t *testing.T) {
 	got, err := normalizeJobFetchURL("https://www.linkedin.com/jobs/search/?alertAction=viewjobs&currentJobId=4429612922&distance=25&keywords=software%20developer&originToLandingJobPostings=4429612922%2C4430781758")
 	if err != nil {
@@ -101,6 +119,7 @@ func TestNormalizeJobFetchURLRewritesLinkedInSearchCurrentJobID(t *testing.T) {
 }
 
 func TestFetchJobDescriptionRejectsLinkedInLoginGate(t *testing.T) {
+	allowPrivateJobFetch(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(`<!doctype html><html><head><title>LinkedIn Login, Sign in | LinkedIn</title></head><body><main>LinkedIn Login, Sign in | LinkedIn 0 notifications User Agreement Privacy Policy Community Guidelines Cookie Policy Copyright Policy Send Feedback Language LinkedIn Corporation © 2026</main></body></html>`))

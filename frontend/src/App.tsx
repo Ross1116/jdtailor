@@ -666,7 +666,6 @@ const [nh, ns, nst, ne, nprof, nsrc, nsec, nf, ncl, nblk, ncr, nj, na] = results
       build_resume: true,
       min_selected_bullets: 4,
       max_selected_bullets: 10,
-      require_resume_review: true,
     })) as JobAgentWorkflowResult;
     applyJobAgentResult(result);
     await refreshJobsAndVersions();
@@ -951,7 +950,6 @@ async function saveNewJob(event: FormEvent<HTMLFormElement>) {
         build_resume: true,
         min_selected_bullets: 4,
         max_selected_bullets: 10,
-        require_resume_review: true,
       })) as JobAgentWorkflowResult;
       applyJobAgentResult(result);
       setNewJobDraft(emptyJobDraft);

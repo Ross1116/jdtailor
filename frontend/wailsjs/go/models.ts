@@ -726,7 +726,6 @@ export namespace main {
 	    build_resume: boolean;
 	    min_selected_bullets: number;
 	    max_selected_bullets: number;
-	    require_resume_review: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new JobAgentWorkflowInput(source);
@@ -740,7 +739,6 @@ export namespace main {
 	        this.build_resume = source["build_resume"];
 	        this.min_selected_bullets = source["min_selected_bullets"];
 	        this.max_selected_bullets = source["max_selected_bullets"];
-	        this.require_resume_review = source["require_resume_review"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

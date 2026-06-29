@@ -209,7 +209,6 @@ func (s *Store) GenerateResumeJSON(ctx context.Context, input GenerateResumeJSON
 	for _, claim := range claims {
 		claimsByID[claim.ID] = claim
 	}
-
 	// Group experience entries by origin_heading to avoid duplicates
 	experienceByKey := map[string]*ResumeEntry{} // origin_heading -> entry pointer
 	entryOrder := []string{}
@@ -1245,6 +1244,16 @@ func (s *Store) ValidateResumeJSON(resume ResumeJSON, jobID int64) (ValidationRe
 	for _, claim := range claims {
 		claimsByID[claim.ID] = claim
 	}
+	draftClaimIDsByID := map[int64][]int64{}
+	if jobID > 0 {
+		drafts, err := s.ListTailoredBulletDrafts(jobID)
+		if err != nil {
+			return result, err
+		}
+		for _, draft := range drafts {
+			draftClaimIDsByID[draft.ID] = append([]int64{}, draft.ClaimIDs...)
+		}
+	}
 
 	profile, err := s.GetCandidateProfile()
 	if err != nil {
@@ -1260,14 +1269,26 @@ func (s *Store) ValidateResumeJSON(resume ResumeJSON, jobID int64) (ValidationRe
 	bulletValidations := []resumeBulletValidation{}
 	for _, entry := range resume.Experience {
 		allBullets = append(allBullets, entry.Bullets...)
-		for _, bullet := range entry.Bullets {
-			bulletValidations = append(bulletValidations, resumeBulletValidation{text: bullet, claimIDs: entry.ClaimIDs})
+		for i, bullet := range entry.Bullets {
+			claimIDs := entry.ClaimIDs
+			if i < len(entry.BulletIDs) {
+				if scopedClaimIDs, ok := draftClaimIDsByID[entry.BulletIDs[i]]; ok {
+					claimIDs = scopedClaimIDs
+				}
+			}
+			bulletValidations = append(bulletValidations, resumeBulletValidation{text: bullet, claimIDs: claimIDs})
 		}
 	}
 	for _, entry := range resume.Projects {
 		allBullets = append(allBullets, entry.Bullets...)
-		for _, bullet := range entry.Bullets {
-			bulletValidations = append(bulletValidations, resumeBulletValidation{text: bullet, claimIDs: entry.ClaimIDs})
+		for i, bullet := range entry.Bullets {
+			claimIDs := entry.ClaimIDs
+			if i < len(entry.BulletIDs) {
+				if scopedClaimIDs, ok := draftClaimIDsByID[entry.BulletIDs[i]]; ok {
+					claimIDs = scopedClaimIDs
+				}
+			}
+			bulletValidations = append(bulletValidations, resumeBulletValidation{text: bullet, claimIDs: claimIDs})
 		}
 	}
 
@@ -1456,7 +1477,7 @@ func normalizeResumeJSONForHumanEdit(original ResumeJSON, edited ResumeJSON) Res
 			edited.Experience[i].EndDate = original.Experience[i].EndDate
 			edited.Experience[i].ClaimIDs = original.Experience[i].ClaimIDs
 			edited.Experience[i].BulletIDs = original.Experience[i].BulletIDs
-			if len(edited.Experience[i].Bullets) == 0 || len(edited.Experience[i].Bullets) > len(original.Experience[i].Bullets)+1 {
+			if len(edited.Experience[i].Bullets) != len(original.Experience[i].Bullets) {
 				edited.Experience[i].Bullets = original.Experience[i].Bullets
 			} else {
 				for j := range edited.Experience[i].Bullets {
@@ -1477,7 +1498,7 @@ func normalizeResumeJSONForHumanEdit(original ResumeJSON, edited ResumeJSON) Res
 			edited.Projects[i].EndDate = original.Projects[i].EndDate
 			edited.Projects[i].ClaimIDs = original.Projects[i].ClaimIDs
 			edited.Projects[i].BulletIDs = original.Projects[i].BulletIDs
-			if len(edited.Projects[i].Bullets) == 0 || len(edited.Projects[i].Bullets) > len(original.Projects[i].Bullets)+1 {
+			if len(edited.Projects[i].Bullets) != len(original.Projects[i].Bullets) {
 				edited.Projects[i].Bullets = original.Projects[i].Bullets
 			} else {
 				for j := range edited.Projects[i].Bullets {
@@ -1540,7 +1561,7 @@ func supportedBulletEvidence(claimIDs []int64, claimsByID map[int64]CandidateCla
 func linkedSensitiveTerms(lower string) []string {
 	terms := []string{}
 	for _, term := range []string{"aws", "serverless", "container", "containers", "kubernetes", "health-tech", "healthcare", "medical", "compliance", "enterprise", "scalable"} {
-		if strings.Contains(lower, term) {
+		if containsNormalizedTerm(lower, term) {
 			terms = append(terms, term)
 		}
 	}
@@ -1933,8 +1954,19 @@ func (s *Store) UpdateApplicationStatus(id int64, status string) (Application, e
 }
 
 func (s *Store) UpdateApplicationResumeVersion(id int64, resumeVersionID int64) (Application, error) {
+	app, err := s.GetApplication(id)
+	if err != nil {
+		return Application{}, err
+	}
+	version, err := s.GetResumeVersion(resumeVersionID)
+	if err != nil {
+		return Application{}, err
+	}
+	if version.JobID != app.JobID {
+		return Application{}, fmt.Errorf("resume version %d belongs to job %d, not application job %d", resumeVersionID, version.JobID, app.JobID)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.ExecContext(context.Background(), `UPDATE applications SET resume_version_id = ?, updated_at = ? WHERE id = ?`, resumeVersionID, now, id)
+	_, err = s.db.ExecContext(context.Background(), `UPDATE applications SET resume_version_id = ?, updated_at = ? WHERE id = ?`, resumeVersionID, now, id)
 	if err != nil {
 		return Application{}, err
 	}
@@ -2001,10 +2033,10 @@ func normalizeCorrectionLog(c CorrectionLog) CorrectionLog {
 	c.EntityType = firstNonEmpty(strings.TrimSpace(c.EntityType), "resume_bullet")
 	c.FieldPath = strings.TrimSpace(c.FieldPath)
 	c.Section = strings.TrimSpace(c.Section)
-	if c.EntryIndex == 0 && c.FieldPath == "" && c.Section == "" {
+	if c.EntryIndex == 0 && !fieldPathHasIndex(c.FieldPath, "experience", "projects", "education", "skills") {
 		c.EntryIndex = -1
 	}
-	if c.ItemIndex == 0 && c.FieldPath == "" && c.Section == "" {
+	if c.ItemIndex == 0 && !fieldPathHasIndex(c.FieldPath, "bullets", "items") {
 		c.ItemIndex = -1
 	}
 	c.OriginalText = firstNonEmpty(c.OriginalText, c.OriginalBulletText)
@@ -2013,6 +2045,15 @@ func normalizeCorrectionLog(c CorrectionLog) CorrectionLog {
 	c.CorrectedBulletText = firstNonEmpty(c.CorrectedBulletText, c.CorrectedText)
 	c.Reason = strings.TrimSpace(c.Reason)
 	return c
+}
+
+func fieldPathHasIndex(fieldPath string, names ...string) bool {
+	for _, name := range names {
+		if regexp.MustCompile(regexp.QuoteMeta(name) + `\[\d+\]`).MatchString(fieldPath) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeAppStatus(status string) string {

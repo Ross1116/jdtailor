@@ -21,7 +21,8 @@ Current capabilities:
 
 This slice provides the Wails shell, React/Vite/Tailwind console, Go backend
 health checks, repo-local SQLite storage, local logs, and an LLM settings stub.
-Real LLM calls and PDF rendering are deferred.
+Real LLM calls and PDF rendering are implemented in later slices and are now
+available through the configured provider and repo-local Tectonic path.
 
 ## Phase 2 Candidate Context Builder
 

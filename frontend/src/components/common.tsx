@@ -5,7 +5,7 @@ export function CollapsibleSection({label, children, defaultOpen = false}: {labe
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="border-l-2 border-slate-200 pl-3">
-      <button className="flex items-center gap-1 text-xs font-semibold text-slate-700 hover:text-slate-900" onClick={() => setOpen(!open)}>
+      <button type="button" className="flex items-center gap-1 text-xs font-semibold text-slate-700 hover:text-slate-900" onClick={() => setOpen(!open)}>
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         {label}
       </button>
@@ -46,7 +46,7 @@ export function SecondaryButton({label, onClick, icon, disabled, variant}: {labe
     red: 'border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50',
   };
   return (
-    <button onClick={onClick} disabled={disabled} className={`inline-flex items-center justify-center gap-1.5 rounded-xl border bg-white px-3.5 py-2 text-xs font-bold shadow-sm shadow-slate-200/60 transition hover:-translate-y-0.5 hover:shadow-md active:translate-y-0 active:shadow-sm disabled:pointer-events-none disabled:opacity-40 ${variants[variant ?? 'default']}`}>
+    <button type="button" onClick={onClick} disabled={disabled} className={`inline-flex items-center justify-center gap-1.5 rounded-xl border bg-white px-3.5 py-2 text-xs font-bold shadow-sm shadow-slate-200/60 transition hover:-translate-y-0.5 hover:shadow-md active:translate-y-0 active:shadow-sm disabled:pointer-events-none disabled:opacity-40 ${variants[variant ?? 'default']}`}>
       {icon}{label}
     </button>
   );
@@ -70,7 +70,7 @@ export function PipelineButton({label, onClick, tone, disabled}: {label: string;
 
 export function IconButton({label, onClick, children, submit, full, disabled}: {label: string; onClick?: () => void; children?: ReactNode; submit?: boolean; full?: boolean; disabled?: boolean}) {
   return (
-    <button onClick={onClick} disabled={disabled || submit} type={submit ? 'submit' : 'button'}
+    <button onClick={onClick} disabled={disabled} type={submit ? 'submit' : 'button'}
       className={`inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-950 bg-slate-950 px-3.5 py-2 text-xs font-bold text-white shadow-sm shadow-slate-300/80 transition-all hover:-translate-y-0.5 hover:bg-slate-800 hover:shadow-md active:translate-y-0 active:shadow-sm disabled:pointer-events-none disabled:opacity-40 ${full ? 'flex-1 justify-center' : ''}`}>
       {children}{label}
     </button>
