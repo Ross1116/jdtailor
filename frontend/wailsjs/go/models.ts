@@ -379,8 +379,15 @@ export namespace main {
 	    id: number;
 	    application_id: number;
 	    resume_version_id: number;
+	    entity_type: string;
+	    field_path: string;
+	    section: string;
+	    entry_index: number;
+	    item_index: number;
 	    original_bullet_text: string;
 	    corrected_bullet_text: string;
+	    original_text: string;
+	    corrected_text: string;
 	    claim_ids: number[];
 	    reason: string;
 	    created_at: string;
@@ -394,8 +401,15 @@ export namespace main {
 	        this.id = source["id"];
 	        this.application_id = source["application_id"];
 	        this.resume_version_id = source["resume_version_id"];
+	        this.entity_type = source["entity_type"];
+	        this.field_path = source["field_path"];
+	        this.section = source["section"];
+	        this.entry_index = source["entry_index"];
+	        this.item_index = source["item_index"];
 	        this.original_bullet_text = source["original_bullet_text"];
 	        this.corrected_bullet_text = source["corrected_bullet_text"];
+	        this.original_text = source["original_text"];
+	        this.corrected_text = source["corrected_text"];
 	        this.claim_ids = source["claim_ids"];
 	        this.reason = source["reason"];
 	        this.created_at = source["created_at"];
@@ -517,6 +531,30 @@ export namespace main {
 	        this.updated_at = source["updated_at"];
 	    }
 	}
+	export class ExtensionJobDraft {
+	    company: string;
+	    title: string;
+	    url: string;
+	    raw_text: string;
+	    source: string;
+	    warnings: string[];
+	    received_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ExtensionJobDraft(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.company = source["company"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	        this.raw_text = source["raw_text"];
+	        this.source = source["source"];
+	        this.warnings = source["warnings"];
+	        this.received_at = source["received_at"];
+	    }
+	}
 	export class ExtractEvidenceFactsInput {
 	    source_id: number;
 	    section_id: number;
@@ -549,6 +587,40 @@ export namespace main {
 	        this.has_claims = source["has_claims"];
 	        this.all_approved = source["all_approved"];
 	        this.issues = source["issues"];
+	    }
+	}
+	export class FetchJobDescriptionInput {
+	    url: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FetchJobDescriptionInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.url = source["url"];
+	    }
+	}
+	export class FetchJobDescriptionResult {
+	    company: string;
+	    title: string;
+	    url: string;
+	    raw_text: string;
+	    source: string;
+	    warnings: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new FetchJobDescriptionResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.company = source["company"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	        this.raw_text = source["raw_text"];
+	        this.source = source["source"];
+	        this.warnings = source["warnings"];
 	    }
 	}
 	export class FitNeedAnalysis {
@@ -647,111 +719,195 @@ export namespace main {
 	        this.error = source["error"];
 	    }
 	}
-	export class JobAnalysis {
+	export class JobAgentWorkflowInput {
+	    job: CreateJobDescriptionInput;
 	    job_id: number;
-	    company: string;
-	    role_title: string;
+	    auto_select_bullets: boolean;
+	    build_resume: boolean;
+	    min_selected_bullets: number;
+	    max_selected_bullets: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobAgentWorkflowInput(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.job = this.convertValues(source["job"], CreateJobDescriptionInput);
+	        this.job_id = source["job_id"];
+	        this.auto_select_bullets = source["auto_select_bullets"];
+	        this.build_resume = source["build_resume"];
+	        this.min_selected_bullets = source["min_selected_bullets"];
+	        this.max_selected_bullets = source["max_selected_bullets"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ValidationResult {
+	    passed: boolean;
+	    errors: string[];
+	    warnings: string[];
+	    factuality_checks: FactualityCheck[];
+	    style_issues: string[];
+	    immutable_issues: string[];
+	    title_issues: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ValidationResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.passed = source["passed"];
+	        this.errors = source["errors"];
+	        this.warnings = source["warnings"];
+	        this.factuality_checks = this.convertValues(source["factuality_checks"], FactualityCheck);
+	        this.style_issues = source["style_issues"];
+	        this.immutable_issues = source["immutable_issues"];
+	        this.title_issues = source["title_issues"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ResumeEducation {
+	    organization: string;
+	    degree: string;
 	    location: string;
-	    work_arrangement: string;
-	    salary: string;
-	    top_pain_points: string[];
-	    required_skills: string[];
-	    preferred_skills: string[];
-	    responsibilities: string[];
-	    seniority_level: string;
-	    role_archetype: string;
-	    keywords: string[];
-	    risk_flags: string[];
-	    job_poster: string;
-	    company_url: string;
-	    created_at: string;
-	    updated_at: string;
+	    end_date: string;
 	
 	    static createFrom(source: any = {}) {
-	        return new JobAnalysis(source);
+	        return new ResumeEducation(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.job_id = source["job_id"];
-	        this.company = source["company"];
-	        this.role_title = source["role_title"];
+	        this.organization = source["organization"];
+	        this.degree = source["degree"];
 	        this.location = source["location"];
-	        this.work_arrangement = source["work_arrangement"];
-	        this.salary = source["salary"];
-	        this.top_pain_points = source["top_pain_points"];
-	        this.required_skills = source["required_skills"];
-	        this.preferred_skills = source["preferred_skills"];
-	        this.responsibilities = source["responsibilities"];
-	        this.seniority_level = source["seniority_level"];
-	        this.role_archetype = source["role_archetype"];
-	        this.keywords = source["keywords"];
-	        this.risk_flags = source["risk_flags"];
-	        this.job_poster = source["job_poster"];
-	        this.company_url = source["company_url"];
-	        this.created_at = source["created_at"];
-	        this.updated_at = source["updated_at"];
+	        this.end_date = source["end_date"];
 	    }
 	}
-	export class JobDescription {
-	    id: number;
+	export class ResumeEntry {
 	    company: string;
+	    url?: string;
 	    title: string;
-	    url: string;
-	    raw_text: string;
-	    created_at: string;
-	    updated_at: string;
+	    location: string;
+	    start_date: string;
+	    end_date: string;
+	    bullets: string[];
+	    claim_ids: number[];
+	    bullet_ids: number[];
 	
 	    static createFrom(source: any = {}) {
-	        return new JobDescription(source);
+	        return new ResumeEntry(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
 	        this.company = source["company"];
-	        this.title = source["title"];
 	        this.url = source["url"];
-	        this.raw_text = source["raw_text"];
-	        this.created_at = source["created_at"];
-	        this.updated_at = source["updated_at"];
+	        this.title = source["title"];
+	        this.location = source["location"];
+	        this.start_date = source["start_date"];
+	        this.end_date = source["end_date"];
+	        this.bullets = source["bullets"];
+	        this.claim_ids = source["claim_ids"];
+	        this.bullet_ids = source["bullet_ids"];
 	    }
 	}
-	export class JobFactMatch {
-	    id: number;
-	    job_id: number;
-	    requirement_id: number;
-	    fact_id: number;
-	    score: number;
-	    rationale: string;
-	    coverage_status: string;
-	    fact_status: string;
-	    fact_text: string;
-	    evidence_quote: string;
-	    risk_flags: string[];
-	    created_at: string;
-	    updated_at: string;
+	export class ResumeSkill {
+	    category: string;
+	    items: string[];
 	
 	    static createFrom(source: any = {}) {
-	        return new JobFactMatch(source);
+	        return new ResumeSkill(source);
 	    }
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.job_id = source["job_id"];
-	        this.requirement_id = source["requirement_id"];
-	        this.fact_id = source["fact_id"];
-	        this.score = source["score"];
-	        this.rationale = source["rationale"];
-	        this.coverage_status = source["coverage_status"];
-	        this.fact_status = source["fact_status"];
-	        this.fact_text = source["fact_text"];
-	        this.evidence_quote = source["evidence_quote"];
-	        this.risk_flags = source["risk_flags"];
-	        this.created_at = source["created_at"];
-	        this.updated_at = source["updated_at"];
+	        this.category = source["category"];
+	        this.items = source["items"];
 	    }
+	}
+	export class ResumeJSON {
+	    headline: string;
+	    summary: string;
+	    contact_line: string;
+	    skills_line: string;
+	    skills: ResumeSkill[];
+	    experience: ResumeEntry[];
+	    projects: ResumeEntry[];
+	    education: ResumeEducation[];
+	    tex_source: string;
+	    generated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ResumeJSON(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.headline = source["headline"];
+	        this.summary = source["summary"];
+	        this.contact_line = source["contact_line"];
+	        this.skills_line = source["skills_line"];
+	        this.skills = this.convertValues(source["skills"], ResumeSkill);
+	        this.experience = this.convertValues(source["experience"], ResumeEntry);
+	        this.projects = this.convertValues(source["projects"], ResumeEntry);
+	        this.education = this.convertValues(source["education"], ResumeEducation);
+	        this.tex_source = source["tex_source"];
+	        this.generated_at = source["generated_at"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class JobFitAnalysis {
 	    job_id: number;
@@ -799,6 +955,144 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class JobAnalysis {
+	    job_id: number;
+	    company: string;
+	    role_title: string;
+	    location: string;
+	    work_arrangement: string;
+	    salary: string;
+	    top_pain_points: string[];
+	    required_skills: string[];
+	    preferred_skills: string[];
+	    responsibilities: string[];
+	    seniority_level: string;
+	    role_archetype: string;
+	    keywords: string[];
+	    risk_flags: string[];
+	    job_poster: string;
+	    company_url: string;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobAnalysis(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.job_id = source["job_id"];
+	        this.company = source["company"];
+	        this.role_title = source["role_title"];
+	        this.location = source["location"];
+	        this.work_arrangement = source["work_arrangement"];
+	        this.salary = source["salary"];
+	        this.top_pain_points = source["top_pain_points"];
+	        this.required_skills = source["required_skills"];
+	        this.preferred_skills = source["preferred_skills"];
+	        this.responsibilities = source["responsibilities"];
+	        this.seniority_level = source["seniority_level"];
+	        this.role_archetype = source["role_archetype"];
+	        this.keywords = source["keywords"];
+	        this.risk_flags = source["risk_flags"];
+	        this.job_poster = source["job_poster"];
+	        this.company_url = source["company_url"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
+	export class TailoredBulletDraft {
+	    id: number;
+	    job_id: number;
+	    requirement_id: number;
+	    fact_ids: number[];
+	    claim_ids: number[];
+	    origin_heading: string;
+	    origin_type: string;
+	    value_theme: string;
+	    draft_text: string;
+	    rationale: string;
+	    status: string;
+	    risk_flags: string[];
+	    selection_score: number;
+	    resume_value_score: number;
+	    jd_relevance_score: number;
+	    origin_weight: number;
+	    risk_penalty: number;
+	    unsupported_context_penalty: number;
+	    selection_reason: string;
+	    display_order: number;
+	    selected_for_resume: boolean;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TailoredBulletDraft(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.job_id = source["job_id"];
+	        this.requirement_id = source["requirement_id"];
+	        this.fact_ids = source["fact_ids"];
+	        this.claim_ids = source["claim_ids"];
+	        this.origin_heading = source["origin_heading"];
+	        this.origin_type = source["origin_type"];
+	        this.value_theme = source["value_theme"];
+	        this.draft_text = source["draft_text"];
+	        this.rationale = source["rationale"];
+	        this.status = source["status"];
+	        this.risk_flags = source["risk_flags"];
+	        this.selection_score = source["selection_score"];
+	        this.resume_value_score = source["resume_value_score"];
+	        this.jd_relevance_score = source["jd_relevance_score"];
+	        this.origin_weight = source["origin_weight"];
+	        this.risk_penalty = source["risk_penalty"];
+	        this.unsupported_context_penalty = source["unsupported_context_penalty"];
+	        this.selection_reason = source["selection_reason"];
+	        this.display_order = source["display_order"];
+	        this.selected_for_resume = source["selected_for_resume"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
+	export class JobFactMatch {
+	    id: number;
+	    job_id: number;
+	    requirement_id: number;
+	    fact_id: number;
+	    score: number;
+	    rationale: string;
+	    coverage_status: string;
+	    fact_status: string;
+	    fact_text: string;
+	    evidence_quote: string;
+	    risk_flags: string[];
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobFactMatch(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.job_id = source["job_id"];
+	        this.requirement_id = source["requirement_id"];
+	        this.fact_id = source["fact_id"];
+	        this.score = source["score"];
+	        this.rationale = source["rationale"];
+	        this.coverage_status = source["coverage_status"];
+	        this.fact_status = source["fact_status"];
+	        this.fact_text = source["fact_text"];
+	        this.evidence_quote = source["evidence_quote"];
+	        this.risk_flags = source["risk_flags"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
 	export class JobRequirement {
 	    id: number;
 	    job_id: number;
@@ -827,6 +1121,106 @@ export namespace main {
 	        this.updated_at = source["updated_at"];
 	    }
 	}
+	export class JobAgentWorkflowStage {
+	    key: string;
+	    label: string;
+	    status: string;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobAgentWorkflowStage(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.key = source["key"];
+	        this.label = source["label"];
+	        this.status = source["status"];
+	        this.message = source["message"];
+	    }
+	}
+	export class JobDescription {
+	    id: number;
+	    company: string;
+	    title: string;
+	    url: string;
+	    raw_text: string;
+	    created_at: string;
+	    updated_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobDescription(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.company = source["company"];
+	        this.title = source["title"];
+	        this.url = source["url"];
+	        this.raw_text = source["raw_text"];
+	        this.created_at = source["created_at"];
+	        this.updated_at = source["updated_at"];
+	    }
+	}
+	export class JobAgentWorkflowResult {
+	    job: JobDescription;
+	    stages: JobAgentWorkflowStage[];
+	    requirements: JobRequirement[];
+	    matches: JobFactMatch[];
+	    drafts: TailoredBulletDraft[];
+	    analysis: JobAnalysis;
+	    fit: JobFitAnalysis;
+	    strategy: ApplicationStrategy;
+	    resume: ResumeJSON;
+	    validation: ValidationResult;
+	    resume_generated: boolean;
+	    created_at: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new JobAgentWorkflowResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.job = this.convertValues(source["job"], JobDescription);
+	        this.stages = this.convertValues(source["stages"], JobAgentWorkflowStage);
+	        this.requirements = this.convertValues(source["requirements"], JobRequirement);
+	        this.matches = this.convertValues(source["matches"], JobFactMatch);
+	        this.drafts = this.convertValues(source["drafts"], TailoredBulletDraft);
+	        this.analysis = this.convertValues(source["analysis"], JobAnalysis);
+	        this.fit = this.convertValues(source["fit"], JobFitAnalysis);
+	        this.strategy = this.convertValues(source["strategy"], ApplicationStrategy);
+	        this.resume = this.convertValues(source["resume"], ResumeJSON);
+	        this.validation = this.convertValues(source["validation"], ValidationResult);
+	        this.resume_generated = source["resume_generated"];
+	        this.created_at = source["created_at"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
+	
+	
+	
+	
 	export class LLMTestResult {
 	    success: boolean;
 	    provider: string;
@@ -928,6 +1322,80 @@ export namespace main {
 	        this.output_dir = source["output_dir"];
 	        this.error = source["error"];
 	    }
+	}
+	export class ResumeVersion {
+	    id: number;
+	    job_id: number;
+	    resume_json: ResumeJSON;
+	    tex_source: string;
+	    pdf_path: string;
+	    validation_result: ValidationResult;
+	    created_at: string;
+
+	    static createFrom(source: any = {}) {
+	        return new ResumeVersion(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.job_id = source["job_id"];
+	        this.resume_json = this.convertValues(source["resume_json"], ResumeJSON);
+	        this.tex_source = source["tex_source"];
+	        this.pdf_path = source["pdf_path"];
+	        this.validation_result = this.convertValues(source["validation_result"], ValidationResult);
+	        this.created_at = source["created_at"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class RenderResumeVersionPDFResult {
+	    render_result: RenderPDFResult;
+	    version: ResumeVersion;
+
+	    static createFrom(source: any = {}) {
+	        return new RenderResumeVersionPDFResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.render_result = this.convertValues(source["render_result"], RenderPDFResult);
+	        this.version = this.convertValues(source["version"], ResumeVersion);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class ResumeContextClaim {
 	    id: number;
@@ -1066,199 +1534,11 @@ export namespace main {
 	
 	
 	
-	export class ResumeEducation {
-	    organization: string;
-	    degree: string;
-	    location: string;
-	    end_date: string;
 	
-	    static createFrom(source: any = {}) {
-	        return new ResumeEducation(source);
-	    }
 	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.organization = source["organization"];
-	        this.degree = source["degree"];
-	        this.location = source["location"];
-	        this.end_date = source["end_date"];
-	    }
-	}
-	export class ResumeEntry {
-	    company: string;
-	    url?: string;
-	    title: string;
-	    location: string;
-	    start_date: string;
-	    end_date: string;
-	    bullets: string[];
-	    claim_ids: number[];
-	    bullet_ids: number[];
 	
-	    static createFrom(source: any = {}) {
-	        return new ResumeEntry(source);
-	    }
 	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.company = source["company"];
-	        this.url = source["url"];
-	        this.title = source["title"];
-	        this.location = source["location"];
-	        this.start_date = source["start_date"];
-	        this.end_date = source["end_date"];
-	        this.bullets = source["bullets"];
-	        this.claim_ids = source["claim_ids"];
-	        this.bullet_ids = source["bullet_ids"];
-	    }
-	}
-	export class ResumeSkill {
-	    category: string;
-	    items: string[];
 	
-	    static createFrom(source: any = {}) {
-	        return new ResumeSkill(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.category = source["category"];
-	        this.items = source["items"];
-	    }
-	}
-	export class ResumeJSON {
-	    headline: string;
-	    summary: string;
-	    contact_line: string;
-	    skills_line: string;
-	    skills: ResumeSkill[];
-	    experience: ResumeEntry[];
-	    projects: ResumeEntry[];
-	    education: ResumeEducation[];
-	    tex_source: string;
-	    generated_at: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ResumeJSON(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.headline = source["headline"];
-	        this.summary = source["summary"];
-	        this.contact_line = source["contact_line"];
-	        this.skills_line = source["skills_line"];
-	        this.skills = this.convertValues(source["skills"], ResumeSkill);
-	        this.experience = this.convertValues(source["experience"], ResumeEntry);
-	        this.projects = this.convertValues(source["projects"], ResumeEntry);
-	        this.education = this.convertValues(source["education"], ResumeEducation);
-	        this.tex_source = source["tex_source"];
-	        this.generated_at = source["generated_at"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	
-	export class ValidationResult {
-	    passed: boolean;
-	    errors: string[];
-	    warnings: string[];
-	    factuality_checks: FactualityCheck[];
-	    style_issues: string[];
-	    immutable_issues: string[];
-	    title_issues: string[];
-	
-	    static createFrom(source: any = {}) {
-	        return new ValidationResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.passed = source["passed"];
-	        this.errors = source["errors"];
-	        this.warnings = source["warnings"];
-	        this.factuality_checks = this.convertValues(source["factuality_checks"], FactualityCheck);
-	        this.style_issues = source["style_issues"];
-	        this.immutable_issues = source["immutable_issues"];
-	        this.title_issues = source["title_issues"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class ResumeVersion {
-	    id: number;
-	    job_id: number;
-	    resume_json: ResumeJSON;
-	    tex_source: string;
-	    pdf_path: string;
-	    validation_result: ValidationResult;
-	    created_at: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new ResumeVersion(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.job_id = source["job_id"];
-	        this.resume_json = this.convertValues(source["resume_json"], ResumeJSON);
-	        this.tex_source = source["tex_source"];
-	        this.pdf_path = source["pdf_path"];
-	        this.validation_result = this.convertValues(source["validation_result"], ValidationResult);
-	        this.created_at = source["created_at"];
-	    }
-	
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
 	export class SaveAPIKeyInput {
 	    api_key: string;
 	    provider: string;
@@ -1351,62 +1631,7 @@ export namespace main {
 	        this.updated_at = source["updated_at"];
 	    }
 	}
-	export class TailoredBulletDraft {
-	    id: number;
-	    job_id: number;
-	    requirement_id: number;
-	    fact_ids: number[];
-	    claim_ids: number[];
-	    origin_heading: string;
-	    origin_type: string;
-	    value_theme: string;
-	    draft_text: string;
-	    rationale: string;
-	    status: string;
-	    risk_flags: string[];
-	    selection_score: number;
-	    resume_value_score: number;
-	    jd_relevance_score: number;
-	    origin_weight: number;
-	    risk_penalty: number;
-	    unsupported_context_penalty: number;
-	    selection_reason: string;
-	    display_order: number;
-	    selected_for_resume: boolean;
-	    created_at: string;
-	    updated_at: string;
 	
-	    static createFrom(source: any = {}) {
-	        return new TailoredBulletDraft(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.job_id = source["job_id"];
-	        this.requirement_id = source["requirement_id"];
-	        this.fact_ids = source["fact_ids"];
-	        this.claim_ids = source["claim_ids"];
-	        this.origin_heading = source["origin_heading"];
-	        this.origin_type = source["origin_type"];
-	        this.value_theme = source["value_theme"];
-	        this.draft_text = source["draft_text"];
-	        this.rationale = source["rationale"];
-	        this.status = source["status"];
-	        this.risk_flags = source["risk_flags"];
-	        this.selection_score = source["selection_score"];
-	        this.resume_value_score = source["resume_value_score"];
-	        this.jd_relevance_score = source["jd_relevance_score"];
-	        this.origin_weight = source["origin_weight"];
-	        this.risk_penalty = source["risk_penalty"];
-	        this.unsupported_context_penalty = source["unsupported_context_penalty"];
-	        this.selection_reason = source["selection_reason"];
-	        this.display_order = source["display_order"];
-	        this.selected_for_resume = source["selected_for_resume"];
-	        this.created_at = source["created_at"];
-	        this.updated_at = source["updated_at"];
-	    }
-	}
 	export class ToolStatus {
 	    api_key_configured: boolean;
 	    api_key_source: string;
@@ -1609,4 +1834,3 @@ export namespace main {
 	}
 
 }
-

@@ -78,6 +78,10 @@ export function ExtractEvidenceFacts(arg1) {
   return window['go']['main']['App']['ExtractEvidenceFacts'](arg1);
 }
 
+export function FetchJobDescription(arg1) {
+  return window['go']['main']['App']['FetchJobDescription'](arg1);
+}
+
 export function GenerateApplicationStrategy(arg1) {
   return window['go']['main']['App']['GenerateApplicationStrategy'](arg1);
 }
@@ -124,6 +128,10 @@ export function GetHealth() {
 
 export function GetJobAnalysis(arg1) {
   return window['go']['main']['App']['GetJobAnalysis'](arg1);
+}
+
+export function GetPendingExtensionJobDraft() {
+  return window['go']['main']['App']['GetPendingExtensionJobDraft']();
 }
 
 export function GetRecentEvents() {
@@ -234,8 +242,16 @@ export function RenderResumePDF(arg1) {
   return window['go']['main']['App']['RenderResumePDF'](arg1);
 }
 
+export function RenderResumeVersionPDF(arg1) {
+  return window['go']['main']['App']['RenderResumeVersionPDF'](arg1);
+}
+
 export function RenderSamplePDF() {
   return window['go']['main']['App']['RenderSamplePDF']();
+}
+
+export function RunJobAgentWorkflow(arg1) {
+  return window['go']['main']['App']['RunJobAgentWorkflow'](arg1);
 }
 
 export function SaveAPIKey(arg1) {
@@ -272,6 +288,10 @@ export function StopContextAgent(arg1) {
 
 export function TestLLM() {
   return window['go']['main']['App']['TestLLM']();
+}
+
+export function UpdateApplicationResumeVersion(arg1, arg2) {
+  return window['go']['main']['App']['UpdateApplicationResumeVersion'](arg1, arg2);
 }
 
 export function UpdateApplicationStatus(arg1, arg2) {

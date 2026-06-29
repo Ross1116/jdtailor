@@ -640,6 +640,9 @@ func buildApplicationStrategy(job JobDescription, analysis JobAnalysis, fit JobF
 }
 
 func (s *Store) replaceJobAnalysis(analysis JobAnalysis) error {
+	if analysis.JobID <= 0 {
+		return fmt.Errorf("invalid job_id %d for job analysis", analysis.JobID)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	requiredJSON, _ := encodeStringList(analysis.RequiredSkills)
 	preferredJSON, _ := encodeStringList(analysis.PreferredSkills)
@@ -670,6 +673,9 @@ func (s *Store) replaceJobAnalysis(analysis JobAnalysis) error {
 }
 
 func (s *Store) replaceFitAnalysis(fit JobFitAnalysis) error {
+	if fit.JobID <= 0 {
+		return fmt.Errorf("invalid job_id %d for fit analysis", fit.JobID)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	strengthsJSON, _ := encodeStringList(fit.Strengths)
 	gapsJSON, _ := encodeStringList(fit.CriticalGaps)
@@ -688,6 +694,9 @@ func (s *Store) replaceFitAnalysis(fit JobFitAnalysis) error {
 }
 
 func (s *Store) replaceApplicationStrategy(strategy ApplicationStrategy) error {
+	if strategy.JobID <= 0 {
+		return fmt.Errorf("invalid job_id %d for application strategy", strategy.JobID)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	approvedJSON, _ := encodeInt64List(strategy.ApprovedFactIDs)
 	rejectedJSON, _ := encodeInt64List(strategy.RejectedFactIDs)

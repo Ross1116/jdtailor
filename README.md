@@ -6,13 +6,23 @@ Local-first job application workflow tool.
 
 - Phase 1 - Bootstrap: complete
 - Phase 2 - Candidate Context Builder: complete
-- Phase 3 - Resume Core: complete
+- Phase 3 - Resume Core: reliable delivery path in progress
+
+Current capabilities:
+
+- LLM calls use the configured local settings, with OpenRouter as the default provider/model path.
+- PDF rendering uses repo-local Tectonic and final delivery renders saved resume versions.
+- Browser extension import can queue job drafts for review inside the app.
+- Resume versions persist JSON, validation, TeX source, and rendered PDF path.
+- Application tracker links jobs, saved resume versions, PDF state, notes, and statuses.
+- Correction logging records summary, skills, entry, and bullet edits against applications.
 
 ## Phase 1 Bootstrap
 
 This slice provides the Wails shell, React/Vite/Tailwind console, Go backend
 health checks, repo-local SQLite storage, local logs, and an LLM settings stub.
-Real LLM calls and PDF rendering are deferred.
+Real LLM calls and PDF rendering are implemented in later slices and are now
+available through the configured provider and repo-local Tectonic path.
 
 ## Phase 2 Candidate Context Builder
 

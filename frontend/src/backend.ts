@@ -6,6 +6,7 @@ import {
   CreateCandidateSource as WailsCreateCandidateSource,
   CreateBlockedClaim as WailsCreateBlockedClaim,
   CreateJobDescription as WailsCreateJobDescription,
+  FetchJobDescription as WailsFetchJobDescription,
   DeleteCandidateSource as WailsDeleteCandidateSource,
   DeleteAllCandidateClaims as WailsDeleteAllCandidateClaims,
   DeleteAllEvidenceFacts as WailsDeleteAllEvidenceFacts,
@@ -28,6 +29,7 @@ import {
   GetFitAnalysis as WailsGetFitAnalysis,
   GetHealth as WailsGetHealth,
   GetJobAnalysis as WailsGetJobAnalysis,
+  GetPendingExtensionJobDraft as WailsGetPendingExtensionJobDraft,
   GetRecentEvents as WailsGetRecentEvents,
   GetSettings as WailsGetSettings,
   GetToolStatus as WailsGetToolStatus,
@@ -47,6 +49,7 @@ import {
   ListEvidenceFacts as WailsListEvidenceFacts,
   ListSourceSections as WailsListSourceSections,
   ListTailoredBulletDrafts as WailsListTailoredBulletDrafts,
+  OpenFolder as WailsOpenFolder,
   ParseJobDescription as WailsParseJobDescription,
   RenderSamplePDF as WailsRenderSamplePDF,
   SaveAPIKey as WailsSaveAPIKey,
@@ -66,6 +69,7 @@ import {
   GenerateResumeJSON as WailsGenerateResumeJSON,
   ValidateResumeJSON as WailsValidateResumeJSON,
   RenderResumePDF as WailsRenderResumePDF,
+  RenderResumeVersionPDF as WailsRenderResumeVersionPDF,
   SaveResumeVersion as WailsSaveResumeVersion,
   GetResumeVersion as WailsGetResumeVersion,
   ListResumeVersions as WailsListResumeVersions,
@@ -73,6 +77,7 @@ import {
   GetApplication as WailsGetApplication,
   ListApplications as WailsListApplications,
   UpdateApplicationStatus as WailsUpdateApplicationStatus,
+  UpdateApplicationResumeVersion as WailsUpdateApplicationResumeVersion,
   LogCorrection as WailsLogCorrection,
   ListCorrections as WailsListCorrections,
 } from '../wailsjs/go/main/App';
@@ -163,6 +168,50 @@ export type JobDescription = {
   raw_text: string;
   created_at: string;
   updated_at: string;
+};
+
+export type FetchJobDescriptionInput = {url: string};
+
+export type FetchJobDescriptionResult = {
+  company: string;
+  title: string;
+  url: string;
+  raw_text: string;
+  source: string;
+  warnings: string[];
+};
+
+export type ExtensionJobDraft = FetchJobDescriptionResult & {received_at: string};
+
+export type JobAgentWorkflowInput = {
+  job: {company: string; title: string; url: string; raw_text: string};
+  job_id: number;
+  auto_select_bullets: boolean;
+  build_resume: boolean;
+  min_selected_bullets: number;
+  max_selected_bullets: number;
+};
+
+export type JobAgentWorkflowStage = {
+  key: string;
+  label: string;
+  status: string;
+  message: string;
+};
+
+export type JobAgentWorkflowResult = {
+  job: JobDescription;
+  stages: JobAgentWorkflowStage[];
+  requirements: JobRequirement[];
+  matches: JobFactMatch[];
+  drafts: TailoredBulletDraft[];
+  analysis: JobAnalysis;
+  fit: JobFitAnalysis;
+  strategy: ApplicationStrategy;
+  resume: ResumeJSON;
+  validation: ValidationResult;
+  resume_generated: boolean;
+  created_at: string;
 };
 
 export type JobRequirement = {
@@ -516,8 +565,15 @@ export type CorrectionLog = {
   id: number;
   application_id: number;
   resume_version_id: number;
+  entity_type: string;
+  field_path: string;
+  section: string;
+  entry_index: number;
+  item_index: number;
   original_bullet_text: string;
   corrected_bullet_text: string;
+  original_text: string;
+  corrected_text: string;
   claim_ids: number[];
   reason: string;
   created_at: string;
@@ -682,6 +738,13 @@ export async function RenderSamplePDF() {
     pdf_path: 'mock://generated/sample-pdf/sample.pdf',
     error: '',
   };
+}
+
+export async function OpenFolder(path: string) {
+  if (hasWailsBackend()) {
+    return WailsOpenFolder(path);
+  }
+  mockEvents.unshift(mockEvent('info', `mock open folder: ${path}`));
 }
 
 export async function GetRecentEvents() {
@@ -1189,6 +1252,42 @@ export async function CreateJobDescription(input: {company: string; title: strin
   mockJobs = [job, ...mockJobs];
   mockEvents.unshift(mockEvent('info', 'mock job saved'));
   return job;
+}
+
+export async function FetchJobDescription(input: FetchJobDescriptionInput) {
+  if (hasWailsBackend()) {
+    return WailsFetchJobDescription(input);
+  }
+  const url = input.url.trim();
+  const rawText = normalizePastedText(`Company: Example Systems
+Title: Senior Frontend Engineer
+
+Example Systems is hiring a senior frontend engineer to build accessible, high-performance application workflows for customer operations teams.
+
+Responsibilities
+- Build React and TypeScript interfaces that simplify complex job and resume workflows.
+- Collaborate with backend engineers, product, and design to ship reliable features.
+- Improve observability, test coverage, and frontend performance.
+
+Requirements
+- 5+ years building production web applications.
+- Strong TypeScript, React, API integration, testing, and accessibility experience.
+- Clear communication and pragmatic delivery habits.`);
+  return {
+    company: 'Example Systems',
+    title: 'Senior Frontend Engineer',
+    url,
+    raw_text: rawText,
+    source: 'mock',
+    warnings: ['Mock fetch result. Run the Wails app to fetch real posting pages.'],
+  } as FetchJobDescriptionResult;
+}
+
+export async function GetPendingExtensionJobDraft() {
+  if (hasWailsBackend()) {
+    return WailsGetPendingExtensionJobDraft();
+  }
+  return null as ExtensionJobDraft | null;
 }
 
 export async function UpdateJobDescription(input: {id: number; company: string; title: string; url: string; raw_text: string}) {
@@ -2989,6 +3088,40 @@ export async function GenerateResumeJSON(input: GenerateResumeJSONInput) {
   return resume;
 }
 
+export async function RunJobAgentWorkflow(input: JobAgentWorkflowInput) {
+  if (hasWailsBackend()) {
+    return (window as any).go.main.App.RunJobAgentWorkflow(input) as Promise<JobAgentWorkflowResult>;
+  }
+  const saved = (input.job_id > 0
+    ? await UpdateJobDescription({id: input.job_id, ...input.job})
+    : await CreateJobDescription(input.job)) as JobDescription;
+  const requirements = await ParseJobDescription(saved.id) as JobRequirement[];
+  const analysis = await AnalyzeJobDescription(saved.id) as JobAnalysis;
+  const matches = await BuildJobMatchMap(saved.id) as JobFactMatch[];
+  const fit = await GenerateFitAnalysis(saved.id) as JobFitAnalysis;
+  const strategy = await GenerateApplicationStrategy(saved.id) as ApplicationStrategy;
+  let drafts = await GenerateTailoredBulletDrafts(saved.id) as TailoredBulletDraft[];
+  if (input.auto_select_bullets) drafts = await AutoSelectResumeBullets(saved.id) as TailoredBulletDraft[];
+  let resume: ResumeJSON = {contact: {full_name: '', email: '', phone: '', location: '', linkedin: '', github: ''}, headline: '', summary: '', contact_line: '', skills_line: '', skills: [], experience: [], projects: [], education: [], tex_source: '', generated_at: ''};
+  let validation: ValidationResult = {passed: false, errors: [], warnings: [], factuality_checks: [], style_issues: [], immutable_issues: [], title_issues: []};
+  let resume_generated = false;
+  if (input.build_resume) {
+    resume = await GenerateResumeJSON({job_id: saved.id, selected_bullet_ids: drafts.filter((draft) => draft.selected_for_resume).map((draft) => draft.id)}) as ResumeJSON;
+    validation = await ValidateResumeJSON(resume, saved.id) as ValidationResult;
+    resume_generated = true;
+  }
+  return {
+    job: saved, requirements, analysis, matches, fit, strategy, drafts, resume, validation, resume_generated,
+    created_at: now(),
+    stages: [
+      {key: 'intake', label: 'JD intake', status: 'ok', message: 'job saved'},
+      {key: 'parse', label: 'Requirement parser', status: 'ok', message: `${requirements.length} requirements`},
+      {key: 'match', label: 'Evidence matcher', status: 'ok', message: `${matches.length} matches`},
+      {key: 'resume', label: 'Resume assembler', status: resume_generated ? 'ok' : 'skipped', message: resume_generated ? 'resume draft ready' : 'resume skipped'},
+    ],
+  } as JobAgentWorkflowResult;
+}
+
 export async function ValidateResumeJSON(resume: ResumeJSON, jobID: number) {
   if (hasWailsBackend()) {
     return WailsValidateResumeJSON(resume as any, jobID);
@@ -3004,7 +3137,20 @@ export async function RenderResumePDF(resume: ResumeJSON) {
     return WailsRenderResumePDF(resume as any);
   }
   mockEvents.unshift(mockEvent('info', 'mock PDF rendered'));
-  return { success: true, tex_path: 'mock://resume.tex', pdf_path: 'mock://resume.pdf', error: '' };
+  return { success: true, tex_path: 'mock://resume.tex', pdf_path: 'mock://resume.pdf', output_dir: 'mock://', error: '' };
+}
+
+export async function RenderResumeVersionPDF(versionID: number) {
+  if (hasWailsBackend()) {
+    return WailsRenderResumeVersionPDF(versionID);
+  }
+  const version = mockResumeVersions.find((v) => v.id === versionID);
+  if (!version) throw new Error('resume version not found');
+  const render_result = { success: true, tex_path: `mock://resume-version-${versionID}.tex`, pdf_path: `mock://resume-version-${versionID}.pdf`, output_dir: `mock://resume-version-${versionID}`, error: '' };
+  const updated: ResumeVersion = { ...version, tex_source: '% mock tex', pdf_path: render_result.pdf_path };
+  mockResumeVersions = mockResumeVersions.map((v) => v.id === versionID ? updated : v);
+  mockEvents.unshift(mockEvent('info', 'mock resume version PDF rendered'));
+  return { render_result, version: updated };
 }
 
 export async function SaveResumeVersion(input: any) {
@@ -3071,6 +3217,17 @@ export async function UpdateApplicationStatus(id: number, status: string) {
   }
   const timestamp = now();
   mockApplications = mockApplications.map((a) => a.id === id ? { ...a, status, updated_at: timestamp } : a);
+  const app = mockApplications.find((a) => a.id === id);
+  if (!app) throw new Error('application not found');
+  return app;
+}
+
+export async function UpdateApplicationResumeVersion(id: number, resumeVersionID: number) {
+  if (hasWailsBackend()) {
+    return WailsUpdateApplicationResumeVersion(id, resumeVersionID);
+  }
+  const timestamp = now();
+  mockApplications = mockApplications.map((a) => a.id === id ? { ...a, resume_version_id: resumeVersionID, updated_at: timestamp } : a);
   const app = mockApplications.find((a) => a.id === id);
   if (!app) throw new Error('application not found');
   return app;

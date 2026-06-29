@@ -40,6 +40,8 @@ export function DraftCandidateProfileFromSource(arg1:number):Promise<main.Candid
 
 export function ExtractEvidenceFacts(arg1:main.ExtractEvidenceFactsInput):Promise<Array<main.EvidenceFact>>;
 
+export function FetchJobDescription(arg1:main.FetchJobDescriptionInput):Promise<main.FetchJobDescriptionResult>;
+
 export function GenerateApplicationStrategy(arg1:number):Promise<main.ApplicationStrategy>;
 
 export function GenerateCandidateClaims():Promise<Array<main.CandidateClaim>>;
@@ -63,6 +65,8 @@ export function GetFitAnalysis(arg1:number):Promise<main.JobFitAnalysis>;
 export function GetHealth():Promise<main.Health>;
 
 export function GetJobAnalysis(arg1:number):Promise<main.JobAnalysis>;
+
+export function GetPendingExtensionJobDraft():Promise<main.ExtensionJobDraft>;
 
 export function GetRecentEvents():Promise<Array<main.AppEvent>>;
 
@@ -118,7 +122,11 @@ export function ParseJobDescription(arg1:number):Promise<Array<main.JobRequireme
 
 export function RenderResumePDF(arg1:main.ResumeJSON):Promise<main.RenderPDFResult>;
 
+export function RenderResumeVersionPDF(arg1:number):Promise<main.RenderResumeVersionPDFResult>;
+
 export function RenderSamplePDF():Promise<main.RenderPDFResult>;
+
+export function RunJobAgentWorkflow(arg1:main.JobAgentWorkflowInput):Promise<main.JobAgentWorkflowResult>;
 
 export function SaveAPIKey(arg1:main.SaveAPIKeyInput):Promise<main.ToolStatus>;
 
@@ -137,6 +145,8 @@ export function StartContextAgent(arg1:number):Promise<main.ContextAgentRun>;
 export function StopContextAgent(arg1:number):Promise<main.ContextAgentRun>;
 
 export function TestLLM():Promise<main.LLMTestResult>;
+
+export function UpdateApplicationResumeVersion(arg1:number,arg2:number):Promise<main.Application>;
 
 export function UpdateApplicationStatus(arg1:number,arg2:string):Promise<main.Application>;
 

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type JobDescription struct {
@@ -933,10 +934,13 @@ func (s *Store) generateBulletDraftsForOriginAttempt(ctx context.Context, client
 	system := `You are JD Tailor's section-scoped resume bullet drafter. Return strict JSON only.
 Write bullet suggestions for one resume origin only. Never use facts from another origin.`
 
+	atsTerms := atsKeywordGuidance(group.Requirements)
 	resumeValueRules := `- Prefer bullets that show concrete engineering output, technical ownership, system design, production reliability, security, observability, or measurable scope.
 - Prefer real artifacts over generic skills: APIs, backend services, data models, ingestion pipelines, auth systems, tracing, background jobs, schedulers, distributed systems, UI surfaces, packaging systems.
 - Prefer supported outcomes: improved debugging, reduced manual work, reliability, validation, auditability, recovery, processing quality, or delivery breadth.
 - Prefer bullets with clear action + artifact + technical detail + supported outcome/scope.
+- Optimize for ATS only with exact JD terms that are supported by same-origin evidence. Use natural wording, not keyword stuffing.
+- If the JD names a supported tool, architecture pattern, or responsibility, prefer the JD's exact spelling in one relevant bullet.
 - Do not write low-value bullets only to cover missing JD terms.
 - Do not force bullets for soft skills, degree requirements, team culture, collaboration, generic ownership, or domain language unless same-origin evidence directly supports it.
 - If a JD requirement is only weakly supported, do not write a bullet for it unless the underlying evidence is still strong and resume-worthy.`
@@ -984,7 +988,16 @@ Return at most %d drafts.
 - Prefer one bullet per evidence packet; skip packets that do not produce a strong human resume insight.
 - A bullet does not need to perfectly satisfy a high-priority requirement if it is still one of the strongest same-origin resume bullets.
 - Do not create one bullet per requirement. Create only the strongest bullets for this origin.
-- Prefer story diversity over exact JD mirroring: one product/platform bullet, one security/reliability/quality bullet, one automation/frontend/architecture bullet when evidence supports those lanes.
+- Prefer story diversity over exact JD mirroring: one product/platform delivery bullet, one reliability/security/quality bullet, one automation/AI/frontend/product-surface bullet when evidence supports those lanes.
+- Do not spend multiple bullets on backend entity modeling, API surface area, or scheduling logic unless they clearly describe different value lanes.
+
+# ATS optimization
+- This resume is for this JD only. Do not reuse generic bullets if a supported JD-specific phrasing would be more targeted.
+- Include 1 to 3 supported ATS terms per bullet when they fit naturally.
+- Prefer exact JD nouns over synonyms when evidence supports them, e.g. if the JD says "REST APIs", use "REST APIs" instead of only "backend services".
+- Do not add unsupported ATS terms. If unsupported, mention the omission in Missing/unsupported.
+- Avoid repeating the same ATS keyword across all bullets; distribute coverage across different supported requirements.
+- Priority ATS terms for this origin: %s
 
 # Bullet style
 - Start each draft_text with a strong past-tense action verb, no leading hyphen.
@@ -994,7 +1007,8 @@ Return at most %d drafts.
 - Use JD keywords only as prioritization and wording cues; the bullet must be built from candidate claim/fact atoms.
 - Each bullet should make clear what real value was created: reliability, traceability, validation, delivery breadth, reduced manual work, safer access, faster debugging, or another supported outcome.
 - Do not stuff unrelated facts together. If atoms do not naturally support one insight, write a narrower bullet.
-- Do not repeat the same primary technology, artifact, or topic across drafts. If one draft mentions FastAPI/PostgreSQL/backend APIs, other drafts should focus on different evidenced value such as auditability, access control, maintainability, AI workflow, frontend work, or architecture.
+- Do not repeat the same primary technology, artifact, or topic across drafts. If one draft mentions FastAPI/PostgreSQL/backend APIs, other drafts should focus on different evidenced value such as reliability checks, auditability, access control, AI workflow, frontend/product surface, debugging, deployment safety, or architecture tradeoffs.
+- For one role, the draft set should paint the complete picture: what was shipped, how it was made reliable/safe, and what differentiated the work for this JD.
 - Write like a practical engineer, not a marketing page.
 - Avoid inflated resume cliches.
 - Avoid generic tool-list bullets.
@@ -1036,6 +1050,7 @@ Missing/unsupported: mention any important JD detail that was not supported and 
 		group.OriginHeading,
 		group.OriginType,
 		resumeValueRules,
+		atsTerms,
 		firstNonEmpty(styleRules, "Use plain, specific, evidence-backed resume language."),
 		job.Company,
 		job.Title,
@@ -1441,23 +1456,51 @@ func autoSelectCanAddDiverse(draft TailoredBulletDraft, originCounts map[string]
 	key := originKey(draft.OriginHeading, draft.OriginType)
 	count := originCounts[key]
 	typ := normalizeOriginPart(draft.OriginType)
-	if typ == "experience" && count < 3 {
+	if typ == "experience" && count == 0 {
 		return true
 	}
-	if typ == "project" && count < 2 {
+	if typ == "project" && count == 0 {
 		return true
 	}
 	theme := normalizeValueTheme(draft.ValueTheme)
 	if theme == "" || originThemeCounts[key][theme] {
 		return false
 	}
-	if draft.JDRelevanceScore < 0.12 {
+	if themeLaneAlreadyCovered(theme, originThemeCounts[key]) {
 		return false
 	}
-	if originHighReqCounts[key][draft.RequirementID] {
+	if draft.JDRelevanceScore < 0.05 && count > 0 {
 		return false
 	}
 	return true
+}
+
+func themeLaneAlreadyCovered(theme string, covered map[string]bool) bool {
+	lane := valueThemeLane(theme)
+	if lane == "" {
+		return false
+	}
+	for existing := range covered {
+		if valueThemeLane(existing) == lane {
+			return true
+		}
+	}
+	return false
+}
+
+func valueThemeLane(theme string) string {
+	switch normalizeValueTheme(theme) {
+	case "product_platform_delivery", "technical_design", "engineering_delivery":
+		return "core_build"
+	case "reliability_quality", "security_traceability":
+		return "quality_trust"
+	case "automation_ai":
+		return "automation_ai"
+	case "frontend_product":
+		return "product_surface"
+	default:
+		return ""
+	}
 }
 
 func trackSelectionDiversity(draft TailoredBulletDraft, originThemeCounts map[string]map[string]bool, originHighReqCounts map[string]map[int64]bool) {
@@ -1725,7 +1768,7 @@ func sanitizeParsedJobMatch(match parsedJobMatch, req JobRequirement, fact factP
 	}
 	overlap := []string{}
 	for _, term := range jobMatchTerms(req.RequirementText, req.Keywords) {
-		if strings.Contains(evidenceText, term) {
+		if containsNormalizedTerm(evidenceText, term) {
 			overlap = append(overlap, term)
 		}
 	}
@@ -2156,7 +2199,7 @@ func unsupportedTermsInBullet(text string, claimIDs []int64, claimsByID map[int6
 	lower := strings.ToLower(text)
 	support := strings.ToLower(supportedDraftVocabulary(claimIDs, claimsByID, factIDs, factsByID))
 	for _, term := range []string{"aws", "serverless", "container", "containers", "kubernetes", "health-tech", "healthcare", "medical", "regulated", "compliance", "enterprise", "scalable"} {
-		if strings.Contains(lower, term) && !strings.Contains(support, term) {
+		if containsNormalizedTerm(lower, term) && !containsNormalizedTerm(support, term) {
 			return true
 		}
 	}
@@ -2554,8 +2597,12 @@ func draftSelectionScoreDetail(draft parsedBulletDraft, req JobRequirement, clai
 		detail.Final += detail.ResumeValue * 0.45
 	}
 
-	// 2. JD relevance is secondary.
+	// 2. JD relevance is critical for ATS, but only when supported by the draft's evidence.
 	switch req.Priority {
+	case "required":
+		detail.JDRelevance = 0.18
+	case "preferred":
+		detail.JDRelevance = 0.10
 	case "high":
 		detail.JDRelevance = 0.12
 	case "medium":
@@ -2566,6 +2613,7 @@ func draftSelectionScoreDetail(draft parsedBulletDraft, req JobRequirement, clai
 	if req.Category == "must_have" || req.Category == "responsibility" {
 		detail.JDRelevance += 0.03
 	}
+	detail.JDRelevance += atsCoverageBonus(draft, req, claimIDs, claimsByID)
 	detail.Final += detail.JDRelevance
 
 	// 3. Prefer real work experience over projects when the JD asks for production.
@@ -2644,6 +2692,117 @@ func draftSelectionReason(draft parsedBulletDraft, detail draftScoreDetail) stri
 	return strings.Join(parts, "; ")
 }
 
+func atsKeywordGuidance(requirements []JobRequirement) string {
+	terms := []string{}
+	for _, req := range requirements {
+		if req.Priority != "required" && req.Priority != "preferred" {
+			continue
+		}
+		terms = append(terms, req.Keywords...)
+		terms = append(terms, importantRequirementTerms(req.RequirementText)...)
+	}
+	terms = normalizeStringList(terms)
+	if len(terms) == 0 {
+		return "none extracted; prioritize concrete supported nouns from requirements"
+	}
+	return strings.Join(limitStrings(terms, 18), ", ")
+}
+
+func containsNormalizedTerm(text string, term string) bool {
+	text = strings.ToLower(text)
+	term = strings.ToLower(strings.TrimSpace(term))
+	if term == "" || len(term) > len(text) {
+		return false
+	}
+	for start := 0; start <= len(text)-len(term); {
+		idx := strings.Index(text[start:], term)
+		if idx < 0 {
+			return false
+		}
+		idx += start
+		beforeOK := idx == 0 || !isTermChar(rune(text[idx-1]))
+		after := idx + len(term)
+		afterOK := after == len(text) || !isTermChar(rune(text[after]))
+		if beforeOK && afterOK {
+			return true
+		}
+		start = idx + 1
+	}
+	return false
+}
+
+func isTermChar(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
+}
+
+func atsCoverageBonus(draft parsedBulletDraft, req JobRequirement, claimIDs []int64, claimsByID map[int64]CandidateClaim) float64 {
+	terms := append([]string{}, req.Keywords...)
+	terms = append(terms, importantRequirementTerms(req.RequirementText)...)
+	terms = normalizeStringList(terms)
+	if len(terms) == 0 {
+		return 0
+	}
+	draftText := strings.ToLower(draft.DraftText + " " + draft.ValueTheme)
+	evidenceText := ""
+	for _, claimID := range claimIDs {
+		claim, ok := claimsByID[claimID]
+		if !ok {
+			continue
+		}
+		evidenceText += " " + strings.Join(claim.Technologies, " ") + " " + strings.Join(claim.Capabilities, " ") + " " + strings.Join(claim.Objects, " ") + " " + strings.Join(claim.Artifacts, " ") + " " + strings.Join(claim.Outcomes, " ")
+	}
+	covered := 0
+	supportedButMissing := 0
+	for _, term := range terms {
+		term = strings.ToLower(strings.TrimSpace(term))
+		if len(term) < 3 {
+			continue
+		}
+		inDraft := containsNormalizedTerm(draftText, term)
+		inEvidence := containsNormalizedTerm(evidenceText, term)
+		if inDraft && inEvidence {
+			covered++
+		} else if inEvidence {
+			supportedButMissing++
+		}
+	}
+	bonus := float64(covered) * 0.035
+	bonus += float64(supportedButMissing) * 0.012
+	if bonus > 0.16 {
+		bonus = 0.16
+	}
+	return bonus
+}
+
+func importantRequirementTerms(text string) []string {
+	terms := []string{}
+	for _, phrase := range extractKnownTechPhrases(text) {
+		terms = append(terms, phrase)
+	}
+	for _, raw := range strings.Fields(strings.ToLower(text)) {
+		word := strings.Trim(raw, " .,:;()[]{}+-/")
+		if len(word) < 4 || commonResumeFitWord(word) {
+			continue
+		}
+		if strings.HasSuffix(word, "ing") || strings.HasSuffix(word, "ed") || strings.HasSuffix(word, "s") {
+			terms = append(terms, word)
+		}
+	}
+	return terms
+}
+
+func extractKnownTechPhrases(text string) []string {
+	lower := strings.ToLower(text)
+	candidates := []string{"rest api", "rest apis", "microservices", "postgresql", "mysql", "sqlite", "react", "typescript", "javascript", "python", "golang", "go", "docker", "kubernetes", "aws", "ci/cd", "github actions", "openai", "llm", "rag", "embeddings", "fastapi", "gin", "node.js", "redis", "elasticsearch", "oauth", "jwt", "rbac"}
+	found := []string{}
+	for _, candidate := range candidates {
+		if containsNormalizedTerm(lower, candidate) {
+			found = append(found, candidate)
+		}
+	}
+	return found
+}
+
 func looksLikeToolListBullet(text string) bool {
 	lower := strings.ToLower(text)
 
@@ -2706,6 +2865,9 @@ func styleRiskFlags(text string) []string {
 	}
 	if strings.Contains(text, "*") || strings.Contains(text, "•") {
 		flags = append(flags, "style_formatting")
+	}
+	if strings.Contains(text, "—") || strings.Contains(text, "–") {
+		flags = append(flags, "style_ai_punctuation")
 	}
 	words := strings.Fields(text)
 	if len(words) > 34 {
@@ -3330,7 +3492,7 @@ func fallbackJobMatches(requirements []JobRequirement, facts []factPromptContext
 			}, " "))
 			overlap := []string{}
 			for _, term := range reqTerms {
-				if strings.Contains(factText, term) {
+				if containsNormalizedTerm(factText, term) {
 					overlap = append(overlap, term)
 				}
 			}
@@ -3406,7 +3568,7 @@ func fallbackJobMatchesFromClaims(requirements []JobRequirement, claims []claimP
 			claimText := strings.ToLower(claimSearchText(claim))
 			overlap := []string{}
 			for _, term := range reqTerms {
-				if strings.Contains(claimText, term) {
+				if containsNormalizedTerm(claimText, term) {
 					overlap = append(overlap, term)
 				}
 			}
@@ -3498,7 +3660,7 @@ func jobMatchOverlapAllowed(req JobRequirement, overlap []string, evidenceText s
 	evidence := strings.ToLower(evidenceText)
 	requiredHits := 0
 	for _, term := range required {
-		if containsString(meaningful, term) || strings.Contains(evidence, term) {
+		if containsString(meaningful, term) || containsNormalizedTerm(evidence, term) {
 			requiredHits++
 		}
 	}
@@ -3675,7 +3837,7 @@ func adjacentJobMatchScore(req JobRequirement, overlap []string, evidenceText st
 	evidence := strings.ToLower(evidenceText)
 	requiredHits := 0
 	for _, term := range required {
-		if containsString(meaningful, term) || strings.Contains(evidence, term) {
+		if containsString(meaningful, term) || containsNormalizedTerm(evidence, term) {
 			requiredHits++
 		}
 	}
@@ -3699,7 +3861,7 @@ func jobMatchScore(req JobRequirement, overlap []string, evidenceText string, ba
 		hits := 0
 		evidence := strings.ToLower(evidenceText)
 		for _, term := range required {
-			if containsString(meaningful, term) || strings.Contains(evidence, term) {
+			if containsString(meaningful, term) || containsNormalizedTerm(evidence, term) {
 				hits++
 			}
 		}
@@ -3738,16 +3900,16 @@ func requirementRequiredMatchTerms(req JobRequirement) []string {
 		{"code review", "code reviews", "code quality", "unit testing", "integration testing", "coding standards"},
 		{"firmware", "hardware", "edge"},
 	}
-	if strings.Contains(lower, "specific technologies") ||
-		strings.Contains(lower, "advantageous but not mandatory") ||
-		strings.Contains(lower, "not mandatory") ||
-		strings.Contains(lower, "our stack") {
+	if containsNormalizedTerm(lower, "specific technologies") ||
+		containsNormalizedTerm(lower, "advantageous but not mandatory") ||
+		containsNormalizedTerm(lower, "not mandatory") ||
+		containsNormalizedTerm(lower, "our stack") {
 		groups = append([][]string{{"go", "rust", "c#", ".net", "c++", "iac", "iot", "aws"}}, groups...)
 	}
 	for _, group := range groups {
 		matches := []string{}
 		for _, term := range group {
-			if strings.Contains(lower, term) {
+			if containsNormalizedTerm(lower, term) {
 				matches = append(matches, term)
 			}
 		}
@@ -3912,7 +4074,7 @@ func selectFactsForRequirements(requirements []JobRequirement, facts []factPromp
 		}, " "))
 		score := 0
 		for _, term := range terms {
-			if strings.Contains(text, term) && !weakJobMatchTerm(term) {
+			if containsNormalizedTerm(text, term) && !weakJobMatchTerm(term) {
 				score += 3
 			}
 		}
@@ -4041,7 +4203,7 @@ func selectClaimsForRequirements(requirements []JobRequirement, claims []claimPr
 		text := strings.ToLower(claimSearchText(claim))
 		score := 0
 		for _, term := range terms {
-			if strings.Contains(text, term) && !weakJobMatchTerm(term) {
+			if containsNormalizedTerm(text, term) && !weakJobMatchTerm(term) {
 				score += 3
 			}
 		}
@@ -4329,6 +4491,18 @@ func (s *Store) getJobDescription(id int64) (JobDescription, error) {
 		return JobDescription{}, sql.ErrNoRows
 	}
 	return jobs[0], nil
+}
+
+func (s *Store) jobExists(id int64) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(context.Background(), `SELECT 1 FROM job_descriptions WHERE id = ?`, id).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) getTailoredBulletDraft(id int64) (TailoredBulletDraft, error) {
